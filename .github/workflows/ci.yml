@@ -2,8 +2,25 @@ name: CI
 # noop: synchronize trigger (DL-0696)
 
 on:
+  # DELIBERATELY UNFILTERED. This suite runs on EVERY pull request, whatever
+  # branch it targets.
+  #
+  # It carried `branches: [dev, prod]` until DEV-0283. That meant a PR stacked
+  # on another feature branch ran none of these jobs, got only the Cloudflare
+  # Pages previews, and reported itself GREEN with nothing tested. Measured
+  # 2026-08-28: a PR based on dev had 20 check-runs, a PR based on a feature
+  # branch had 6, and the second read as everything that ran passed. Stacking
+  # is the right way to build a change in layers, so the answer is to test the
+  # stack, not to ban it.
+  #
+  # A base filter also skipped the suite when a PR was RETARGETED onto dev
+  # after it was opened, because `edited` is not a default pull_request type.
+  # An unfiltered trigger has neither hole.
+  #
+  # Do not reintroduce a base-branch filter here unless you replace it with a
+  # required check that fails when the suite has not run. A PR that cannot show
+  # a test result must not be able to show a green tick.
   pull_request:
-    branches: [dev, prod]
   push:
     branches: [dev, prod]
   workflow_dispatch:
@@ -20,6 +37,87 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Full history, because the migration ORDER check below compares this branch
+          # against the base branch and a depth-1 checkout has no base to compare against.
+          # It refuses rather than passing when the base is unreachable, so a shallow
+          # checkout here would turn a real gate into a red build, not a silent one.
+          fetch-depth: 0
+
+      - name: Migration version self-test
+        # First, and before the toolchain, deliberately. This needs nothing but the node the
+        # runner already ships, so an install failure cannot silently take the answer with it.
+        # The self-test runs BEFORE the check for the same reason the anon RPC gate does: a
+        # broken comparison must fail as a broken comparison, not as a silent pass over every
+        # migration. One of its cases asserts the gate goes red on a collision and another
+        # asserts it does not go red without one, so both directions are exercised on every run.
+        run: node scripts/check-migration-versions.mjs --selftest
+
+      - name: Migration version uniqueness check
+        # A real gate, no continue-on-error. Two files sharing a version prefix means the
+        # ledger can only ever track one of them and the other is skipped in silence on every
+        # project. The deploy workflow refuses this too, but only on a push and only after the
+        # apply has already run, so on a pull request nothing was looking. It fails hard when
+        # it enumerates zero files: a run that checked nothing is not a run that passed.
+        run: node scripts/check-migration-versions.mjs
+
+      - name: Migration dependency self-test
+        # The parser IS the control, so it is tested here rather than trusted. Runs before the
+        # check itself so a broken comparison fails as a broken comparison, not as a silent
+        # pass over every migration.
+        run: node scripts/check-migration-requires.mjs --selftest
+
+      - name: "Migration dependency check (-- Requires: headers)"
+        # A real gate, no continue-on-error. A migration can declare, on a line of its own,
+        # "-- Requires: <version>", naming a migration version it depends on and does not
+        # itself create. This fails the pull request when the named version has no matching
+        # file in this tree yet -- most often because the prerequisite pull request has not
+        # merged. It says nothing about a dependency nobody declared (OR-T1176): a declared
+        # header enforces what an author states, it does not discover what an author forgot.
+        run: node scripts/check-migration-requires.mjs
+
+      - name: Migration order self-test
+        # Same reasoning as the uniqueness self-test above and for the same reason it runs
+        # first: a broken comparison must fail as a broken comparison rather than as a silent
+        # pass. Its eighteen cases exercise both directions, including the ordinary in-order
+        # file with no marker, which is the path every normal migration takes.
+        run: node scripts/check-migration-order.mjs --selftest
+
+      - name: Migration order check
+        # A real gate, no continue-on-error, and it only has anything to say on a pull
+        # request that adds a migration.
+        #
+        # WHY IT IS HERE AND NOT ONLY IN THE DEPLOY WORKFLOW. supabase-deploy.yml already
+        # refuses an out-of-order migration, and it does it well. It runs on a push to dev
+        # and prod. It never runs on a pull request. So a pull request can be green,
+        # approved and CLEAN while carrying a file that makes the apply job refuse the WHOLE
+        # run the moment it lands: apply-migrations fails, check-pending-migrations fails,
+        # deploy is skipped, and every unrelated change queued behind it stops with them.
+        # On 2026-09-05 dev spent most of the day in that state, and the set of open pull
+        # requests queued to do it again grew from sixteen to twenty six inside one hour
+        # without a single author touching anything, because the bar is the highest applied
+        # version and it rises every time any migration merges. Nothing told any of them.
+        #
+        # The escape hatch is the same OUT-OF-ORDER-OK line the deploy guard reads, so an
+        # author who satisfies this satisfies that one too.
+        #
+        # SCOPED TO base == dev/prod (OR-T2554). Only those two bases ever get a real
+        # apply-migrations run, so they are the only bases this comparison means anything
+        # for. Without this, a housekeeping PR that brings a stale feature branch up to
+        # date with dev (head=dev, base=some-old-branch) compares dev's already-applied
+        # migrations against that old branch's watermark and reports pre-existing,
+        # already-applied migrations as new findings. That failing check-run then attaches
+        # to dev's own tip commit (the PR's head sha), so dev itself reads red afterward
+        # and every other PR with head=dev inherits it. Observed directly: a housekeeping
+        # branch-update PR reported 14 findings this way, none of them a real new
+        # out-of-order migration. (No PR number here on purpose: scripts/pre-publish-scan.sh
+        # flags bare #NNNN references in shipping files as dead PR refs.)
+        if: |
+          github.event_name == 'pull_request' &&
+          contains(fromJSON('["dev", "prod"]'), github.event.pull_request.base.ref)
+        run: |
+          node scripts/check-migration-order.mjs \
+            --base="origin/${{ github.event.pull_request.base.ref }}"
 
       # The project is managed with Bun (bun.lock, bunfig.toml).
       - name: Setup Bun
@@ -49,6 +147,17 @@ jobs:
         # is a declaration rather than a code scan.
         run: node scripts/check-public-auth.mjs
 
+      - name: Auth-marker check
+        # A real gate, no continue-on-error. Closes the gap the check above does not cover:
+        # that check proves the manifest and config.toml agree with EACH OTHER, this one proves
+        # the mode a function DECLARES matches a marker call in the code it actually ships
+        # (requireCallerAuth for a caller-auth mode, no such call for "none"). Pre-existing
+        # non-conforming functions are carried as dated known exceptions inside the script,
+        # tracked by OR-T1039 and OR-T1040, not exempted from this workflow. See the script
+        # header for why this is a marker search and not an analysis of whether the auth is
+        # correct.
+        run: node scripts/check-auth-marker.mjs
+
       - name: Anon RPC grant self-test
         # The parser IS the control, so it is tested here rather than trusted. Runs before the
         # check itself so a broken parser fails as a broken parser, not as a silent pass over
@@ -63,6 +172,24 @@ jobs:
         # the script header for that boundary in full.
         run: node scripts/check-anon-rpc-grants.mjs
 
+      - name: Credential column grant self-test
+        # Same reasoning as the step above: the parser IS the control. This one has more to
+        # get wrong, because the migrations it reads run their GRANT and REVOKE inside DO
+        # blocks as EXECUTE format(...), so a parser that skips dollar quoted bodies reports
+        # green over a file it never read.
+        run: node scripts/check-credential-column-grants.mjs --selftest
+
+      - name: Credential column grant check
+        # A real gate, no continue-on-error. Replays the migrations in order and fails if anon,
+        # authenticated or PUBLIC is left holding any privilege on a server side credential
+        # column of public.platforms or public.apps, whether by a column grant or by a table
+        # wide GRANT that covers every column at once. Two migrations assert this end state
+        # already, but a migration is applied once and never runs again, and nothing in this
+        # workflow replays migrations against a database, so those assertions cannot keep
+        # watching. Source scan only: a grant typed straight into a SQL console never reaches a
+        # migration and is not visible here. See the script header for that boundary in full.
+        run: node scripts/check-credential-column-grants.mjs
+
       - name: Anon ACL snapshot self-test
         # The other half of the same control, and the half that reads a real database rather
         # than our SQL. No credential lives in CI, so the check itself runs against a catalog
@@ -73,6 +200,26 @@ jobs:
         # EXECUTE. Needs nothing but node, so it is unconditional.
         run: node scripts/check-anon-acl-snapshot.mjs --selftest
 
+      - name: Plaintext credential grant self-test
+        # Same principle as the anon RPC self-test above: the parser IS the control, so it runs
+        # before the check itself. This one carries more weight than usual, because the parser
+        # deliberately reads INSIDE DO blocks and EXECUTE format() strings, which is where every
+        # grant in this repository's scoping migrations actually lives. A parser that stopped
+        # doing that would report green over migrations it never read.
+        run: node scripts/check-plaintext-credential-grants.mjs --selftest
+
+      - name: Plaintext credential grant check
+        # A real gate, no continue-on-error. Replays the migrations in order and fails if anon,
+        # authenticated or PUBLIC is left holding any column applicable privilege on
+        # platforms.webhook_secret, platforms.quiltt_api_key, platforms.quiltt_api_key_ciphertext
+        # or apps.client_secret, by a column grant or by a table wide GRANT. This is the standing
+        # assertion the accepted risk on those columns names as its condition: before this, the
+        # only assertions lived inside two migrations, and no job here stands up a Postgres or
+        # applies migrations, so they ran once and never again. Source scan only: a grant typed
+        # straight into a SQL console, or inherited from schema default privileges, is not visible
+        # here. See the script header for that boundary in full.
+        run: node scripts/check-plaintext-credential-grants.mjs
+
       - name: Build
         run: bun run build
 
@@ -80,6 +227,12 @@ jobs:
     name: Typecheck edge functions (Deno)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # Explicit permissions: the PR-comment step below needs pull-requests:
+    # write, which is not implied and would otherwise inherit the repo's
+    # default token scope (possibly read-only).
+    permissions:
+      contents: read
+      pull-requests: write
     # Why this job exists: until 2026-07-26 CI never looked at supabase/functions
     # at all. `bun run lint` carries continue-on-error (see the note on it above)
     # and `bun run build` only builds the Vite frontend, so every one of the 37
@@ -210,6 +363,51 @@ jobs:
             echo "::notice::Error count dropped to ${ERRORS}. Lower DENO_CHECK_BASELINE to ${ERRORS} in .github/workflows/ci.yml in this PR so the ratchet holds the ground you just took."
           fi
 
+      # The only way this job's diagnostic TEXT leaves the runner. gh_checks
+      # (or any pass/fail-only view) cannot show it, and the interactive log
+      # viewer needs a signed-in browser session, so a failure here was
+      # previously undiagnosable by any tool-only seat. deno-check.log was
+      # already written by the step above into RUNNER_TEMP, which is shared
+      # across steps in this job, so no artifact upload/download is needed.
+      - name: Report new type errors as a PR comment
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          PR="${{ github.event.pull_request.number }}"
+          if [ -z "$PR" ] || [ "$PR" = "0" ]; then
+            echo "Not a PR run -- skipping comment"
+            exit 0
+          fi
+          LOG="$RUNNER_TEMP/deno-check.log"
+          if [ -f "$LOG" ]; then
+            BY_CLASS=$(grep -oE 'TS[0-9]+ \[ERROR\]' "$LOG" | sort | uniq -c | sort -rn || true)
+            LINES=$(grep -B1 -A4 '\[ERROR\]' "$LOG" | head -160 || true)
+          else
+            BY_CLASS="(deno-check.log not found -- the job likely failed before the check ran)"
+            LINES=""
+          fi
+          {
+            echo "**CI: Typecheck edge functions (Deno) -- new type errors (run ${{ github.run_id }})**"
+            echo ""
+            echo "By error class:"
+            printf '\`\`\`\n'
+            echo "${BY_CLASS}"
+            printf '\`\`\`\n'
+            echo ""
+            echo "First diagnostics (deno check output only, no credentials or row content):"
+            printf '\`\`\`\n'
+            echo "${LINES}"
+            printf '\`\`\`\n'
+          } > /tmp/pr-body.md
+          cat /tmp/pr-body.md
+          cat /tmp/pr-body.md >> "$GITHUB_STEP_SUMMARY"
+          if ! gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pr-body.md; then
+            echo "::error::gh pr comment was refused. Token scope or API. The diagnostics printed above are the same text that would have been posted."
+            exit 1
+          fi
+
       - name: Upload deno.lock
         if: always()
         uses: actions/upload-artifact@v7
@@ -222,6 +420,24 @@ jobs:
     name: Test edge functions (Deno)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # OR-T1721: a real postgres service container so a test can execute a
+    # SQL statement against a real schema, not just match its shape as a
+    # string. No tool-only seat here holds a Supabase write credential (the
+    # sb_query grant is read-only SELECT and refuses even an EXPLAIN of an
+    # INSERT), so this ephemeral, disposable database is how that gap
+    # closes without needing one. It never touches Supabase dev or prod.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     # Why this job exists: the repo has carried edge-function tests since long
     # before this job, and not one of them has ever run. `deno check` above
     # typechecks supabase/functions but never executes it, vitest's include is
@@ -247,6 +463,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Full history needed so the next step can compute a merge-base
+          # with origin/prod (see below). This job's tree is small, so the
+          # extra clone cost is negligible.
+          fetch-depth: 0
 
       - name: Setup Deno
         uses: denoland/setup-deno@v2
@@ -255,34 +476,63 @@ jobs:
           # edge runtime is deno 2.1.4, so tests run on the runtime that ships.
           deno-version: v2.1.4
 
+      - name: Apply channel_state schema for the OR-T1721 pg execution test
+        # A minimal auth.users table and an auth.uid() stub are enough for
+        # the real migration file's own RLS policy to CREATE (Postgres
+        # resolves the function name at CREATE POLICY time). Nothing in
+        # this job reads through RLS, so the stub only ever needs to exist,
+        # never to return a real caller.
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c 'create schema if not exists auth;' \
+            -c 'create table if not exists auth.users (id uuid primary key);' \
+            -c 'create or replace function auth.uid() returns uuid language sql stable as $$ select null::uuid $$;' \
+            -c "do \$\$ begin if not exists (select from pg_catalog.pg_roles where rolname = 'authenticated') then create role authenticated; end if; end \$\$;"
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f supabase/migrations/20260711120000_channel_state.sql
+
       - name: deno test supabase/functions
         shell: bash
         env:
-          # The baseline is the number of test files actually present on the
-          # branch this job is running against, and it is PER BRANCH because
-          # the two branches genuinely differ.
-          #
-          # MEASURED 2026-08-03 with this job's own find pattern:
-          #   dev  16 files
-          #   prod  9 files
-          #
-          # The value shipped when this guard landed was 3, which was the count
-          # of test-file DIRECTORIES someone eyeballed rather than the count of
-          # files the pattern collects. A baseline of 3 against a real 15 means
-          # twelve test files can disappear and this job still reports green,
-          # which is the exact failure DL-0459 was opened to stop. The guard was
-          # correct; only its number was wrong.
-          #
-          # Why this is an expression and not one number: prod's tree has 9,
-          # so a single hardcoded 15 promoted from dev to prod turns this job
-          # red on prod the moment it lands, on a count that is correct for
-          # prod. Selecting on the branch lets the same file be true on both.
-          #
-          # When you add or remove a test file, change the number for that
-          # branch in the same PR, and say why in the message if it goes down.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '17' }}
+          # OR-T1721: gives index.pg.test.ts a real database to execute
+          # UPSERT_CHANNEL_STATE_SQL against. Unset in any environment
+          # without the postgres service above, in which case that file's
+          # own tests report ignored (a real, honest skip), never a
+          # silent pass.
+          TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: |
           set -euo pipefail
+
+          # The baseline is the number of edge-function test files that
+          # existed in the TREE this branch actually forked from, not a
+          # number keyed on the base branch's NAME.
+          #
+          # OR-T1064: the previous expression was
+          #   (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '21'
+          # It only recognised prod when the base branch was literally named
+          # "prod". A stacked hotfix branch cut from prod (base "hotfix-1",
+          # not "prod") fell through to the dev number and failed on a tree
+          # where the lower count was correct.
+          #
+          # Fix: find the merge-base with origin/prod and count the test
+          # files present IN THAT TREE.
+          #   - PR against dev: the merge-base is wherever dev and prod last
+          #     diverged, so the count there is a safe floor (dev's own
+          #     count today is always >= that historical count).
+          #   - PR whose branch, however many hops removed, forked from
+          #     prod: the merge-base IS that fork point, so the count there
+          #     is prod's real, current count.
+          # No branch name is read anywhere in this step, so no per-PR
+          # manual bump of a constant is needed here again: the number
+          # comes from the tree.
+          git fetch origin prod
+          MERGE_BASE=$(git merge-base HEAD origin/prod)
+          DENO_TEST_FILE_BASELINE=$(git ls-tree -r "$MERGE_BASE" --name-only -- supabase/functions \
+            | grep -cE '(_test\.ts|\.test\.ts)$' || true)
+          echo "Baseline ${DENO_TEST_FILE_BASELINE} test file(s), from merge-base ${MERGE_BASE} with origin/prod"
 
           # Guard: find must not fail silently. A non-zero exit (missing dir,
           # permission error) must not collapse to count=0 and must not read
@@ -321,6 +571,216 @@ jobs:
           echo "Found ${FILE_COUNT} test file(s) (baseline: ${DENO_TEST_FILE_BASELINE})"
           deno test --no-check --allow-all supabase/functions/
 
+  scan-range-sql:
+    name: SQL tests (record_stealth_scan_range merge)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Why this job exists (decision on DL-1855, built as DL-1856):
+    # record_stealth_scan_range is the ONLY writer of stealth_scan_ranges. Its
+    # merge arithmetic decides which block ranges a customer is told they
+    # already hold, and its ownership guard is the cross-tenant write control.
+    # Until this job, nothing in CI executed a line of it. deno-test runs
+    # TypeScript, vitest runs the frontend, and the anon-grant checks read the
+    # migration TEXT without ever running it.
+    #
+    # This runs against a throwaway Postgres service container inside the
+    # runner. It needs no credentials, reaches no network, and cannot touch dev
+    # or prod Supabase.
+    #
+    # The migrations are applied VERBATIM from supabase/migrations. That is the
+    # point: a schema hand-copied into the test directory drifts from what
+    # ships, and then the suite passes against SQL nobody deployed. The price
+    # is the shim in supabase/tests/scan_range/00_bootstrap.sql, whose header
+    # states exactly what this harness does and does not prove. It does NOT
+    # prove row level security and it says so.
+    services:
+      postgres:
+        # Matches the major version the real Supabase projects run (dev
+        # fzwmnzmtqidumdqjdddz reads PostgreSQL 17.6, checked live 2026-09-15,
+        # OR-C1871). A pinned 16-alpine here was a full major version behind:
+        # harmless while every migration this job applied only used syntax
+        # common to both, but a migration matched into this job's set by the
+        # discovery grep below (20260903013000_authenticated_maintenance_privilege_revoke.sql)
+        # revokes the MAINTAIN privilege, which does not exist before
+        # PostgreSQL 17 -- "ERROR: unrecognized privilege type maintain" is
+        # not a bug in that migration, it is this job running the wrong
+        # engine. Bump this again if the real project's major version moves.
+        image: postgres:17-alpine
+        env:
+          # No password appears anywhere in this file. The container listens
+          # only inside the runner and is destroyed with it, so trust auth is
+          # both correct here and avoids committing a credential-shaped string
+          # to a public repo.
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: scanrange
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d scanrange"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: '5432'
+      PGUSER: postgres
+      PGDATABASE: scanrange
+      # Number of assertions the suite is expected to report. Checked, not
+      # assumed: a suite that silently stops halfway through must not hand back
+      # the same green as a full run. Change this in the same PR that adds or
+      # removes an assertion.
+      SCAN_RANGE_ASSERTION_BASELINE: '19'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Prove psql is present and the database is reachable
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            echo "::notice::psql is not on this runner image; installing postgresql-client"
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+          psql --version
+          # A connection failure here must look like a connection failure, not
+          # like an empty test run twenty lines further down.
+          psql -v ON_ERROR_STOP=1 -tAc 'select current_database(), version()'
+
+      - name: Bootstrap the Supabase surface the migrations reach for
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -f supabase/tests/scan_range/00_bootstrap.sql
+
+      - name: Load the scan-range migrations from supabase/migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Discovered, not hardcoded, so a later migration that alters the
+          # function is picked up without anyone remembering to edit this list.
+          # Filename order is chronological because the names are timestamped.
+          #
+          # ONE FILE DELIBERATELY EXCLUDED (OR-C1871, 2026-09-15):
+          # 20260903000000_revoke_anon_unpoliced_table_select.sql names
+          # stealth_scan_ranges and stealth_connections only as two of nine
+          # tables in a whole-schema anon-grant sweep. Unlike its sibling
+          # sweeps (20260902154500, 20260903001500, 20260903013000), it has
+          # no to_regclass guard, and its self-check is not "this table's
+          # privileges are right" but an EXACT SET-EQUALITY check across
+          # every RLS-enabled table in all of public: it raises unless the
+          # anon-SELECT-granted set is precisely those nine names and the
+          # column-level-SELECT set is precisely {apps, platforms}. Passing
+          # that here would mean this shim maintaining a live mirror of the
+          # ENTIRE production privilege surface -- exchange_rates,
+          # quiltt_institutions_cache, wrapped_data_keys, apps, platforms,
+          # every one of them re-created with matching RLS just to satisfy
+          # an assertion about tables this suite does not test -- which is
+          # exactly the "convincing imitation" the harness's own header
+          # forbids, and it would need editing again every time an unrelated
+          # RLS table is added anywhere in the schema. This migration is
+          # written to run only against the complete database (real dev or
+          # prod), where it already ran and where to_regclass would find no
+          # reason to skip anything; it was never written to run in
+          # isolation. Precedent for a named, justified exclusion instead of
+          # silently widening the harness: 20260902154500's own header
+          # excludes webhook_delivery from ITS sweep for the same reason --
+          # "putting an unadjudicated table into an adjudicated sweep is how
+          # a sweep stops being worth trusting."
+          #
+          # A SECOND FILE EXCLUDED FOR A DIFFERENT REASON (OR-C1871, 2026-09-15):
+          # 20260905223000_revoke_anon_execute_vault_meta_delete_guard_fns.sql
+          # matches this grep on a single word in a COMMENT ("Same shape as
+          # 20260822031500 (record_stealth_scan_range): guarded with
+          # to_regprocedure...") -- it is an analogy, not a reference. The
+          # migration itself revokes EXECUTE on two vault-meta delete-guard
+          # trigger functions and touches no table or function this suite
+          # creates. Its own post-condition requires at least one of those
+          # two functions to exist or it raises by design ("neither
+          # vault-meta-delete-guard function exists here, so this migration
+          # revoked nothing"), so it can never pass in this harness and was
+          # never testing scan-range in the first place. A false positive on
+          # the discovery grep, not a partial-schema problem like the first
+          # exclusion.
+          mapfile -t MIGRATIONS < <(grep -lE 'stealth_scan_ranges|record_stealth_scan_range' supabase/migrations/*.sql \
+            | grep -v '20260903000000_revoke_anon_unpoliced_table_select.sql' \
+            | grep -v '20260905223000_revoke_anon_execute_vault_meta_delete_guard_fns.sql' \
+            | sort)
+
+          if [ "${#MIGRATIONS[@]}" -eq 0 ]; then
+            echo "::error::No file under supabase/migrations mentions stealth_scan_ranges or record_stealth_scan_range. This job would then be testing nothing. Fix the path rather than let it report green."
+            exit 1
+          fi
+
+          printf '%s\n' "${MIGRATIONS[@]}" | sed 's/^/  loading: /'
+
+          APPLIED=0
+          for f in "${MIGRATIONS[@]}"; do
+            psql -v ON_ERROR_STOP=1 -q -f "$f"
+            APPLIED=$((APPLIED + 1))
+          done
+
+          echo "Applied ${APPLIED} of ${#MIGRATIONS[@]} migration file(s)"
+          if [ "$APPLIED" -ne "${#MIGRATIONS[@]}" ]; then
+            echo "::error::Applied ${APPLIED} of ${#MIGRATIONS[@]}. The loop finished without applying everything it collected."
+            exit 1
+          fi
+
+      - name: Load the assertion helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -f supabase/tests/scan_range/05_assert_helpers.sql
+
+      # Deliberately BEFORE the real assertions, and it fails the job if it
+      # PASSES. Every way of wiring this suite up wrong (ON_ERROR_STOP unset,
+      # wrong file, wrong database, a helper raising NOTICE where it meant
+      # EXCEPTION) produces exactly the same green tick as a passing run.
+      # Proving the harness can go red is what makes the green mean anything.
+      - name: Self-test the harness (this file MUST fail)
+        shell: bash
+        run: |
+          set -uo pipefail
+          if psql -v ON_ERROR_STOP=1 -f supabase/tests/scan_range/99_selftest_must_fail.sql; then
+            echo "::error::The harness self-test PASSED. It asserts something known to be false, so a pass means the assertions cannot fail and every result below is worthless."
+            exit 1
+          fi
+          echo "Self-test failed as required: the assertion helpers can go red."
+
+      - name: Merge and refusal assertions
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          psql -v ON_ERROR_STOP=1 -f supabase/tests/scan_range/10_merge_assertions.sql \
+            2>&1 | tee "$RUNNER_TEMP/scan-range-assertions.log"
+          RC=${PIPESTATUS[0]}
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::record_stealth_scan_range assertions failed. The failing assertion is named in the log above."
+            exit "$RC"
+          fi
+
+          OK=$(grep -c 'ok  ' "$RUNNER_TEMP/scan-range-assertions.log" || true)
+          echo "Assertions reported OK: ${OK} (baseline: ${SCAN_RANGE_ASSERTION_BASELINE})"
+
+          # A zero exit with fewer assertions than expected is the silent
+          # success this repo keeps finding: the file ran, nothing raised, and
+          # half the cases never executed. Exit code alone cannot see that.
+          if [ "$OK" -lt "$SCAN_RANGE_ASSERTION_BASELINE" ]; then
+            echo "::error::Only ${OK} assertion(s) reported OK, expected at least ${SCAN_RANGE_ASSERTION_BASELINE}. The suite exited clean without running everything it should have."
+            exit 1
+          fi
+
+          {
+            echo "## record_stealth_scan_range SQL suite"
+            echo
+            echo "**${OK} assertion(s) passed** (baseline: ${SCAN_RANGE_ASSERTION_BASELINE})"
+            echo
+            echo "Harness self-test was run first and correctly failed, so these results come from a suite proven able to go red."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   vitest:
     name: Unit tests (vitest)
     runs-on: ubuntu-latest
@@ -351,6 +811,42 @@ jobs:
       - name: Run vitest
         run: npx vitest run
 
+  vitest-api-gateway:
+    name: Unit tests (api-gateway worker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Why this job exists: the root vitest job above collects src/**/*.test.ts
+    # and tests/**/*.test.ts. The gateway is its own package under
+    # workers/api-gateway with its own vitest config and its own test
+    # directory, so NONE of its tests were collected by any job: they ran
+    # nowhere while CI reported green. That includes the tests asserting a
+    # caller cannot forge the trusted client-IP header, which are the only
+    # proof of that behaviour (OR-T1103).
+    #
+    # Runner note: same as the job above. npx vitest run is used rather than
+    # bun test because the suite uses vi.stubGlobal, which bun's runner does
+    # not implement. Dependencies are installed with bun to match the rest of
+    # this workflow. The install is NOT frozen because this package commits no
+    # lockfile; committing one is tracked separately (OR-T1103 follow-up).
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # pinned: floating bun-version made CI non-reproducible (DL-0446).
+          # Update deliberately when bumping Bun.
+          bun-version: 1.3.14
+
+      - name: Install gateway dependencies
+        working-directory: workers/api-gateway
+        run: bun install
+
+      - name: Run gateway vitest
+        working-directory: workers/api-gateway
+        run: npx vitest run --config vitest.config.ts
+
   playwright:
     name: Playwright smoke
     runs-on: ubuntu-latest
@@ -361,9 +857,10 @@ jobs:
     #                    every push (branch dev is the production env of the
     #                    orangerails-dev project; feature branches get previews).
     #   edge functions -> supabase-deploy.yml, on every push to dev and prod.
-    # Migrations are NOT deployed by either: they are applied by hand (the DBA
-    # on dev, two party on prod) or by an explicit dispatch of supabase-deploy
-    # with apply_migrations checked.
+    # Migrations are NOT deployed by either: on dev they are applied
+    # automatically by supabase-deploy.yml's apply-migrations job on every
+    # push to dev; on prod they still require an explicit two party dispatch
+    # of supabase-deploy with apply_migrations checked.
     #
     # A PR run therefore exercises the PR's tests against the currently-deployed
     # site; once the PR merges, the next run exercises the PR's own UI changes
@@ -422,7 +919,22 @@ jobs:
           # dev and prod branches have no Cloudflare branch preview; their
           # builds go to the static host. Only feature-branch PRs get
           # a per-branch preview URL.
-          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$GITHUB_HEAD_REF" != "dev" ] && [ "$GITHUB_HEAD_REF" != "prod" ]; then
+          #
+          # A release/* head belongs with dev and prod here, not with the feature
+          # branches (OR-T0990). A promotion into prod is now opened from a
+          # release branch cut at a sha that is already on dev, rather than from
+          # dev itself, because a promotion whose head is dev loses its approval
+          # every time anything merges into dev. Such a branch is a snapshot of
+          # dev, so the surface to smoke it against is the deployed dev site,
+          # exactly as it was when the head was dev. Sending it down the preview
+          # path instead would aim these tests at a Pages build that may never
+          # have been made, and turn the promotion red for a reason that has
+          # nothing to do with the code.
+          IS_FEATURE_BRANCH=1
+          case "$GITHUB_HEAD_REF" in
+            dev|prod|release/*) IS_FEATURE_BRANCH=0 ;;
+          esac
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] && [ "$IS_FEATURE_BRANCH" = "1" ]; then
             SLUG=$(echo "$GITHUB_HEAD_REF" \
               | tr '[:upper:]' '[:lower:]' \
               | sed 's/[^a-z0-9]/-/g' \
@@ -433,6 +945,68 @@ jobs:
           else
             echo "PLAYWRIGHT_BASE_URL=https://dev.orangerails.com" >> "$GITHUB_ENV"
           fi
+
+      - name: Wait for deployment to be ready
+        # Readiness gate (DL-1014): CF Pages returns an HTML fallback for any
+        # asset URL while a deployment is still initializing. Playwright hitting
+        # the live site before the JS bundle is served causes a MIME mismatch
+        # that fails the smoke suite before any assertion runs.
+        #
+        # Strategy: fetch the HTML page to locate the Vite-generated JS bundle
+        # URL (content-hash filename changes per build, so we cannot hardcode
+        # it), then poll that URL asserting content-type is
+        # application/javascript. An HTML response means CF Pages is not yet
+        # ready. This also handles the case where the HTML page itself is still
+        # the CF Pages "preparing" placeholder -- no <script src> will be found,
+        # and the gate keeps polling.
+        #
+        # 5s interval x 60 attempts = 5 min cap. Always prints attempt count.
+        # Exits non-zero and loud on timeout so failures are never silent.
+        run: |
+          set -euo pipefail
+          BASE_URL="${PLAYWRIGHT_BASE_URL}"
+          INTERVAL=5
+          MAX_ATTEMPTS=60
+          attempt=0
+          last_ct="(none)"
+
+          echo "Readiness gate (DL-1014): polling JS bundle at ${BASE_URL}"
+
+          while [ "$attempt" -lt "$MAX_ATTEMPTS" ]; do
+            attempt=$(( attempt + 1 ))
+            echo "Attempt ${attempt}/${MAX_ATTEMPTS} ..."
+
+            html=$(curl -sf --max-time 10 "${BASE_URL}/" 2>/dev/null || true)
+
+            # Vite emits: <script type="module" crossorigin src="/assets/index-HASH.js">
+            bundle_path=$(printf '%s' "$html" \
+              | grep -oE 'src="(/assets/[^"]+\.js)"' \
+              | head -1 \
+              | sed 's/src="//;s/"//') || true
+
+            if [ -n "$bundle_path" ]; then
+              bundle_url="${BASE_URL}${bundle_path}"
+              ct=$(curl -sI --max-time 10 "${bundle_url}" 2>/dev/null \
+                    | grep -i '^content-type:' | head -1 | tr -d '\r\n' || true)
+              last_ct="${ct:-empty}"
+              echo "  bundle: ${bundle_path}"
+              echo "  content-type: ${last_ct}"
+              if printf '%s' "$ct" | grep -qi 'application/javascript'; then
+                echo "Readiness gate PASSED after ${attempt} attempt(s). content-type: ${ct}"
+                exit 0
+              fi
+              echo "  Not ready yet (expected application/javascript, got '${last_ct}')."
+            else
+              echo "  No JS bundle path found in HTML -- CF Pages may still be initializing."
+            fi
+
+            if [ "$attempt" -lt "$MAX_ATTEMPTS" ]; then sleep "$INTERVAL"; fi
+          done
+
+          echo "::error::Readiness gate TIMED OUT after ${MAX_ATTEMPTS} attempt(s) \
+          ($((MAX_ATTEMPTS * INTERVAL))s). Last content-type: ${last_ct}. \
+          The deployment is not serving the JS bundle. Aborting."
+          exit 1
 
       - name: Run Playwright
         env:
@@ -450,7 +1024,12 @@ jobs:
         # job. Its env-var guard is a beforeAll, so deselecting the suite skips
         # it cleanly. A module-level throw would instead crash THIS job at
         # collection, because Playwright imports every spec to enumerate tests.
-        run: bunx playwright test --forbid-only --grep-invert 'Sparrow host-routing smoke'
+        # 'Connect protocol compatibility' is excluded for the same reason as
+        # the Sparrow suite: it targets a specific artifact, not this job's base
+        # URL. It builds and serves its own bundle in the connect-protocol-compat
+        # job below, and its beforeAll guard throws when CONNECT_COMPAT_BASE_URL
+        # is unset, which is correct there and would be noise here.
+        run: bunx playwright test --forbid-only --grep-invert 'Sparrow host-routing smoke|Connect protocol compatibility'
 
       - name: Upload Playwright report
         if: always()
@@ -662,3 +1241,379 @@ jobs:
           name: playwright-stealth-cursor-report
           path: playwright-report/
           retention-days: 14
+
+  connect-protocol-compat:
+    name: Connect previous-version handshake gate (DL-1809)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Why this job exists: connect.orangerails.com is a hosted surface with no
+    # version pin. On 2026-06-19 an integrator's connect flow hung on the
+    # Stealth Sync screen because the widget had shipped a new handshake and
+    # the integrator was still on the old one. The ruling that followed is that
+    # the deployed widget speaks a SET of versions, current N and previous N-1,
+    # with a 90 day window before N-1 is removed.
+    #
+    # A supported set is a promise. This job is what makes it true of the
+    # artifact rather than true of a document.
+    #
+    # NOT REQUIRED BY THIS CHANGE. Adding this check to the branch ruleset is a
+    # separate, deliberate act, and nothing here touches branch protection.
+    # Until that is done this job reports and does not block, and it must not be
+    # described as enforcing anything. That sentence is here so nobody reads the
+    # job name and assumes the gate is armed.
+    #
+    # Deliberately NOT `needs: lint-and-build`. It builds its own artifact, and
+    # keeping it independent means its answer arrives even when an unrelated
+    # part of the pipeline is red.
+    env:
+      CONNECT_COMPAT_PORT: '4178'
+      CONNECT_COMPAT_VERDICT_PATH: connect-compat-verdict.json
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # pinned: floating bun-version made CI non-reproducible (DL-0446).
+          bun-version: 1.3.14
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps chromium
+
+      # THE BUILT ARTIFACT, not the dev server. The gate has to measure what we
+      # would ship: a production build is tree-shaken and minified, and a dev
+      # server can behave differently from it in exactly the places that matter.
+      - name: Build the artifact
+        run: bun run build
+
+      - name: Serve the built artifact
+        run: |
+          set -uo pipefail
+          bun run preview -- --port "$CONNECT_COMPAT_PORT" --strictPort &
+          for i in $(seq 1 60); do
+            if curl -sf "http://localhost:${CONNECT_COMPAT_PORT}/" -o /dev/null; then
+              echo "preview server up after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          if ! curl -sf "http://localhost:${CONNECT_COMPAT_PORT}/" -o /dev/null; then
+            echo "::error::The preview server did not start within 60s, so the gate has"
+            echo "::error::nothing to measure. This is an UNKNOWN, not a passing protocol check."
+            exit 1
+          fi
+
+      # THE NEGATIVE CONTROL, AND IT RUNS EVERY TIME.
+      #
+      # A check nobody has watched go red is untested, and a one-off
+      # demonstration recorded in a ticket decays the moment somebody edits the
+      # harness. So the gate is run with its assertion set to a code the widget
+      # can never send. The whole machinery runs for real, against the real
+      # artifact, with a real handshake behind it, and the assertion is false.
+      # If that exits ZERO the harness is asserting nothing and every green run
+      # after it would be worthless, so the job fails here.
+      - name: Negative control (the gate must be able to go red)
+        env:
+          CONNECT_COMPAT_BASE_URL: http://localhost:4178
+          CONNECT_COMPAT_NEGATIVE_CONTROL: '1'
+        run: |
+          set -uo pipefail
+          if bunx playwright test tests/e2e/connect-protocol-compat.spec.ts \
+               --forbid-only --retries=0 --reporter=list; then
+            echo "::error::NEGATIVE CONTROL FAILED: the gate exited 0 while asserting something"
+            echo "::error::that cannot be true. It is not measuring the handshake. Every green"
+            echo "::error::run of this job is worthless until this is fixed."
+            exit 1
+          fi
+          echo "Negative control PASS: the gate exited non-zero on a false assertion."
+
+      # The negative control wrote its own verdict file. Remove it so the real
+      # run below cannot inherit a stale verdict if it dies before writing one.
+      # Without this, a crashed real run would be scored on the control's file.
+      - name: Clear the negative control's verdict
+        run: rm -f "$CONNECT_COMPAT_VERDICT_PATH"
+
+      - name: Previous-version handshake gate
+        env:
+          CONNECT_COMPAT_BASE_URL: http://localhost:4178
+        run: |
+          bunx playwright test tests/e2e/connect-protocol-compat.spec.ts \
+            --forbid-only --retries=1 --reporter=list
+
+      # THE VERDICT IS READ FROM A FILE, NOT INFERRED FROM AN EXIT CODE.
+      #
+      # Today exactly one protocol version is live, so the previous-version
+      # comparison has nothing to drive. A Playwright test.skip() there would
+      # render green and keep rendering green for as long as that stays true,
+      # which is the precise failure this gate exists to end. The suite instead
+      # writes what it actually concluded, and this step reports it.
+      #
+      # A MISSING verdict file is a FAILURE. A check that did not report is not
+      # a check that passed.
+      - name: Report the verdict
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ ! -f "$CONNECT_COMPAT_VERDICT_PATH" ]; then
+            echo "::error::The gate wrote no verdict. It did not reach a conclusion, so this is"
+            echo "::error::an UNKNOWN and not a pass. Read the Playwright output above."
+            {
+              echo "## :grey_question: Connect previous-version gate: NO VERDICT"
+              echo
+              echo "The suite wrote no verdict file, so it did not reach a conclusion."
+              echo "This is **not** a report that the previous version is fine."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          cat "$CONNECT_COMPAT_VERDICT_PATH"
+          STATUS=$(jq -r '.status' "$CONNECT_COMPAT_VERDICT_PATH")
+          DETAIL=$(jq -r '.detail' "$CONNECT_COMPAT_VERDICT_PATH")
+          SUPPORTED=$(jq -r '(.supported // []) | join(", ")' "$CONNECT_COMPAT_VERDICT_PATH")
+
+          case "$STATUS" in
+            RAN_PASS)
+              {
+                echo "## :check: Connect previous-version gate: PASS"
+                echo
+                echo "Supported versions advertised by the built artifact: \`${SUPPORTED}\`"
+                echo
+                echo "${DETAIL}"
+              } >> "$GITHUB_STEP_SUMMARY"
+              echo "PASS: ${DETAIL}"
+              ;;
+            SKIPPED)
+              # Loud on purpose. This is the state we are in today and it must
+              # never be mistaken for a pass by anyone reading a green tick.
+              echo "::warning::CONNECT PREVIOUS-VERSION GATE SKIPPED. ${DETAIL} This is NOT a pass: the previous-version handshake was not exercised because there is no previous version yet."
+              {
+                echo "## :warning: Connect previous-version gate: SKIPPED, not passed"
+                echo
+                echo "Supported versions advertised by the built artifact: \`${SUPPORTED}\`"
+                echo
+                echo "${DETAIL}"
+                echo
+                echo "**Nothing about previous-version compatibility was proven by this run.**"
+                echo "The liveness half of the gate DID run: an unsupported version was refused"
+                echo "with a typed terminal error, and the negative control confirmed the gate"
+                echo "can go red. What did not run is the comparison, because there is only one"
+                echo "live version to compare."
+                echo
+                echo "This skip stops being legal the moment the supported set grows. The suite"
+                echo "asserts that, so it will turn red on its own rather than waiting to be"
+                echo "noticed."
+              } >> "$GITHUB_STEP_SUMMARY"
+              ;;
+            *)
+              echo "::error::Connect previous-version gate: ${STATUS}. ${DETAIL}"
+              {
+                echo "## :x: Connect previous-version gate: ${STATUS}"
+                echo
+                echo "${DETAIL}"
+                echo
+                jq -r '(.divergences // []) | .[] | "- " + .' "$CONNECT_COMPAT_VERDICT_PATH"
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+              ;;
+          esac
+
+      - name: Upload gate report and verdict
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: connect-protocol-compat-report
+          path: |
+            playwright-report/
+            connect-compat-verdict.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # OR-T1518. The prod migration apply now classifies what it is about to run and
+  # hard stops on the irreversible class. This job is the proof that the
+  # classifier CAN refuse.
+  #
+  # It is not a formality. A check that has only ever been seen going green is
+  # indistinguishable from a check that cannot go red, and that is the shape of
+  # nearly every silent success defect found in this estate: a filter that
+  # dropped its input, a probe that could not run, a loop over an empty list
+  # exiting 0. So this job runs the real CLI over fixtures on disk and asserts
+  # BOTH directions, because a classifier that refuses everything is just as
+  # useless as one that refuses nothing.
+  #
+  # No Bun, no secrets, no database, no network. A checkout and the Node already
+  # on the runner.
+  # ---------------------------------------------------------------------------
+  migration-reversibility-classifier:
+    name: Migration classifier (proven able to refuse)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Needed to work out whether this pull request touches the classifier,
+          # which decides whether the demonstration is worth commenting.
+          fetch-depth: 0
+
+      - name: Self test, both directions
+        # Asserts every fixture against its expected verdict AND its expected
+        # rule, so a rule that fires for the wrong reason is caught too. Also
+        # asserts that an empty input list is refused rather than read as clean.
+        run: |
+          set -uo pipefail
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
+          {
+            echo "## Migration classifier (OR-T1518)"
+            echo ""
+            echo "### Self test: does the classifier agree with every fixture, both ways"
+            echo ""
+            echo '```'
+          } > "$DEMO"
+          node scripts/classify-migrations.mjs --selftest 2>&1 | tee -a "$DEMO"
+          RC=${PIPESTATUS[0]}
+          {
+            echo '```'
+            echo ""
+            echo "exit code: \`${RC}\` (want 0)"
+          } >> "$DEMO"
+          exit "$RC"
+
+      - name: Refuse a deliberately irreversible fixture, and show the red
+        run: |
+          # `set +e` FIRST, and it is load bearing. A run step's default shell
+          # here is `bash -e`, and `set -uo pipefail` does not clear e. This
+          # step's entire purpose is to run a command that exits non-zero and
+          # then look at the code, so with errexit on it died at the first
+          # capture and reported a red with no reason attached (observed on run
+          # 33637547005). It still fails on purpose, at the end, via FAIL.
+          set +e
+          set -uo pipefail
+          FIX=scripts/fixtures/migration-classifier
+
+          echo "=== running the real classifier over the irreversible and unparseable fixtures ==="
+          OUT=$(node "scripts/classify-migrations.mjs" "$FIX"/*irreversible*.sql "$FIX"/*unparseable*.sql 2>&1); RC=$?
+          echo "$OUT"
+          echo "exit code: $RC"
+
+          FAIL=0
+          if [ "$RC" -ne 2 ]; then
+            echo "::error::the classifier exited $RC over fixtures that are all irreversible or unparseable. It must exit 2. A classifier that cannot refuse is not a gate."
+            FAIL=1
+          fi
+          for NEEDLE in "IRREVERSIBLE" "UNPARSEABLE" "DROP TABLE" "DELETE WITHOUT WHERE" "ALTER TABLE DROP" "DYNAMIC EXECUTE" "line "; do
+            if ! echo "$OUT" | grep -qF "$NEEDLE"; then
+              echo "::error::the refusal did not mention '$NEEDLE'. The job log has to name the file, the line and the statement class, or nobody can act on it."
+              FAIL=1
+            fi
+          done
+
+          echo
+          echo "=== the reversible fixture must still pass, with no friction ==="
+          OK_OUT=$(node "scripts/classify-migrations.mjs" "$FIX"/*reversible_everything_allowed.sql 2>&1); OK_RC=$?
+          echo "$OK_OUT"
+          echo "exit code: $OK_RC"
+          if [ "$OK_RC" -ne 0 ]; then
+            echo "::error::the classifier refused the reversible fixture. Every statement in it has a restore path. A gate that refuses ordinary work gets routed around, so this is a defect in the classifier, not in the fixture."
+            FAIL=1
+          fi
+          if ! echo "$OK_OUT" | grep -qF "1 REVERSIBLE, 0 IRREVERSIBLE, 0 UNPARSEABLE"; then
+            echo "::error::the reversible fixture did not report a clean count line."
+            FAIL=1
+          fi
+
+          echo
+          echo "=== an empty file list must be refused, never read as clean ==="
+          EMPTY_OUT=$(node "scripts/classify-migrations.mjs" 2>&1); EMPTY_RC=$?
+          echo "$EMPTY_OUT"
+          echo "exit code: $EMPTY_RC"
+          if [ "$EMPTY_RC" -eq 0 ]; then
+            echo "::error::the classifier exited 0 when handed no files. Concluding REVERSIBLE from an absence is the exact failure this gate exists to prevent."
+            FAIL=1
+          fi
+
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
+          {
+            echo ""
+            echo "### Proven able to refuse"
+            echo ""
+            echo "Exit codes observed: irreversible fixtures \`$RC\` (want 2), reversible fixture \`$OK_RC\` (want 0), empty file list \`$EMPTY_RC\` (want non-zero)."
+            echo ""
+            echo "The refusal, verbatim:"
+            echo ""
+            echo '```'
+            echo "$OUT"
+            echo '```'
+            echo ""
+            echo "The reversible fixture, verbatim:"
+            echo ""
+            echo '```'
+            echo "$OK_OUT"
+            echo '```'
+            echo ""
+            echo "An empty file list, verbatim:"
+            echo ""
+            echo '```'
+            echo "$EMPTY_OUT"
+            echo '```'
+          } >> "$DEMO"
+          cat "$DEMO" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$FAIL" -ne 0 ]; then
+            exit 1
+          fi
+          echo "classifier refuses the irreversible class, passes the reversible one, and refuses an empty list."
+
+      - name: Publish the demonstration to the pull request
+        # The seats that review changes in this repo hold GitHub read tools and
+        # no shell. An Actions log is not reachable from a review seat and the
+        # API refuses it without a token, so a refusal that exists only in a log
+        # is a refusal nobody reviewing this change can read. This puts the
+        # verbatim output where every reviewer already is.
+        #
+        # Deliberately quiet on ordinary pull requests: it comments only when
+        # the job failed, or when this pull request actually touches the
+        # classifier, its fixtures, or the two workflows. A check that comments
+        # on every PR gets muted, and a muted check is not a check.
+        if: always() && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_REF: ${{ github.base_ref }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          # See the note on errexit in the step above: the default shell is
+          # `bash -e` and this step reads exit codes deliberately.
+          set +e
+          set -uo pipefail
+          DEMO="${RUNNER_TEMP}/or-t1518-demo.md"
+          if [ ! -f "$DEMO" ]; then
+            echo "no demonstration file was written, so there is nothing to publish. This is not a pass."
+            exit 0
+          fi
+
+          TOUCHED=$(git diff --name-only "origin/${BASE_REF}...HEAD" -- \
+            scripts/classify-migrations.mjs \
+            scripts/fixtures/migration-classifier \
+            .github/workflows/supabase-deploy.yml \
+            .github/workflows/ci.yml 2>/dev/null || true)
+
+          if [ "$JOB_STATUS" = "success" ] && [ -z "$TOUCHED" ]; then
+            echo "this pull request does not touch the classifier and the demonstration passed; not commenting."
+            exit 0
+          fi
+
+          {
+            echo ""
+            echo "---"
+            echo "Job status: \`${JOB_STATUS}\`. Posted by the migration classifier job because this pull request touches it, or because it failed."
+          } >> "$DEMO"
+
+          gh pr comment "$PR_NUMBER" --body-file "$DEMO"

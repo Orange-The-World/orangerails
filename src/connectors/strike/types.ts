@@ -10,22 +10,63 @@
 
 import type { StagedImportPayload } from "../contract";
 
+/**
+ * Strike's literal "Transaction Type" values.
+ *
+ * Verified against a real "Annual transactions" export, which contained
+ * Receive, Send, Sale, Purchase and Withdrawal. Deposit is documented by
+ * Strike and is included for completeness. The connector previously modelled
+ * only Receive and Send, and skipped every other row.
+ */
+export type StrikeTxType =
+  | "Receive"
+  | "Send"
+  | "Deposit"
+  | "Withdrawal"
+  | "Purchase"
+  | "Sale";
+
 /** A typed Strike CSV row after delimiter + header parsing. */
 export type StrikeCsvRow = {
   /** Raw date string from Strike, e.g. "Sep 24 2024 13:21:51". */
   date: string;
-  /** "Receive" or "Send" (Strike's literal labels). */
-  direction: "Receive" | "Send";
-  /** Currency code, e.g. "BTC", "USD". */
+  /** Strike's literal Transaction Type label. */
+  direction: StrikeTxType;
+  /**
+   * Currency code of the primary leg, e.g. "BTC", "EUR". Derived from the
+   * header, because a real export has NO Currency column: it names the
+   * currency inside the column itself ("Amount EUR").
+   */
   currency: string;
-  /** Raw signed-amount string from Strike. May start with '-'. */
+  /** Raw signed-amount string for the primary leg. May start with '-'. */
   amount: string;
   description: string;
   /** LN invoice or on-chain address. NOT a human contact. */
   destination: string;
-  /** Optional network/routing fee in same currency. May be "0" or missing. */
+  /** Optional network/routing fee for the primary leg. May be "0" or missing. */
   fee?: string;
   reference?: string;
+
+  /**
+   * Both legs, kept separately because Purchase and Sale rows carry a fiat
+   * amount AND a bitcoin amount on the same line. `amount` above is whichever
+   * leg is primary (bitcoin when present) and exists so older callers keep
+   * working unchanged.
+   */
+  btcAmount?: string;
+  btcFee?: string;
+  fiatAmount?: string;
+  fiatFee?: string;
+  /** Currency of the fiat leg, from the header. Varies per account. */
+  fiatCurrency?: string;
+  /** Fiat price of one bitcoin at the time. Only on Purchase / Sale. */
+  btcPrice?: string;
+  /** Strike's reported cost basis, in the fiat currency. Only on Purchase. */
+  costBasis?: string;
+  /** On-chain or Lightning hash. Absent on internal Strike transfers. */
+  txHash?: string;
+  /** The customer's own note, distinct from Strike's Description. */
+  note?: string;
 };
 
 /** Best-effort shape of a Strike API account record. Fields TBD against docs. */

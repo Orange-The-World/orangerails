@@ -1,0 +1,749 @@
+name: Production change-control settings drift
+
+# OR-T1520, out of OR-T0537. The settings that gate production database
+# changes on this repository were changed on 2026-08-24, and that was not
+# noticed until 2026-09-02. A P1 risk ticket was closed in between on the
+# pre-change values. The change was permissive: an identity was ADDED to the
+# production actor allowlist. Nothing was harmed, and nothing would have
+# reported it if it had been.
+#
+# This runs daily, records what the API reports, and goes RED when it differs
+# from the reviewed baseline, naming the old value and the new one.
+#
+# WHAT IT DOES NOT DO: it does not change any setting, any reviewer list or
+# any allowlist. It reads and it compares. Whether the shared builder identity
+# should remain on the production allowlist is a decision, and it belongs to
+# the person who owns that decision, not to this file.
+
+on:
+  schedule:
+    # 11:17 UTC, which is 07:17 EDT. Odd minute on purpose: the top of the
+    # hour is the busiest slot on the shared runners and a delayed cron run
+    # is a run that silently did not happen today.
+    - cron: '17 11 * * *'
+  workflow_dispatch:
+  # OR-T1738, and the CTO ruling on OR-T1746. workflow_dispatch is only offered
+  # once a workflow is on the default branch, so before this file merges there is
+  # no way to run the publish job at all, and the first baseline cannot be seeded
+  # from the workflow's own read. This second trigger is that way in, and it
+  # stays afterwards because every future re-baseline needs it too: no always-on
+  # seat here holds a workflow-dispatch tool, so without it a re-baseline always
+  # ends at a person at the Actions tab.
+  #
+  # ONE exact branch name, no glob and no second entry. The publish job below
+  # tests the ref as well as the event, so widening this list does not by itself
+  # widen where the elevated job can run.
+  push:
+    branches:
+      - 'ops/change-control-seed'
+  pull_request:
+    paths:
+      - '.github/workflows/change-control-drift.yml'
+      - 'scripts/change-control-settings.mjs'
+      - 'ops/change-control/baseline.json'
+      # OR-T1804. The annotation job below compares baseline.json against the
+      # value quoted in the README, so a pull request that touches either file
+      # is exactly the pull request that can break it. Leave either name out
+      # and the job does not run on the change it exists to catch.
+      - 'scripts/change-control-annotation.mjs'
+      - 'ops/change-control/README.md'
+
+permissions:
+  contents: read
+  # Declaring a permissions block sets every scope not named here to none.
+  # The environments endpoint is governed by the deployments scope, so
+  # contents alone can leave the live read refused (exit 3) for a reason that
+  # has nothing to do with the settings this workflow watches. Read only.
+  deployments: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Nothing this workflow reports means anything until the comparison itself is
+  # shown able to go red. No network, so it cannot be flaky and it cannot be
+  # skipped by an outage.
+  # ---------------------------------------------------------------------------
+  self-test:
+    name: The comparison goes red on every class of change
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Prove the comparison goes red on each class of change
+        run: node scripts/change-control-settings.mjs --self-test
+
+  # ---------------------------------------------------------------------------
+  # The failure this exists to prevent is a check that could not look and
+  # printed OK anyway. So drive the real script at four real failures and
+  # assert each one exits with its own code.
+  #
+  # ONE JOB PER FAILURE MODE, deliberately. A single combined job reports one
+  # red named "failure-modes" and the reader has to open the run log to learn
+  # which of four assertions broke. The check name should carry that. This is
+  # the same principle the script itself is built on: "it did not work" is not
+  # a finding, "the 404 path exited 3" is.
+  #
+  # The first three call api.github.com for real. They are not fixtures and
+  # they need no secret.
+  # ---------------------------------------------------------------------------
+
+  refused-token-exits-3:
+    name: A refused token exits 3, not 0
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Drive the real script at a token the API will refuse
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: this-is-not-a-valid-token
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: placeholder
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
+        run: |
+          set -uo pipefail
+          STATUS=0
+          node scripts/change-control-settings.mjs --read > /dev/null 2> refused.txt || STATUS=$?
+          echo "exit ${STATUS}: $(cat refused.txt)"
+          if [ "${STATUS}" != "3" ]; then
+            echo "::error::a refused token exited ${STATUS}, expected 3. A check that cannot authenticate must say so, not pass."
+            exit 1
+          fi
+
+  missing-repository-exits-4:
+    name: A repository that does not exist exits 4, not 0
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      # Authenticated on purpose. Anonymous is a different failure and it is
+      # not a stable one: from a shared runner IP api.github.com can answer
+      # 403 rate-limit-exceeded, which this script correctly calls "refused"
+      # (exit 3), and the job would then fail for a reason that has nothing
+      # to do with the repository being absent.
+      # CHANGE_CONTROL_REPOSITORY, not GITHUB_REPOSITORY. The runner sets the
+      # GITHUB_ one itself and its value wins over this block, so overriding
+      # that name reaches nothing: this assertion then reads the real
+      # repository, succeeds, and exits 0 while claiming to test a 404.
+      - name: Drive the real script at a repository that is not there
+        env:
+          CHANGE_CONTROL_REPOSITORY: Orange-The-World/this-repository-does-not-exist-or-t1520
+          GITHUB_TOKEN: ${{ github.token }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: placeholder
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
+        run: |
+          set -uo pipefail
+          STATUS=0
+          node scripts/change-control-settings.mjs --read > /dev/null 2> missing.txt || STATUS=$?
+          echo "exit ${STATUS}: $(cat missing.txt)"
+          if [ "${STATUS}" != "4" ]; then
+            echo "::error::a 404 exited ${STATUS}, expected 4. 'I cannot see it' and 'there is nothing there' are different facts."
+            exit 1
+          fi
+
+  unreachable-api-exits-5:
+    name: An unreachable API exits 5, not 0
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      # CHANGE_CONTROL_API_URL for the same reason as the job above: the
+      # runner owns GITHUB_API_URL, so setting that name here would leave the
+      # script talking to the real api.github.com and exiting 0.
+      - name: Point the real script at a port with nothing behind it
+        env:
+          CHANGE_CONTROL_API_URL: http://127.0.0.1:9
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: placeholder
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
+        run: |
+          set -uo pipefail
+          STATUS=0
+          node scripts/change-control-settings.mjs --read > /dev/null 2> unreachable.txt || STATUS=$?
+          echo "exit ${STATUS}: $(cat unreachable.txt)"
+          if [ "${STATUS}" != "5" ]; then
+            echo "::error::an unreachable endpoint exited ${STATUS}, expected 5."
+            exit 1
+          fi
+
+  empty-allowlist-exits-5:
+    name: An empty allowlist variable exits 5, not an empty recording
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      # No network is required to reach this refusal any more. The script
+      # validates the recorded variables before it makes the environments
+      # request, so this assertion tests one thing rather than depending on
+      # an unrelated call having succeeded first.
+      - name: Blank the production allowlist variable
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: ''
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: placeholder
+        run: |
+          set -uo pipefail
+          STATUS=0
+          node scripts/change-control-settings.mjs --read > /dev/null 2> emptyvar.txt || STATUS=$?
+          echo "exit ${STATUS}: $(cat emptyvar.txt)"
+          if [ "${STATUS}" != "5" ]; then
+            echo "::error::an empty allowlist variable exited ${STATUS}, expected 5. An unset variable and an empty one are indistinguishable here, and one of them would be a change to who may apply migrations."
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # OR-T1804, out of OR-T1794. baseline.json records the reviewed production
+  # apply allowlist and cannot explain itself: JSON carries no comments, and the
+  # comparison reports any key added to that file as a difference, so an
+  # annotation inside it would turn the daily run red until someone removed it.
+  # The reason therefore lives in ops/change-control/README.md, which quotes the
+  # recorded value verbatim beside the reasoning.
+  #
+  # The README asks that a pull request changing the value update the quoted
+  # block in the same pull request. Nothing enforced that, so the value and the
+  # reason recorded for it could part company silently, and each would still
+  # read as correct on its own. These two jobs are the part that does not depend
+  # on anyone remembering.
+  #
+  # Two committed files, compared. No network, no token, no secret, so neither
+  # job can be flaky and neither has a "could not look" state to pass from.
+  # ---------------------------------------------------------------------------
+  annotation-matches-baseline:
+    name: The recorded value and the reason beside it agree
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Compare the recorded value against the block quoted beside it
+        run: node scripts/change-control-annotation.mjs
+
+  # A consistency check nobody has watched go red is not a check. This mutates
+  # COPIES in the runner workspace and asserts the alarm fires on each class of
+  # failure. The committed files are never written. The case that is easiest to
+  # get wrong is the second one: an annotation that is not there at all must be
+  # its own loud non-zero, never a pass.
+  annotation-check-goes-red:
+    name: The annotation check goes red on a changed value and on a missing block
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Mutate copies and assert each alarm fires
+        run: |
+          set -uo pipefail
+          WORK="${RUNNER_TEMP}/change-control-annotation"
+          mkdir -p "${WORK}"
+          cp ops/change-control/baseline.json "${WORK}/baseline.json"
+          cp ops/change-control/README.md "${WORK}/README.md"
+          export CHANGE_CONTROL_BASELINE="${WORK}/baseline.json"
+          export CHANGE_CONTROL_README="${WORK}/README.md"
+
+          # Control first. Untouched copies must pass, or the two assertions
+          # below would be satisfied by a check that simply shouts at everything.
+          STATUS=0
+          node scripts/change-control-annotation.mjs > control.txt 2>&1 || STATUS=$?
+          echo "control exit ${STATUS}: $(cat control.txt)"
+          if [ "${STATUS}" != "0" ]; then
+            echo "::error::the committed baseline and README already disagree, or the check cannot read them. Exit ${STATUS}."
+            exit 1
+          fi
+
+          # 1. The recorded value changes and the quoted reason does not.
+          node -e 'const fs=require("fs");const p=process.env.CHANGE_CONTROL_BASELINE;const b=JSON.parse(fs.readFileSync(p,"utf8"));b.variables.MIGRATION_APPLY_ALLOWED_ACTORS_PROD=["MorningRevolution"];fs.writeFileSync(p,JSON.stringify(b,null,2)+"\n");'
+          STATUS=0
+          node scripts/change-control-annotation.mjs > differ.txt 2>&1 || STATUS=$?
+          echo "differ exit ${STATUS}: $(cat differ.txt)"
+          if [ "${STATUS}" != "6" ]; then
+            echo "::error::a changed recorded value exited ${STATUS}, expected 6. The value and the reason recorded for it could part company with nothing reporting it."
+            exit 1
+          fi
+          if ! grep -q 'MorningRevolution' differ.txt || ! grep -q 'the-Orange-Juicer' differ.txt; then
+            echo "::error::the failure did not name both values, so a reader has to open two files to learn what changed."
+            exit 1
+          fi
+
+          # 2. The quoted block is gone. This must NOT read as agreement.
+          cp ops/change-control/baseline.json "${WORK}/baseline.json"
+          node -e 'const fs=require("fs");const p=process.env.CHANGE_CONTROL_README;fs.writeFileSync(p,fs.readFileSync(p,"utf8").replace(/```json[\s\S]*?```/g,""));'
+          STATUS=0
+          node scripts/change-control-annotation.mjs > missing.txt 2>&1 || STATUS=$?
+          echo "missing exit ${STATUS}: $(cat missing.txt)"
+          if [ "${STATUS}" != "7" ]; then
+            echo "::error::a missing quoted block exited ${STATUS}, expected 7. An annotation nobody can read must not pass as one that agrees."
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # The self-test above proves the comparison goes red on every class of change,
+  # but it does that against a fixture written inside the script, and it never
+  # runs the --compare path the daily job actually calls. So the single promise
+  # this workflow makes, that a permissive change to the RECORDED values raises
+  # an alarm naming the old and the new value, was demonstrated on a stand-in.
+  #
+  # This job drives the real --compare at the real committed baseline. It copies
+  # the baseline, adds one identity to the production allowlist in the copy, and
+  # asserts exit 1 with both values named. The committed file is never touched:
+  # the mutation lives in the runner workspace and is thrown away with it.
+  #
+  # It also asserts that the untouched baseline compares clean, because a
+  # comparison that shouted at everything would pass the first assertion and be
+  # worth nothing.
+  # ---------------------------------------------------------------------------
+  baseline-change-exits-1:
+    name: A change to the reviewed baseline exits 1 and names old and new
+    runs-on: ubuntu-latest
+    needs: self-test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Add one identity to a COPY of the committed baseline and compare
+        run: |
+          set -uo pipefail
+
+          node -e '
+            const fs = require("fs");
+            const live = JSON.parse(fs.readFileSync("ops/change-control/baseline.json", "utf8"));
+            live.read_at = new Date().toISOString();
+            const key = "MIGRATION_APPLY_ALLOWED_ACTORS_PROD";
+            live.variables[key] = [...live.variables[key], "an-identity-nobody-reviewed"].sort();
+            fs.writeFileSync("injected-live.json", JSON.stringify(live, null, 2) + "\n");
+          '
+
+          STATUS=0
+          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json injected-live.json > drift.txt 2>&1 || STATUS=$?
+          cat drift.txt
+
+          if [ "${STATUS}" != "1" ]; then
+            echo "::error::an identity added to the production allowlist exited ${STATUS}, expected 1. This is the exact change that happened on 2026-08-24 and went unseen for seven days."
+            exit 1
+          fi
+          if ! grep -q 'an-identity-nobody-reviewed' drift.txt; then
+            echo "::error::the alarm fired but did not name the identity that was added. 'the settings changed' is not actionable."
+            exit 1
+          fi
+          if ! grep -q 'was:' drift.txt || ! grep -q 'now:' drift.txt; then
+            echo "::error::the alarm did not carry BOTH the old and the new value."
+            exit 1
+          fi
+
+          STATUS=0
+          node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json ops/change-control/baseline.json > quiet.txt 2>&1 || STATUS=$?
+          cat quiet.txt
+          if [ "${STATUS}" != "0" ]; then
+            echo "::error::the committed baseline compared against itself exited ${STATUS}, expected 0. A check that reports drift every day teaches everyone to ignore it."
+            exit 1
+          fi
+
+          {
+            echo "## The alarm fires on a real change to the recorded values"
+            echo ""
+            echo "One identity was added to \`MIGRATION_APPLY_ALLOWED_ACTORS_PROD\` in a copy of"
+            echo "the committed baseline. The committed file was not modified."
+            echo ""
+            echo '```'
+            cat drift.txt
+            echo '```'
+            echo ""
+            echo "And the untouched baseline still compares clean:"
+            echo ""
+            echo '```'
+            cat quiet.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # The live reading. Runs after the machinery has been proven able to fail.
+  # ---------------------------------------------------------------------------
+  read-and-compare:
+    name: Read the live settings and compare them to the reviewed baseline
+    runs-on: ubuntu-latest
+    needs:
+      - self-test
+      - baseline-change-exits-1
+      - refused-token-exits-3
+      - missing-repository-exits-4
+      - unreachable-api-exits-5
+      - empty-allowlist-exits-5
+    # Variable values are not available to a pull request from a fork, so the
+    # read would fail there for a reason that has nothing to do with this
+    # repository's settings. An outside contributor should not be blocked by a
+    # check about our own change control.
+    #
+    # It also does not run on the ops/change-control-seed push. That exclusion
+    # is deliberate and it is NOT a pass. The seed push exists only to publish a
+    # reading, and that branch is cut from a commit a pull request is already
+    # evaluating, so this job would post a SECOND check-run under this same name
+    # on that same commit. Two runs with one name on one sha is how a merge gate
+    # gets read wrong. Drift is evaluated by the daily schedule, by the
+    # pull_request trigger and by a manual dispatch. Nothing about a seed push
+    # says the live settings match the baseline.
+    if: github.event_name != 'push' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Read the live settings
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          # Read from the workflow's own variables context rather than through
+          # the REST API. Same values, one less permission on the path that
+          # must not fail for a boring reason.
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_DEV }}
+        run: |
+          set -uo pipefail
+          STATUS=0
+          node scripts/change-control-settings.mjs --read live.json || STATUS=$?
+          if [ "${STATUS}" != "0" ]; then
+            {
+              echo "## :grey_question: Change-control settings UNKNOWN"
+              echo ""
+              echo "The reading did not complete (exit ${STATUS}). This is **not** a report"
+              echo "that the settings are unchanged. Read the step log: each failure has its"
+              echo "own code and message (3 refused, 4 not found, 5 unusable)."
+            } >> "$GITHUB_STEP_SUMMARY"
+            # An annotation as well as the step summary, and this is the whole
+            # point rather than a nicety. A step summary is returned by no API:
+            # it is readable by a person who opens this run and by nothing else.
+            # An annotation comes back from the check-runs API, so a component
+            # watching this workflow can tell "could not look" from "drift" from
+            # "clean" with no log access and no shell. Without this line, a run
+            # that could not read the settings looks, to anything automated,
+            # exactly like a run that found drift: red, and carrying nothing.
+            # A check that cannot look and reports nothing a machine can act on
+            # is the exact failure the rest of this file exists to refuse.
+            echo "::error::change-control settings could NOT be read (exit ${STATUS}), so NOTHING was compared. This is not a report that the settings are unchanged. 3 = the API refused the token, 4 = the repository was not found, 5 = the recorded values were unusable."
+            exit 1
+          fi
+          echo "Read at $(date -u '+%Y-%m-%d %H:%M UTC'), which is $(TZ=America/New_York date '+%Y-%m-%d %H:%M %Z')."
+
+      - name: Publish the reading, whatever the comparison says
+        run: |
+          {
+            echo "## Change-control settings as read"
+            echo ""
+            echo "Read at \`$(date -u '+%Y-%m-%d %H:%M UTC')\` (\`$(TZ=America/New_York date '+%Y-%m-%d %H:%M %Z')\`) from \`${{ github.repository }}\`."
+            echo "A green run of this job means these values ARE the live values at that"
+            echo "time, which is what makes a stale reading distinguishable from a fresh one."
+            echo ""
+            echo '```json'
+            cat live.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the reading as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: change-control-reading-${{ github.run_id }}
+          path: live.json
+          retention-days: 90
+
+      - name: Compare against the reviewed baseline
+        run: |
+          set -uo pipefail
+          STATUS=0
+          # Captured, not just printed, so the summary below and the annotation
+          # below both describe the SAME comparison. This used to run once here
+          # and a second time inside the summary block, and two runs that
+          # disagreed about what drifted would be worse than either one alone.
+          DIFF=$(node scripts/change-control-settings.mjs --compare ops/change-control/baseline.json live.json 2>&1) || STATUS=$?
+          printf '%s\n' "${DIFF}"
+
+          if [ "${STATUS}" = "6" ]; then
+            {
+              echo "## :grey_question: No baseline is committed yet"
+              echo ""
+              echo "\`ops/change-control/baseline.json\` does not exist on this branch, so there"
+              echo "is nothing to compare the reading above against. This is **not** a pass and"
+              echo "**not** a drift."
+              echo ""
+              echo "To seed it, either push the branch \`ops/change-control-seed\` or run"
+              echo "this workflow from the Actions tab (Run workflow). Either one runs the"
+              echo "publish job, which writes the same reading to"
+              echo "\`ops/change-control/live-reading.json\` on the"
+              echo "\`ops/change-control-readings\` branch, where an ordinary repository file"
+              echo "read returns it with no shell, no artifact download and no log access."
+              echo "Commit those values into \`ops/change-control/baseline.json\` in a reviewed"
+              echo "pull request, minus the \`read_at\` line if you like, since the comparison"
+              echo "ignores it. The first recorded values should be ones somebody looked at,"
+              echo "and a pull request diff is what that means."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::no change-control baseline committed; nothing was compared"
+            exit 1
+          fi
+
+          if [ "${STATUS}" != "0" ]; then
+            {
+              echo "## :no_entry: Production change-control settings CHANGED"
+              echo ""
+              echo "The live settings differ from \`ops/change-control/baseline.json\`. Every"
+              echo "line below names what moved, what it was, and what it is now."
+              echo ""
+              echo "A permissive change is the one that matters and it is the one that looks"
+              echo "like nothing: an identity added to an allowlist, \`prevent_self_review\`"
+              echo "turned off, admins allowed to bypass."
+              echo ""
+              echo '```'
+              printf '%s\n' "${DIFF}"
+              echo '```'
+              echo ""
+              echo "If the change was intended, update the baseline in a pull request so the"
+              echo "old and new values are reviewed rather than absorbed. Get the new"
+              echo "reading first, by pushing \`ops/change-control-seed\` or by dispatching"
+              echo "this workflow from the Actions tab: the publish job puts the new"
+              echo "reading in"
+              echo "\`ops/change-control/live-reading.json\` on the"
+              echo "\`ops/change-control-readings\` branch, so the values that land in the"
+              echo "baseline are copied from the workflow's own read and not from a message,"
+              echo "a ticket or a citation. If it was not intended, that is an unreviewed"
+              echo "change to who may touch production."
+            } >> "$GITHUB_STEP_SUMMARY"
+            # "See step summary" is an instruction nothing automated can follow,
+            # so the annotation carries the comparison itself. A workflow command
+            # is a single line: a literal newline would truncate this alert at
+            # the first one, and a truncated alert that looks complete is worse
+            # than no alert. Newlines therefore go out as %0A and a literal %
+            # as %25, which is the encoding the runner decodes on the way in.
+            ENCODED=$(printf '%s' "${DIFF}" | node -e '
+              let s = "";
+              process.stdin.on("data", d => s += d);
+              process.stdin.on("end", () => process.stdout.write(
+                s.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A")
+              ));
+            ')
+            echo "::error::production change-control settings differ from the committed baseline. Each line below names what moved, what it was, and what it is now.%0A${ENCODED}"
+            exit 1
+          fi
+
+          echo "No drift: the live settings match ops/change-control/baseline.json."
+
+  # ---------------------------------------------------------------------------
+  # OR-T1738. Every publication route the job above has is closed to a seat with
+  # no shell: the step summary and the job log both need an authenticated
+  # collaborator token, and the artifact is listable but not downloadable. So
+  # the reading can be seen by a person and by no always-on seat here, and the
+  # comparison step's own instruction, "copy the JSON printed above", cannot be
+  # followed by the seats that have to follow it. That is not a first-run
+  # inconvenience: the same route is needed every time an allowlist change is
+  # intended and the baseline has to be re-reviewed.
+  #
+  # This job writes the same reading to a file in this repository, on a branch
+  # that carries nothing else, so an ordinary file read at that ref returns it.
+  # It does NOT write the baseline: ops/change-control/baseline.json still lands
+  # through a reviewed pull request, because the first recorded values must be
+  # ones somebody looked at, and a diff is what "looked at" means.
+  #
+  # PERMISSION, deliberately narrow. contents: write is declared HERE, at job
+  # level. The workflow-level block stays read only, so no scheduled run and no
+  # pull_request run, from a fork or otherwise, can reach a token that can
+  # write.
+  #
+  # TWO events can reach this job and only two: a manual workflow_dispatch, and
+  # a push to the single branch ops/change-control-seed. The condition below
+  # names both, and it tests the REF and not only the event, so if the trigger
+  # list at the top of this file is ever widened by a later hand this job still
+  # refuses to run anywhere else.
+  #
+  # A fork can reach neither. workflow_dispatch is offered only to an identity
+  # with write access on a branch of this repository, and a fork's pushes land
+  # on the fork, so they raise no push event here.
+  #
+  # THE HONEST BAR, said plainly rather than claimed away: what stands in front
+  # of this job is push access to this repository, not the shape of the trigger.
+  # A push event runs the workflow definition present in the pushed commit, so
+  # whoever can push to that branch controls this job's code for that run. That
+  # is already true of any same-repo pull_request run that declares its own
+  # permissions block, so the seed trigger adds no capability that push access
+  # did not already carry. What it adds is a way to reach it by accident rather
+  # than on purpose, and the blast radius of an accidental run is one JSON
+  # reading on a branch that carries nothing else.
+  #
+  # The branch and the path this job writes are literals below, never inputs.
+  # ---------------------------------------------------------------------------
+  publish-reading:
+    name: Publish the live reading where a seat with no shell can read it
+    runs-on: ubuntu-latest
+    needs:
+      - self-test
+      - baseline-change-exits-1
+      - refused-token-exits-3
+      - missing-repository-exits-4
+      - unreachable-api-exits-5
+      - empty-allowlist-exits-5
+    # Deliberately NOT `needs: read-and-compare`. That job is red precisely when
+    # no baseline is committed, which is the run where the reading is needed
+    # most, so gating publication on it would make the seeding case the one case
+    # that publishes nothing.
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/ops/change-control-seed'
+    permissions:
+      contents: write
+      # A job-level block replaces the whole set rather than adding to it, so
+      # deployments: read has to be restated here or the environments read fails
+      # with exit 3 for a reason that has nothing to do with change control.
+      deployments: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Read the live settings
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ github.token }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_PROD: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_PROD }}
+          VAR_MIGRATION_APPLY_ALLOWED_ACTORS_DEV: ${{ vars.MIGRATION_APPLY_ALLOWED_ACTORS_DEV }}
+        run: |
+          set -uo pipefail
+          STATUS=0
+          node scripts/change-control-settings.mjs --read live.json || STATUS=$?
+          if [ "${STATUS}" != "0" ]; then
+            echo "::error::the live read did not complete (exit ${STATUS}), so nothing is published. 3 refused, 4 not found, 5 unusable. Publishing a partial reading would be worse than publishing none, because it would then look like the live values."
+            exit 1
+          fi
+
+      # Committed through the contents API rather than a git push, so the run
+      # never has a checkout of the readings branch and cannot carry anything
+      # else onto it. The only path this job writes is the one named below.
+      - name: Commit the reading to the readings branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          API="${GITHUB_API_URL:-https://api.github.com}"
+          BRANCH='ops/change-control-readings'
+          TARGET='ops/change-control/live-reading.json'
+
+          # Prints the HTTP status on stdout and leaves the body in resp.json.
+          # The token is passed as a header and never echoed.
+          req() {
+            if [ -n "${3:-}" ]; then
+              curl -sS -o resp.json -w '%{http_code}' -X "$1" \
+                -H "authorization: Bearer ${GITHUB_TOKEN}" \
+                -H 'accept: application/vnd.github+json' \
+                --data @"$3" "$2"
+            else
+              curl -sS -o resp.json -w '%{http_code}' -X "$1" \
+                -H "authorization: Bearer ${GITHUB_TOKEN}" \
+                -H 'accept: application/vnd.github+json' "$2"
+            fi
+          }
+
+          CODE=$(req GET "${API}/repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}")
+          if [ "${CODE}" = "404" ]; then
+            printf '{"ref":"refs/heads/%s","sha":"%s"}' "${BRANCH}" "${GITHUB_SHA}" > newref.json
+            CODE=$(req POST "${API}/repos/${GITHUB_REPOSITORY}/git/refs" newref.json)
+            if [ "${CODE}" != "201" ]; then
+              echo "::error::could not create ${BRANCH} (HTTP ${CODE}); the reading was NOT published. $(cat resp.json)"
+              exit 3
+            fi
+            echo "created ${BRANCH} at ${GITHUB_SHA}"
+          elif [ "${CODE}" != "200" ]; then
+            echo "::error::could not read ${BRANCH} (HTTP ${CODE}); the reading was NOT published. This is 'I could not publish', not 'nothing changed'. $(cat resp.json)"
+            exit 3
+          fi
+
+          SHA=''
+          CODE=$(req GET "${API}/repos/${GITHUB_REPOSITORY}/contents/${TARGET}?ref=${BRANCH}")
+          if [ "${CODE}" = "200" ]; then
+            SHA=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("resp.json","utf8")).sha)')
+          elif [ "${CODE}" != "404" ]; then
+            echo "::error::could not read ${TARGET} on ${BRANCH} (HTTP ${CODE}); the reading was NOT published. $(cat resp.json)"
+            exit 3
+          fi
+
+          node -e '
+            const fs = require("fs");
+            const body = { message: process.argv[1], content: process.argv[2], branch: process.argv[3] };
+            if (process.argv[4]) { body.sha = process.argv[4]; }
+            fs.writeFileSync("put.json", JSON.stringify(body));
+          ' "change-control: live reading at $(date -u '+%Y-%m-%d %H:%M UTC') (run ${GITHUB_RUN_ID})" "$(base64 -w0 live.json)" "${BRANCH}" "${SHA}"
+
+          CODE=$(req PUT "${API}/repos/${GITHUB_REPOSITORY}/contents/${TARGET}" put.json)
+          if [ "${CODE}" != "200" ] && [ "${CODE}" != "201" ]; then
+            echo "::error::could not write ${TARGET} on ${BRANCH} (HTTP ${CODE}); the reading was NOT published. $(cat resp.json)"
+            exit 3
+          fi
+          echo "published ${TARGET} on ${BRANCH} (HTTP ${CODE})"
+
+      - name: Say where the reading is, and what to do with it
+        run: |
+          {
+            echo "## The reading is published"
+            echo ""
+            echo "Branch \`ops/change-control-readings\`, file"
+            echo "\`ops/change-control/live-reading.json\`. It carries the values and the"
+            echo "\`read_at\` timestamp they were read at, so a stale reading is"
+            echo "distinguishable from a fresh one without opening this run."
+            echo ""
+            echo "A seat holding only an ordinary repository file read gets it with:"
+            echo ""
+            echo '```'
+            echo "gh_get_file(repo='${{ github.repository }}', path='ops/change-control/live-reading.json', ref='ops/change-control-readings')"
+            echo '```'
+            echo ""
+            echo "To seed or re-baseline: read that file, commit its values into"
+            echo "\`ops/change-control/baseline.json\` on a feature branch, and open a pull"
+            echo "request. This workflow never writes the baseline itself, so the first"
+            echo "recorded values are always ones somebody reviewed in a diff."
+          } >> "$GITHUB_STEP_SUMMARY"
