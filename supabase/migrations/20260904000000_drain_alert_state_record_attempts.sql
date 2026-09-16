@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: purely additive and idempotent, absent from both ledgers, and nothing applied since touches this table, so applying it late is identical to applying it on time (OR-T2256).
+-- OUT-OF-ORDER-OK: fzwmnzmtqidumdqjdddz purely additive and idempotent, absent from both ledgers, and nothing applied since touches this table, so applying it late is identical to applying it on time (OR-T2256).
 --
 -- What was actually checked, on 2026-09-05, twice and independently, by the
 -- DBA and by the author of this line:
