@@ -589,6 +589,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               .select('event_id, event_type, payload, attempts')
               .eq('subaccount_id', subaccountId)
               .is('processed_at', null)
+              .lt('attempts', 25)
               .order('received_at', { ascending: true })
               .limit(QUILTT_SINK_INBOX_BATCH);
             if (pendErrSink) throw pendErrSink;
@@ -597,7 +598,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             let quilttSinkSynced = 0;
 
             for (const ev of (pendingSink ?? []) as Array<{
-              event_id: string; event_type: string; payload: { record?: { id?: string } };
+              event_id: string; event_type: string; payload: { record?: { id?: string } }; attempts: number | null;
             }>) {
               if (!ev.event_type.startsWith('connection.synced.successful')) {
                 await ctx.serviceClient
@@ -608,9 +609,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               }
               const quilttConnIdSink = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
               if (!quilttConnIdSink) {
+                // Do NOT set processed_at here: stamping processed alongside an error
+                // marks the event as done in the health metric even though the sync
+                // never ran (CTO ruling, DL-1198). Leave it null so it retries.
                 await ctx.serviceClient
                   .from('quiltt_webhook_inbox')
-                  .update({ processed_at: new Date().toISOString(), last_error: 'event missing record.id' })
+                  .update({ last_error: 'event missing record.id', attempts: (ev.attempts ?? 0) + 1 })
                   .eq('event_id', ev.event_id);
                 continue;
               }
@@ -874,6 +878,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             .select('event_id, event_type, payload, attempts')
             .eq('subaccount_id', subaccountId)
             .is('processed_at', null)
+            .lt('attempts', 25)
             .order('received_at', { ascending: true })
             .limit(QUILTT_INBOX_BATCH);
           if (pendErr) throw pendErr;
@@ -882,7 +887,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           let synced = 0;
 
           for (const ev of (pending ?? []) as Array<{
-            event_id: string; event_type: string; payload: { record?: { id?: string } };
+            event_id: string; event_type: string; payload: { record?: { id?: string } }; attempts: number | null;
           }>) {
             if (!ev.event_type.startsWith('connection.synced.successful')) {
               await ctx.serviceClient
@@ -893,9 +898,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             }
             const quilttConnId = typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
             if (!quilttConnId) {
+              // Do NOT set processed_at here: same green-over-failure rule as the
+              // sink path above (CTO ruling, DL-1198). Leave processed_at null.
               await ctx.serviceClient
                 .from('quiltt_webhook_inbox')
-                .update({ processed_at: new Date().toISOString(), last_error: 'event missing record.id' })
+                .update({ last_error: 'event missing record.id', attempts: (ev.attempts ?? 0) + 1 })
                 .eq('event_id', ev.event_id);
               continue;
             }
