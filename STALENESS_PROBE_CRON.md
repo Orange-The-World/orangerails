@@ -2,6 +2,10 @@
 
 Scripts in `scripts/ops/` that guard the ORBI 1-minute rate feed.
 
+Any change to these scripts, to their test workflow, or to this document runs
+the exit-code acceptance gate in `.github/workflows/orbi-probe-test.yml`, on
+every pull request regardless of which branch it targets.
+
 ---
 
 ## scripts/ops/orbi-staleness-probe.sh
