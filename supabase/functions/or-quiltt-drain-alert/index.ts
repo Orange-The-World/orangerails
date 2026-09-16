@@ -32,8 +32,13 @@
  * Query errors surface as alert_firing = true (absence of evidence is not green).
  * Returns HTTP 200 always with a JSON health report.
  * When alert_firing, POSTs to Zulip #Delivery mentioning CTO Rails and SRE.
- * Repost suppression: when firing continuously, posts at most once per
- * SUPPRESSION_COOLDOWN_MINUTES (60 min, ~6 posts/day instead of 144).
+ * Repost suppression:
+ *   - Hard floor: never post more than once per SUPPRESSION_COOLDOWN_MINUTES (60 min).
+ *   - Content dedup: between the 60-min floor and RE_ALERT_CEILING_HOURS (6h), only
+ *     post when the signal snapshot changes (different signals firing, or different
+ *     counts). An unchanged snapshot is suppressed until the ceiling forces a repost.
+ *   - Re-alert ceiling: after RE_ALERT_CEILING_HOURS since the last post, always post
+ *     (even if unchanged) so a persistent stall does not go silently dark.
  * zulip_post_sent in the report reflects whether the post actually went out.
  *
  * Env vars:
@@ -47,17 +52,67 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
-const FAILURE_WINDOW_MINUTES      = 30;
-const SUCCESS_WINDOW_MINUTES      = 60;
-const FAILURE_RATE_THRESHOLD      = 0.10; // 10%
-const STALL_HOURS                 = 2;
-const RETIREMENT_WINDOW_HOURS     = 24;
+const FAILURE_WINDOW_MINUTES       = 30;
+const SUCCESS_WINDOW_MINUTES       = 60;
+const FAILURE_RATE_THRESHOLD       = 0.10; // 10%
+const STALL_HOURS                  = 2;
+const RETIREMENT_WINDOW_HOURS      = 24;
 const SUPPRESSION_COOLDOWN_MINUTES = 60;
+/** Maximum time to suppress an unchanged firing signal before forcing a repost. */
+const RE_ALERT_CEILING_HOURS       = 6;
 
 interface DrainCronStats {
   failed_count:    number;
   total_count:     number;
   succeeded_count: number;
+}
+
+/**
+ * Snapshot of the observable signal state at the time of a Zulip post.
+ * Stored in drain_alert_state.last_signal_snapshot and compared on each run
+ * to suppress reposts when nothing has changed (OR-T2708).
+ * Serialized with JSON.stringify for equality; key order must stay stable.
+ */
+interface SignalSnapshot {
+  failure_rate_firing:     boolean;
+  failure_rate:            number | null;
+  zero_completions_firing: boolean;
+  succeeded_count:         number | null;
+  stall_firing:            boolean;
+  stalled:                 number | null;
+  retired_firing:          boolean;
+  retired:                 number | null;
+  query_error:             string | null;
+}
+
+function buildSnapshot(
+  failureRateFiring:     boolean,
+  failureRate:           number | null,
+  zeroCompletionsFiring: boolean,
+  succeededCount:        number | null,
+  stallFiring:           boolean,
+  stalled:               number | null,
+  retiredFiring:         boolean,
+  retired:               number | null,
+  queryError:            string | undefined,
+): SignalSnapshot {
+  return {
+    failure_rate_firing:     failureRateFiring,
+    failure_rate:            failureRate,
+    zero_completions_firing: zeroCompletionsFiring,
+    succeeded_count:         succeededCount,
+    stall_firing:            stallFiring,
+    stalled:                 stalled,
+    retired_firing:          retiredFiring,
+    retired:                 retired,
+    query_error:             queryError ?? null,
+  };
+}
+
+/** True when two snapshots represent the same observable signal state. */
+function snapshotsMatch(a: SignalSnapshot | null, b: SignalSnapshot): boolean {
+  if (a === null) return false;
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 interface HealthReport {
@@ -271,7 +326,6 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       `${stalled} unprocessed row(s) older than ${STALL_HOURS}h`,
     );
   }
-
   if (retiredFiring) {
     console.error(
       `[or-quiltt-drain-alert] ALERT signal D (retired events): ` +
@@ -286,27 +340,62 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   let zulipPostSent: boolean | null = null;
 
   if (alertFiring) {
-    // Suppression: only post if we have never posted, or cooldown has elapsed.
-    // Prevents ~144 posts/day (every 10 min) when alerts fire continuously.
+    // Read suppression state: time of last post + last-posted signal snapshot.
     const { data: stateRow } = await client
       .from('drain_alert_state')
-      .select('last_notified_at')
+      .select('last_notified_at, last_signal_snapshot')
       .eq('id', 1)
       .maybeSingle();
 
     const lastNotifiedAt: string | null = stateRow?.last_notified_at ?? null;
-    const cooldownMs   = SUPPRESSION_COOLDOWN_MINUTES * 60 * 1000;
-    const withinCooldown =
-      lastNotifiedAt !== null &&
-      Date.now() - new Date(lastNotifiedAt).getTime() < cooldownMs;
+    const lastSnapshot: SignalSnapshot | null =
+      (stateRow?.last_signal_snapshot as SignalSnapshot | null) ?? null;
+
+    const cooldownMs       = SUPPRESSION_COOLDOWN_MINUTES * 60 * 1000;
+    const realertCeilingMs = RE_ALERT_CEILING_HOURS * 60 * 60 * 1000;
+    const msSinceLastPost  =
+      lastNotifiedAt !== null
+        ? Date.now() - new Date(lastNotifiedAt).getTime()
+        : Infinity;
+
+    const withinCooldown       = msSinceLastPost < cooldownMs;
+    const withinRealertCeiling = msSinceLastPost < realertCeilingMs;
+
+    const currentSnapshot = buildSnapshot(
+      failureRateFiring, failureRate,
+      zeroCompletionsFiring, succeededCount,
+      stallFiring, stalled,
+      retiredFiring, retired,
+      queryError,
+    );
+    const snapshotChanged = !snapshotsMatch(lastSnapshot, currentSnapshot);
 
     if (withinCooldown) {
+      // Hard rate-limit floor: never post more often than once per SUPPRESSION_COOLDOWN_MINUTES.
+      // Applies regardless of snapshot changes to prevent burst-posting on rapid oscillations.
       console.log(
         `[or-quiltt-drain-alert] alert firing but suppressed ` +
         `(last post: ${lastNotifiedAt}, cooldown: ${SUPPRESSION_COOLDOWN_MINUTES} min)`,
       );
       zulipPostSent = false;
+    } else if (withinRealertCeiling && !snapshotChanged) {
+      // Past the 60-min floor but within the 6-hour re-alert ceiling, and the
+      // signal content is unchanged since the last post. Suppress: we already
+      // told them about this exact state and nothing new has happened.
+      console.log(
+        `[or-quiltt-drain-alert] alert firing but suppressed ` +
+        `(snapshot unchanged, re-alert ceiling not reached; last post: ${lastNotifiedAt})`,
+      );
+      zulipPostSent = false;
     } else {
+      // Post because either:
+      //   a) snapshot changed (new signals firing, or different counts)
+      //   b) 6-hour re-alert ceiling hit (persistent stall must not go silently dark)
+      const reason = snapshotChanged
+        ? 'snapshot changed'
+        : `re-alert ceiling (${RE_ALERT_CEILING_HOURS}h) hit`;
+      console.log(`[or-quiltt-drain-alert] posting alert (${reason})`);
+
       const parts: string[] = [];
       if (failureRateFiring) {
         parts.push(
@@ -348,16 +437,19 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       // Record the ATTEMPT regardless of outcome, so a dead notifier leaves a
       // trace any SQL query can find (OR-T1135, following a failure that went
       // undetected for ten days with nothing but a console.error to show for it).
-      // last_notified_at is the cooldown key and is only set on success, same
-      // as before this change: a failed attempt must not engage the cooldown,
-      // or a dead notifier turns a one-time miss into permanent silence.
+      // last_notified_at and last_signal_snapshot are only set on success:
+      // a failed attempt must not engage the cooldown or update the snapshot,
+      // or a dead notifier silences itself permanently.
       const { error: stateWriteErr } = await client
         .from('drain_alert_state')
         .upsert({
           id:              1,
           last_attempt_at: checkedAt,
           last_error:      postResult.error ?? null,
-          ...(postResult.sent ? { last_notified_at: checkedAt } : {}),
+          ...(postResult.sent ? {
+            last_notified_at:     checkedAt,
+            last_signal_snapshot: currentSnapshot,
+          } : {}),
         });
 
       if (stateWriteErr) {
