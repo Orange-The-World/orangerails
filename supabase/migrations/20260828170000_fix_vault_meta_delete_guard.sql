@@ -1,3 +1,8 @@
+-- OUT-OF-ORDER-OK: never applied on dev or prod (both ledgers checked
+-- 2026-09-05, OR-T2256); merged via PR #940, Auditor-approved
+-- 2026-08-28, before the out-of-order guard (OR-T2147) existed. Only
+-- replaces one existing function definition that no later migration
+-- touches, so applying it now matches applying it on 2026-08-28.
 -- 20260828170000_fix_vault_meta_delete_guard.sql
 --
 -- Make the user_vault_meta delete guard able to fire.

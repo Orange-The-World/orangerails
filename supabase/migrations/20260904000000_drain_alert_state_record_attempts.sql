@@ -1,3 +1,17 @@
+-- OUT-OF-ORDER-OK: purely additive and idempotent, absent from both ledgers, and nothing applied since touches this table, so applying it late is identical to applying it on time (OR-T2256).
+--
+-- What was actually checked, on 2026-09-05, twice and independently, by the
+-- DBA and by the author of this line:
+--
+--   * The dev ledger (supabase_migrations.schema_migrations) tops out at
+--     20260904150000 and has no row for 20260904000000. The prod ledger tops
+--     out at 20260822031500 and has no row for it either.
+--   * The only statements that execute are two ADD COLUMN IF NOT EXISTS and
+--     two COMMENT ON COLUMN. The DROP COLUMN lines further down are inert
+--     text inside the Down / undo comment block, not executable statements.
+--   * No migration numbered above this one mentions
+--     public.drain_alert_state, so nothing applied since depends on these two
+--     columns or conflicts with them.
 -- ============================================================
 -- Record failed or-quiltt-drain-alert Zulip post attempts, not only
 -- successful ones (OR-T1135, follows DL-0640 / 20260811000000).

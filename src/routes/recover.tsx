@@ -5,7 +5,11 @@ import { useVault } from "@/context/VaultContext";
 import { MIN_PASSWORD_LENGTH, CURRENT_VAULT_KEY_VERSION } from "@/lib/vault";
 import { formatError } from "@/lib/format-error";
 import { logSecurityEvent } from "@/lib/audit";
-import { migrateAndPersistRotatedVault, type VaultPersistClient } from "@/lib/vault-persist";
+import {
+  migrateAndPersistRotatedVault,
+  loadVaultMetaForRecovery,
+  type VaultPersistClient,
+} from "@/lib/vault-persist";
 
 export const Route = createFileRoute("/recover")({
   component: RecoverPage,
@@ -57,21 +61,22 @@ function RecoverPage() {
         return;
       }
 
-      const { data: meta, error: metaErr } = await (supabase as any)
-        .from("user_vault_meta")
-        // kem_secret_wrapped and sig_secret_wrapped are read here because they are
-        // wrapped under an HKDF subkey of the MEK, and the recovery below rotates
-        // the MEK. They are not data rows, so the migration never sees them: if
-        // they are not carried across in the same write, the only key that opens
-        // them is discarded and nothing ever regenerates them.
-        .select(
-          "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped",
-        )
-        .eq("user_id", session.user.id)
-        .single();
-
-      if (metaErr || !meta) throw new Error("Could not load vault metadata.");
-      if (!meta.recovery_ciphertext) {
+      // kem_secret_wrapped and sig_secret_wrapped are read here because they are
+      // wrapped under an HKDF subkey of the MEK, and the recovery below rotates
+      // the MEK. They are not data rows, so the migration never sees them: if
+      // they are not carried across in the same write, the only key that opens
+      // them is discarded and nothing ever regenerates them.
+      //
+      // The read itself, and its refusal when the row cannot be proven to have
+      // been read, live in src/lib/vault-persist.ts: a route component like
+      // this one cannot be reached by a unit test without mounting the page,
+      // so the refusal is tested there with a fake client instead.
+      const meta = await loadVaultMetaForRecovery(
+        supabase as unknown as VaultPersistClient,
+        session.user.id,
+      );
+      const recoveryCiphertext = meta.recovery_ciphertext;
+      if (!recoveryCiphertext) {
         throw new Error(
           "This vault was created before recovery codes were supported. Recovery is not available.",
         );
@@ -87,7 +92,7 @@ function RecoverPage() {
         pqcKeysReplaced: keysReplaced,
       } = await recoverWithCode({
         recoveryCode,
-        recoveryCiphertext: meta.recovery_ciphertext,
+        recoveryCiphertext,
         saltB64: meta.vault_salt,
         verifierCiphertext: meta.vault_verifier_ciphertext,
         newPassword,
@@ -107,7 +112,7 @@ function RecoverPage() {
       await migrateAndPersistRotatedVault({
         supabase: supabase as unknown as VaultPersistClient,
         userId: session.user.id,
-        priorRecoveryCiphertext: meta.recovery_ciphertext,
+        priorRecoveryCiphertext: recoveryCiphertext,
         newEncMekCiphertext,
         newRecoveryCiphertext,
         newVerifierCiphertext,

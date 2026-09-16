@@ -256,7 +256,37 @@ describe("co-admin keyring, seal and open", () => {
       collidingA,
     );
 
+    // Positive control: prove this fixture actually discriminates before
+    // trusting the negative assertion below. Under the old
+    // `${prefix}|${owner}|${grant}` join, collidingA and collidingB produce
+    // the identical AAD string, the open below SUCCEEDS, and this assertion
+    // is what would catch that regression, rather than the suite staying
+    // green while proving nothing.
+    await expect(openCoAdminKeyring(sealed, cak, collidingA)).resolves.toBeDefined();
+
     await expect(openCoAdminKeyring(sealed, cak, collidingB)).rejects.toThrow();
+  });
+
+  test("an unpaired surrogate in the owner id does not collide with a different unpaired surrogate", async () => {
+    // The AAD bytes are TextEncoder().encode(JSON.stringify(...)), and
+    // TextEncoder replaces any UNPAIRED surrogate with U+FFFD. If
+    // JSON.stringify ever emitted a lone surrogate raw, ownerUserId "\uD800"
+    // and ownerUserId "\uDFFF" would encode to the same bytes with no
+    // delimiter or quote involved. Well-formed JSON.stringify (ES2019) is
+    // what prevents that, by emitting an unpaired surrogate as the six ASCII
+    // characters \ud800 instead of a raw surrogate. This pins that property.
+    const owner = ownerKeyringWithSecrets();
+    const cak = generateCoAdminKey();
+    const sealBinding: CoAdminBinding = { ownerUserId: "\uD800", grantId: GRANT_ID };
+    const openBinding: CoAdminBinding = { ownerUserId: "\uDFFF", grantId: GRANT_ID };
+
+    const sealed = await sealCoAdminKeyring(
+      projectKeyringForCoAdmin(owner),
+      cak,
+      sealBinding,
+    );
+
+    await expect(openCoAdminKeyring(sealed, cak, openBinding)).rejects.toThrow();
   });
 });
 

@@ -1,220 +1,165 @@
 /**
- * or-agent-invite-redeem , agent CLI exchanges invitation for credentials.
+ * or-agent-invite-redeem, Supabase Deno Edge Function.
  *
- * Session: 2026-05-19-ANVIL
- * See: docs/OrangeRails-Agent-Members.md
+ * Redeems an agent invitation: validates the raw token, creates the shadow auth user, and
+ * binds the invitee's identity_pubkey and kem_pubkey to the agent member. One request in,
+ * one activated agent member out.
  *
- * Called by `npx @orangerails/mcp connect <invitation-token>` on the agent's
- * machine. Public endpoint , no prior auth, the invitation token IS the auth.
+ * WHY THIS FUNCTION EXISTS AT ALL
+ * On the hosted Supabase projects anon holds no EXECUTE on complete_agent_invitation and
+ * has not since migration 20260721120000. It was ruled that it must not be granted one
+ * back: that function decides which public keys become a valid key wrap recipient for an
+ * agent, and it is not a thing to make anonymously callable. The caller here is
+ * service_role. The invitee has no session at redemption time, so something has to stand
+ * in front of the rpc, and this is it. The May 2026 migration that created the two
+ * functions already named "the or-agent-invite-redeem edge function" as their caller.
  *
- * POST body:
- *   {
- *     invitation_token: string  // 64-char hex, the raw token from mint
- *     identity_pubkey: string   // base64 Ed25519 public key (32 bytes raw)
- *     kem_pubkey: string        // base64 hybrid X25519+ML-KEM-768 public key
- *                               // (same format as user_vault_meta.kem_public_key)
- *   }
+ * (OR-T0993 sync commit: forces a fresh CI run against dev's current auth-marker gate,
+ * which added the invitation-token exemption after this branch was cut, see OR-T1983.)
  *
- * Response 200:
- *   {
- *     agent_member_id: string
- *     owner_user_id: string     // the owner the agent now belongs to
- *     access_token: string      // Supabase JWT, signed with project secret
- *     expires_at: string        // ISO 8601, 1 hour from now (Decision 2)
- *     token_type: 'bearer'
- *   }
+ * WHAT IT DOES NOT DO. It does not make redemption non public. A pre-auth endpoint is
+ * reachable by anyone on the internet whether the gateway JWT check is off or it merely
+ * accepts the anon key, which ships in every browser bundle. The raw token remains the only
+ * thing between a caller and a key binding. The honest claim is one controlled path we own
+ * and can instrument. Rate limiting is wanted and is not here yet; the single entry point
+ * is the seam it will attach to.
  *
- * The CLI then:
- *   1. Persists access_token + its own private keys to ~/.orange-rails/identity.json
- *   2. Writes the MCP server config snippet into the detected local client
- *   3. Reports success to the user
+ * POST only, and the token travels in the BODY. Never in the path, never in the query
+ * string: those are logged by every hop in between, and the token is a bearer credential.
  *
- * Refresh: not in v1. When the access_token expires (1h), the CLI calls
- * or-agent-token-refresh (separate endpoint, comes with the MCP server
- * scaffold) using a signed nonce challenge over the agent's identity_pubkey.
- *
- * Atomicity: this endpoint does three things that must succeed together:
- *   1. Create the shadow auth.users row (via auth admin API)
- *   2. Atomic SQL: update agent_members + mark invitation redeemed
- *   3. Mint the first JWT
- *
- * If step 2 fails after step 1 succeeded, we delete the shadow user
- * (manual rollback). If step 3 fails we still have a working state.
- */ import { createClient } from 'jsr:@supabase/supabase-js@2';
-import { create as createJwt, getNumericDate } from 'https://deno.land/x/djwt@v3.0.2/mod.ts';
-import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
-import { wrapSentryHandler } from '../_shared/sentry.ts';
-const ACCESS_TOKEN_TTL_SECONDS = 3600; // 1 hour, per Decision 2
-async function sha256Hex(input: string) {
-  const data = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(digest)).map((b)=>b.toString(16).padStart(2, '0')).join('');
+ * Request  { token, identity_pubkey, kem_pubkey }
+ * Response 200 { agent_member_id, shadow_user_id }
+ * Response 400 { error: "invitation_not_redeemable" } for every rejection, identically.
+ */
+
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
+import { buildPublicCorsHeaders, readBoundedText } from "../_shared/http.ts";
+import { wrapSentryHandler } from "../_shared/sentry.ts";
+import {
+  COMPLETE_RPC,
+  FAILURE_BODY,
+  FAILURE_STATUS,
+  parseRedeemBody,
+  PEEK_RPC,
+  redeem,
+  type RedeemPorts,
+  type RedeemRequest,
+  type Stage,
+} from "./redeem.ts";
+
+/** Requests carry three short fields. 8 KB is generous and keeps a garbage body cheap. */
+const MAX_BODY_BYTES = 8_192;
+
+/**
+ * The shadow user's address. `.invalid` is reserved by RFC 2606 and can never resolve, which
+ * is exactly right for a principal that must never receive mail. The local part is random,
+ * not derived from the agent member: a derived address would be permanently occupied by an
+ * orphan if a worker died between creating the user and binding it, and would then brick
+ * every later retry for that agent.
+ */
+function shadowEmail(): string {
+  return `agent-${crypto.randomUUID()}@agents.invalid`;
 }
-function isHex64(s: string) {
-  return /^[a-f0-9]{64}$/.test(s);
-}
-function isBase64ish(s: string) {
-  return /^[A-Za-z0-9+/=_-]+$/.test(s) && s.length >= 40 && s.length <= 4096;
-}
-Deno.serve(wrapSentryHandler(async (req)=>{
-  const cors = buildCorsHeaders(req);
-  if (req.method === 'OPTIONS') return new Response('ok', {
-    headers: cors
-  });
-  if (req.method !== 'POST') {
-    return jsonResponse({
-      error: 'Method not allowed'
-    }, 405, cors);
-  }
-  const supabaseUrl = Deno.env.get('SUPABASE_URL');
-  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY');
-  const jwtSecret = Deno.env.get('SUPABASE_JWT_SECRET');
-  if (!supabaseUrl || !serviceKey || !jwtSecret) {
-    console.error('[or-agent-invite-redeem] missing required env vars');
-    return jsonResponse({
-      error: 'Server misconfigured'
-    }, 500, cors);
-  }
-  let createdShadowUserId = null;
-  const admin = createClient(supabaseUrl, serviceKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
-    }
-  });
-  try {
-    // Parse + validate body
-    const raw = await readBoundedText(req);
-    if (raw === null) return jsonResponse({
-      error: 'Request body too large'
-    }, 413, cors);
-    const body = JSON.parse(raw || '{}');
-    if (!body.invitation_token || !isHex64(body.invitation_token)) {
-      return jsonResponse({
-        error: 'invitation_token must be 64-char lowercase hex'
-      }, 400, cors);
-    }
-    if (!body.identity_pubkey || !isBase64ish(body.identity_pubkey)) {
-      return jsonResponse({
-        error: 'identity_pubkey (base64) is required'
-      }, 400, cors);
-    }
-    if (!body.kem_pubkey || !isBase64ish(body.kem_pubkey)) {
-      return jsonResponse({
-        error: 'kem_pubkey (base64) is required'
-      }, 400, cors);
-    }
-    // Hash the token and peek the invitation
-    const tokenHash = await sha256Hex(body.invitation_token);
-    const { data: peek, error: peekErr } = await admin.rpc('peek_agent_invitation', {
-      p_token_hash: tokenHash
-    });
-    if (peekErr) {
-      console.error('[or-agent-invite-redeem] peek failed:', peekErr.message);
-      return jsonResponse({
-        error: 'Invitation lookup failed'
-      }, 500, cors);
-    }
-    const inv = Array.isArray(peek) ? peek[0] : peek;
-    if (!inv?.invitation_id) {
-      return jsonResponse({
-        error: 'Invitation invalid, expired, or already redeemed'
-      }, 410, cors);
-    }
-    // Create the shadow auth.users row.
-    const syntheticEmail = `agent-${inv.agent_member_id}@orangerails-agents.local`;
-    const randomPassword = crypto.randomUUID() + crypto.randomUUID(); // never used for login
-    const { data: created, error: createErr } = await admin.auth.admin.createUser({
-      email: syntheticEmail,
-      password: randomPassword,
-      email_confirm: true,
-      user_metadata: {
-        is_shadow_agent: true,
-        agent_member_id: inv.agent_member_id,
-        owner_user_id: inv.owner_user_id
-      }
-    });
-    if (createErr || !created?.user) {
-      console.error('[or-agent-invite-redeem] createUser failed:', createErr?.message);
-      return jsonResponse({
-        error: 'Failed to create shadow user'
-      }, 500, cors);
-    }
-    createdShadowUserId = created.user.id;
-    // Atomic redemption: update agent_members + mark invitation redeemed
-    const { data: completed, error: completeErr } = await admin.rpc('complete_agent_invitation', {
-      p_invitation_id: inv.invitation_id,
-      p_shadow_user_id: createdShadowUserId,
-      p_identity_pubkey: body.identity_pubkey,
-      p_kem_pubkey: body.kem_pubkey
-    });
-    if (completeErr) {
-      console.error('[or-agent-invite-redeem] complete_agent_invitation failed:', completeErr.message);
-      // Roll back the shadow user creation
-      await admin.auth.admin.deleteUser(createdShadowUserId);
-      createdShadowUserId = null;
-      return jsonResponse({
-        error: completeErr.message
-      }, 409, cors);
-    }
-    const completedRow = Array.isArray(completed) ? completed[0] : completed;
-    if (!completedRow?.agent_member_id) {
-      await admin.auth.admin.deleteUser(createdShadowUserId);
-      createdShadowUserId = null;
-      return jsonResponse({
-        error: 'Redemption did not return a result'
-      }, 500, cors);
-    }
-    // Mint a Supabase-compatible JWT for the shadow user.
-    const now = Math.floor(Date.now() / 1000);
-    const expiresUnix = now + ACCESS_TOKEN_TTL_SECONDS;
-    const keyBuf = new TextEncoder().encode(jwtSecret);
-    const cryptoKey = await crypto.subtle.importKey('raw', keyBuf, {
-      name: 'HMAC',
-      hash: 'SHA-256'
-    }, false, [
-      'sign',
-      'verify'
-    ]);
-    const jwt = await createJwt({
-      alg: 'HS256',
-      typ: 'JWT'
-    }, {
-      aud: 'authenticated',
-      exp: getNumericDate(expiresUnix - now),
-      iat: now,
-      iss: supabaseUrl + '/auth/v1',
-      sub: createdShadowUserId,
-      role: 'authenticated',
-      email: syntheticEmail,
-      app_metadata: {
-        provider: 'or-agent-invite'
-      },
-      user_metadata: {
-        is_shadow_agent: true,
-        agent_member_id: completedRow.agent_member_id,
-        owner_user_id: completedRow.owner_user_id
-      }
-    }, cryptoKey);
-    return jsonResponse({
-      agent_member_id: completedRow.agent_member_id,
-      owner_user_id: completedRow.owner_user_id,
-      access_token: jwt,
-      expires_at: new Date(expiresUnix * 1000).toISOString(),
-      token_type: 'bearer'
-    }, 200, cors);
-  } catch (e) {
-    // Safety net rollback
-    if (createdShadowUserId) {
+
+// deno-lint-ignore no-explicit-any
+type ServiceClient = any;
+
+function buildPorts(admin: ServiceClient): RedeemPorts {
+  return {
+    async peekInvitation(token: string): Promise<string | null> {
+      const { data, error } = await admin.rpc(PEEK_RPC, { p_token: token });
+      if (error) return null;
+      const rows = Array.isArray(data) ? data : data ? [data] : [];
+      const id = rows[0]?.agent_member_id;
+      return typeof id === "string" ? id : null;
+    },
+
+    async createShadowUser(): Promise<string | null> {
+      // The password is generated here, used by nobody, and never leaves this scope. The
+      // shadow user exists to be a stable principal id for row level security and for
+      // wrapped_data_keys.recipient_user_id, not to be signed into from a browser.
+      const { data, error } = await admin.auth.admin.createUser({
+        email: shadowEmail(),
+        password: `${crypto.randomUUID()}${crypto.randomUUID()}`,
+        email_confirm: true,
+        user_metadata: { kind: "agent-shadow" },
+      });
+      if (error) return null;
+      const id = data?.user?.id;
+      return typeof id === "string" ? id : null;
+    },
+
+    async deleteShadowUser(userId: string): Promise<boolean> {
+      // Best effort, and it REPORTS the result. deleteUser answers with an error object
+      // rather than throwing, so a port that only caught exceptions would treat a refused
+      // delete as a success and the orphan would never be marked. If this returns false the
+      // row is an unbound auth user that no credential anyone holds can reach, which is
+      // inert, but it is real and it is worth sweeping for.
       try {
-        await admin.auth.admin.deleteUser(createdShadowUserId);
-      } catch (cleanupErr) {
-        console.error('[or-agent-invite-redeem] rollback delete failed:', cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr));
+        const { error } = await admin.auth.admin.deleteUser(userId);
+        return !error;
+      } catch {
+        return false;
       }
-    }
-    console.error('[or-agent-invite-redeem] error:', e instanceof Error ? e.message : String(e));
-    return jsonResponse({
-      error: 'Internal error'
-    }, 500, cors);
+    },
+
+    async completeInvitation(
+      input: RedeemRequest & { shadowUserId: string },
+    ): Promise<boolean> {
+      const { data, error } = await admin.rpc(COMPLETE_RPC, {
+        p_token: input.token,
+        p_shadow_user_id: input.shadowUserId,
+        p_identity_pubkey: input.identityPubkey,
+        p_kem_pubkey: input.kemPubkey,
+      });
+      // The error is deliberately swallowed rather than logged or re-thrown. A database
+      // error string is the one place the token could plausibly come back to us, and
+      // anything thrown from here reaches the error reporter. See the note on Stage.
+      if (error) return false;
+      const rows = Array.isArray(data) ? data : data ? [data] : [];
+      return rows.length > 0;
+    },
+
+    note(stage: Stage): void {
+      // A fixed vocabulary. No caller input is ever interpolated into a log line.
+      console.log(`[or-agent-invite-redeem] ${stage}`);
+    },
+  };
+}
+
+function send(status: number, body: string, cors: Record<string, string>): Response {
+  return new Response(body, {
+    status,
+    headers: { "Content-Type": "application/json", ...cors },
+  });
+}
+
+Deno.serve(wrapSentryHandler(async (req: Request) => {
+  const cors = buildPublicCorsHeaders();
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  if (req.method !== "POST") {
+    return send(405, JSON.stringify({ error: "method_not_allowed" }), cors);
   }
-}, 'or-agent-invite-redeem'));
+
+  const raw = await readBoundedText(req, MAX_BODY_BYTES);
+  if (raw === null) {
+    // Size is a property of the request, not of any invitation, so it is safe to answer
+    // separately. It says nothing about whether a token exists.
+    return send(413, JSON.stringify({ error: "request_too_large" }), cors);
+  }
+
+  const admin = createClient(
+    Deno.env.get("SUPABASE_URL") ?? "",
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+  );
+
+  try {
+    const outcome = await redeem(parseRedeemBody(raw), buildPorts(admin));
+    return send(outcome.status, outcome.body, cors);
+  } catch {
+    // Nothing is logged and nothing is re-thrown, because a caught value here may carry
+    // upstream text. The response is the SAME rejection every other failure returns, so an
+    // internal fault is not a signal either.
+    return send(FAILURE_STATUS, FAILURE_BODY, cors);
+  }
+}, "or-agent-invite-redeem"));

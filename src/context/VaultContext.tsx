@@ -38,6 +38,7 @@ import {
   deriveKek,
   wrapMekBytes,
   unwrapMekBytes,
+  assertMekEnvelopeReopens,
   generateRecoveryCode,
   deriveRecoveryKek,
   CURRENT_VAULT_KEY_VERSION,
@@ -68,6 +69,7 @@ import {
   grantCoAdmin as grantCoAdminImpl,
   loadAdminSubkeysDirect,
   revokeCoAdmin as revokeCoAdminImpl,
+  assertSaltMatchesUnlockedVault,
   type AdminSubkeys,
 } from "@/lib/co-admin";
 
@@ -329,6 +331,11 @@ interface VaultContextValue {
    *
    * Caller must persist newEncMekCiphertext + newRecoveryCiphertext to
    * user_vault_meta and show newRecoveryCode to the user exactly once.
+   *
+   * verifyPersistedEnvelopes must be handed to the persist call as its
+   * verifyPersisted argument. It closes over the key material needed to prove
+   * the bytes the database actually stored still open this vault, so the
+   * caller never has to hold a key to check that.
    */
   changeVaultPassword(params: {
     currentPassword: string;
@@ -341,6 +348,10 @@ interface VaultContextValue {
     newEncMekCiphertext: string;
     newRecoveryCode: string;
     newRecoveryCiphertext: string;
+    verifyPersistedEnvelopes(persisted: {
+      encMekCiphertext: string;
+      recoveryCiphertext: string;
+    }): Promise<void>;
   }>;
 }
 
@@ -697,10 +708,40 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const newRecoveryKek = await deriveRecoveryKek(newRecoveryCode);
       const newRecoveryCiphertext = await wrapMekBytes(mekRaw, newRecoveryKek);
 
-      // 5. Keep vault unlocked with the same MEK in memory.
+      // 5. Let the caller prove what the DATABASE stored, not merely what we
+      //    sent it. Both wrappers go out in one UPDATE and the old pair is
+      //    discarded, so a stored envelope that does not re-open is a permanent
+      //    lockout with no server-side copy to restore from. The wrapping keys
+      //    stay in this closure, so the route that does the write never handles
+      //    key material. Nothing new is derived here: these are the keys that
+      //    are already in scope.
+      const verifyPersistedEnvelopes = async (persisted: {
+        encMekCiphertext: string;
+        recoveryCiphertext: string;
+      }): Promise<void> => {
+        await assertMekEnvelopeReopens(
+          "The stored password key envelope",
+          persisted.encMekCiphertext,
+          newKek,
+          mekRaw,
+        );
+        await assertMekEnvelopeReopens(
+          "The stored recovery code envelope",
+          persisted.recoveryCiphertext,
+          newRecoveryKek,
+          mekRaw,
+        );
+      };
+
+      // 6. Keep vault unlocked with the same MEK in memory.
       mekRef.current = mek;
 
-      return { newEncMekCiphertext, newRecoveryCode, newRecoveryCiphertext };
+      return {
+        newEncMekCiphertext,
+        newRecoveryCode,
+        newRecoveryCiphertext,
+        verifyPersistedEnvelopes,
+      };
     },
     [],
   );
@@ -886,8 +927,18 @@ export function VaultProvider({ children }: VaultProviderProps) {
       existingKeyId: string | null;
       supabase: GrantSupabaseLike;
     }) => {
-      requireUnlocked(); // gate: vault must be unlocked
+      // The unlocked MEK is what the grant derives its subkeys from. It used
+      // to be discarded here and re-derived from the password downstream,
+      // which produced the wrong key on every vault the current setup creates.
+      const { mek, saltB64: unlockedSaltB64 } = requireUnlocked();
       const { targetEmail, supabase, ...rest } = params;
+
+      // The salt paired with that MEK arrives as params.ownerSaltB64, a
+      // separate value from the same caller. Assert the two agree before
+      // anything is looked up, allocated, wrapped or written: see
+      // assertSaltMatchesUnlockedVault for why this was previously safe only
+      // by call order and not by construction.
+      assertSaltMatchesUnlockedVault(unlockedSaltB64, params.ownerSaltB64);
 
       // Resolve email → userId + kemPublicKey via SECURITY DEFINER RPC.
       const { data: rows, error: rpcErr } = await supabase.rpc("lookup_user_for_coadmin", {
@@ -902,21 +953,41 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const targetKemPubB64 = row.kem_public_key;
 
       // Fetch the owner's ML-DSA-65 signing secret (wrapped) to sign the grant
-      // binding. This keeps app.tsx free of sig_secret_wrapped handling.
-      const { data: sigRow } = await (supabase as any)
+      // binding, plus the three fields the password confirmation needs. Reading
+      // them here keeps app.tsx free of vault-shape handling, and reads what
+      // the row says now rather than what the page loaded earlier.
+      const { data: metaRow } = await (supabase as any)
         .from("user_vault_meta")
-        .select("sig_secret_wrapped")
+        .select(
+          "sig_secret_wrapped, vault_verifier_ciphertext, vault_key_version, enc_mek_ciphertext",
+        )
         .eq("user_id", params.ownerUserId)
         .single();
-      const ownerSigSecretWrapped = (sigRow as Record<string, unknown> | null)?.sig_secret_wrapped as string | undefined;
+      const meta = metaRow as Record<string, unknown> | null;
+
+      const ownerSigSecretWrapped = meta?.sig_secret_wrapped as string | undefined;
       if (!ownerSigSecretWrapped) {
         throw new Error(
           "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
         );
       }
 
+      // No verifier means the password cannot be checked at all. Refuse rather
+      // than grant: a confirmation that is silently skipped is worse than one
+      // that stops and says so.
+      const ownerVerifierCiphertext = meta?.vault_verifier_ciphertext as string | undefined;
+      if (!ownerVerifierCiphertext) {
+        throw new Error(
+          "Your vault details could not be read, so your password cannot be confirmed. Nothing was granted. Reload the page and try again.",
+        );
+      }
+
       return grantCoAdminImpl({
         ...rest,
+        vaultMek: mek,
+        ownerVerifierCiphertext,
+        ownerKeyVersion: (meta?.vault_key_version as number | null) ?? 1,
+        ownerEncMekCiphertext: (meta?.enc_mek_ciphertext as string | null) ?? null,
         ownerSigSecretWrapped,
         targetUserId,
         targetKemPubB64,

@@ -1,3 +1,8 @@
+-- OUT-OF-ORDER-OK: never applied on dev or prod (both ledgers checked
+-- 2026-09-05, OR-T2256); merged via PR #925, Auditor-approved
+-- 2026-09-04, before the out-of-order guard (OR-T2147) existed. Only
+-- adds new objects (a column, a new table, a new function), so nothing
+-- already applied after it depends on or is undone by it.
 -- DL-0418 / DEV-0208: org vault member-add has no working path.
 --
 -- Adds the three objects the settled design depends on and that were never
@@ -65,8 +70,15 @@ COMMENT ON COLUMN public.customer_vault_meta.multi_unlock_confirmed_at IS
 -- existing sealed table, not a new sealed surface.
 
 -- 2. vault_blobs -------------------------------------------------------------
+--
+-- CAVEAT (from Auditor review on OR-T2264, PR #1295): CREATE TABLE IF NOT
+-- EXISTS only checks that the relation name exists, not that its shape
+-- matches. On dev today the live table matches this definition byte for
+-- byte (Auditor verified 2026-09-05). If that ever stops being true, this
+-- guard will not catch it; closing that properly needs a column shape
+-- assertion, not a stronger CREATE.
 
-CREATE TABLE public.vault_blobs (
+CREATE TABLE IF NOT EXISTS public.vault_blobs (
   id         uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   vault_id   uuid        NOT NULL REFERENCES public.org_vault_meta(vault_id) ON DELETE CASCADE,
   ciphertext bytea       NOT NULL,
@@ -77,7 +89,7 @@ CREATE TABLE public.vault_blobs (
 COMMENT ON TABLE public.vault_blobs IS
   'Encrypted content for a shared org vault (org_vault_meta.vault_id). AEAD ciphertext under the vault MEK; server never sees plaintext or the key. All access is through SECURITY DEFINER RPCs not built by this migration (vault-read, vault-write, revoke). The activation gate (max 10,000 rows per vault) and the member-revoke re-seal transaction both operate on this table. See DL-0484 Rev 5 Blocker 5 and DL-0514 Rev 9 Section 6.3.';
 
-CREATE INDEX vault_blobs_vault_id_idx ON public.vault_blobs (vault_id);
+CREATE INDEX IF NOT EXISTS vault_blobs_vault_id_idx ON public.vault_blobs (vault_id);
 
 ALTER TABLE public.vault_blobs ENABLE ROW LEVEL SECURITY;
 

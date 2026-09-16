@@ -348,6 +348,20 @@ export async function strikeDeleteSubscription(
 }
 
 /**
+ * Fetch a single webhook subscription by id. Used as a positive liveness
+ * check (OR-T0386): a stored subscription id does not mean the subscription
+ * still exists at Strike, is enabled, or points at our current webhook URL.
+ * Throws (via strikeGet) on a non-2xx response; the caller reads a 404
+ * specifically to mean "gone at Strike, treat as needing resubscribe".
+ */
+export async function strikeGetSubscription(
+  creds: StrikeCredentials,
+  subscriptionId: string,
+): Promise<StrikeSubscription> {
+  return strikeGet<StrikeSubscription>(creds, `/subscriptions/${encodeURIComponent(subscriptionId)}`);
+}
+
+/**
  * Default set of event types we subscribe to. Covers the full lifecycle for
  * accounting: incoming invoices, outgoing payments, Lightning receives, bank
  * deposits + payouts, and currency exchanges.

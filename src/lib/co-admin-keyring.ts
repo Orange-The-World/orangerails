@@ -244,12 +244,24 @@ function aadBytes(binding: CoAdminBinding): Uint8Array {
   if (typeof binding.grantId !== "string" || binding.grantId.length === 0) {
     throw new Error("Co-admin keyring binding requires a grant id.");
   }
-  // JSON.stringify on an array of strings is unambiguous for any input: the
-  // encoder escapes every embedded quote and backslash, so the tuple always
-  // parses back to the exact three strings that produced it. A fixed
-  // delimiter like "prefix|owner|grant" cannot make that guarantee, because
-  // the delimiter character can appear inside either field and move the
-  // split point, letting two different bindings produce the same bytes.
+  // A fixed delimiter like "prefix|owner|grant" cannot bind these fields
+  // injectively, because the delimiter character can appear inside either
+  // field and move the split point, letting two different bindings produce
+  // the same bytes. JSON.stringify on the tuple avoids that: escaping every
+  // embedded quote and backslash keeps the array boundaries unambiguous.
+  //
+  // That escaping is not the whole story, though. The bytes actually bound
+  // are TextEncoder().encode(...) of the JSON string, and TextEncoder
+  // converts to a scalar-value string first, replacing any UNPAIRED
+  // surrogate with U+FFFD. If JSON.stringify emitted a lone surrogate raw,
+  // ownerUserId "\uD800" and ownerUserId "\uDFFF" would both encode to the
+  // same replacement byte sequence, with no delimiter or quote involved: a
+  // second collision of exactly the class this construction exists to close.
+  // What actually prevents it is that JSON.stringify has been well-formed
+  // since ES2019: an unpaired surrogate is emitted as the six ASCII
+  // characters \ud800, so TextEncoder never sees a raw one. The test below
+  // pins that property so a future runtime regression is caught by CI rather
+  // than by an incident.
   return new TextEncoder().encode(
     JSON.stringify([AAD_PREFIX, binding.ownerUserId, binding.grantId]),
   );
