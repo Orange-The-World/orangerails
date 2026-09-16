@@ -420,6 +420,24 @@ jobs:
     name: Test edge functions (Deno)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # OR-T1721: a real postgres service container so a test can execute a
+    # SQL statement against a real schema, not just match its shape as a
+    # string. No tool-only seat here holds a Supabase write credential (the
+    # sb_query grant is read-only SELECT and refuses even an EXPLAIN of an
+    # INSERT), so this ephemeral, disposable database is how that gap
+    # closes without needing one. It never touches Supabase dev or prod.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     # Why this job exists: the repo has carried edge-function tests since long
     # before this job, and not one of them has ever run. `deno check` above
     # typechecks supabase/functions but never executes it, vitest's include is
@@ -458,8 +476,33 @@ jobs:
           # edge runtime is deno 2.1.4, so tests run on the runtime that ships.
           deno-version: v2.1.4
 
+      - name: Apply channel_state schema for the OR-T1721 pg execution test
+        # A minimal auth.users table and an auth.uid() stub are enough for
+        # the real migration file's own RLS policy to CREATE (Postgres
+        # resolves the function name at CREATE POLICY time). Nothing in
+        # this job reads through RLS, so the stub only ever needs to exist,
+        # never to return a real caller.
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c 'create schema if not exists auth;' \
+            -c 'create table if not exists auth.users (id uuid primary key);' \
+            -c 'create or replace function auth.uid() returns uuid language sql stable as $$ select null::uuid $$;' \
+            -c "do \$\$ begin if not exists (select from pg_catalog.pg_roles where rolname = 'authenticated') then create role authenticated; end if; end \$\$;"
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f supabase/migrations/20260711120000_channel_state.sql
+
       - name: deno test supabase/functions
         shell: bash
+        env:
+          # OR-T1721: gives index.pg.test.ts a real database to execute
+          # UPSERT_CHANNEL_STATE_SQL against. Unset in any environment
+          # without the postgres service above, in which case that file's
+          # own tests report ignored (a real, honest skip), never a
+          # silent pass.
+          TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: |
           set -euo pipefail
 
