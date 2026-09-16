@@ -127,7 +127,7 @@ export function isBlindIndexHex(v: unknown): v is string {
  */
 export function validateCursorOrResponse(
   body: { before_block?: number; before_txid_blind_index_hex?: string },
-  cors: HeadersInit,
+  cors: Record<string, string>,
 ): Response | null {
   const hasBlock = body.before_block !== undefined;
   const hasTxid = body.before_txid_blind_index_hex !== undefined;
