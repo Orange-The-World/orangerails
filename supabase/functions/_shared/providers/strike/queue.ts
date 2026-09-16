@@ -33,12 +33,14 @@ import {
   normalizeReceive,
   parseStrikeCredentials,
   strikeCreateSubscription,
+  strikeDeleteSubscription,
   strikeGetDepositById,
   strikeGetExchangeQuoteById,
   strikeGetInvoiceById,
   strikeGetPaymentById,
   strikeGetPayoutById,
   strikeGetReceiveById,
+  strikeGetSubscription,
 } from './index.ts';
 import type { NormalizedTransaction, SyncResult } from '../types.ts';
 import { computeWalletFingerprint } from '../../account-fingerprint.ts';
@@ -92,7 +94,28 @@ export interface DrainConnection {
   id: string;
   strike_subscription_id: string | null;
   last_sync_cursor: string | null;
+  /**
+   * Set when or-strike-webhook has seen enough consecutive bad-sig 401s to
+   * conclude the stored secret has drifted from what Strike is signing with
+   * (OR-T0386). True forces a delete-and-recreate even though
+   * strike_subscription_id is already populated, so a connection holding a
+   * stale id does not stay broken forever.
+   */
+  needs_resubscribe?: boolean;
+  /**
+   * Last time the stored subscription was positively verified against
+   * Strike. Null or absent means never checked. See
+   * SUBSCRIPTION_CHECK_INTERVAL_MS (OR-T0386): the bad-sig counter above
+   * only fires on a failure Strike actually sends, and production showed
+   * Strike can simply stop delivering to a subscription that never returns
+   * 2xx, which freezes that counter below its own threshold. This lets the
+   * sync path check instead of wait.
+   */
+  subscription_checked_at?: string | null;
 }
+
+/** Verify the stored subscription at most this often per connection. */
+const SUBSCRIPTION_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Resolve the source_wallet_id for a Strike invoice at drain time.
@@ -143,13 +166,74 @@ export async function drainStrikeQueue(args: {
   const creds = parseStrikeCredentials(args.credentials);
   const conn = args.connection;
 
-  // Step 1: ensure subscription registered
-  if (!conn.strike_subscription_id) {
+  // Step 1a: positively verify a stored subscription that has not already
+  // been flagged needs_resubscribe by the bad-sig counter. That counter can
+  // only fire on a failure Strike actually delivers, and production showed
+  // Strike can stop delivering to a subscription that never returns 2xx,
+  // which freezes the counter below its own threshold forever (OR-T0386).
+  // Damped to once a day so a healthy connection does not add a Strike API
+  // call to every sync. A transient error (network, auth, rate limit)
+  // deliberately does NOT force a resubscribe -- only a 404, meaning the
+  // subscription is actually gone at Strike, does. Anything else is logged
+  // and left for the next check.
+  let needsResubscribe = conn.needs_resubscribe ?? false;
+  const webhookUrl = `${args.webhookBaseUrl}?conn=${conn.id}`;
+  if (conn.strike_subscription_id && !needsResubscribe) {
+    const lastChecked = conn.subscription_checked_at ? new Date(conn.subscription_checked_at).getTime() : 0;
+    if (Date.now() - lastChecked > SUBSCRIPTION_CHECK_INTERVAL_MS) {
+      try {
+        const sub = await strikeGetSubscription(creds, conn.strike_subscription_id);
+        if (!sub.enabled || sub.webhookUrl !== webhookUrl) {
+          console.warn(
+            `[strike-queue] connection ${conn.id}: stored subscription ${conn.strike_subscription_id} ` +
+            `is stale (enabled=${sub.enabled}, webhookUrl matches=${sub.webhookUrl === webhookUrl}), resubscribing`,
+          );
+          needsResubscribe = true;
+        } else {
+          const { error: stampErr } = await args.serviceClient
+            .from('connections')
+            .update({ strike_subscription_checked_at: new Date().toISOString() })
+            .eq('id', conn.id);
+          if (stampErr) {
+            console.warn(`[strike-queue] failed to stamp subscription_checked_at for connection ${conn.id}:`, stampErr);
+          }
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (/\b404\b|not.?found/i.test(message)) {
+          console.warn(`[strike-queue] connection ${conn.id}: stored subscription ${conn.strike_subscription_id} is gone at Strike (404), resubscribing`);
+          needsResubscribe = true;
+        } else {
+          console.warn(`[strike-queue] liveness check failed for connection ${conn.id}, leaving subscription as-is: ${message.slice(0, 200)}`);
+        }
+      }
+    }
+  }
+
+  // Step 1b: ensure subscription registered, or re-registered if flagged by
+  // either the bad-sig counter or the liveness check above (OR-T0386). A
+  // stored strike_subscription_id does not mean it still works: the secret
+  // can drift, and this guard used to only ever fire once per connection.
+  if (!conn.strike_subscription_id || needsResubscribe) {
+    const staleSubscriptionId = needsResubscribe ? conn.strike_subscription_id : null;
+    if (staleSubscriptionId) {
+      // Best-effort delete of the subscription being replaced, so Strike
+      // does not accumulate live subscriptions signing with secrets we no
+      // longer store. strikeDeleteSubscription treats a 404 as success, so
+      // a subscription Strike already dropped is not an error here.
+      try {
+        await strikeDeleteSubscription(creds, staleSubscriptionId);
+      } catch (err) {
+        console.warn(
+          `[strike-queue] failed to delete stale subscription ${staleSubscriptionId} for connection ${conn.id}, continuing to re-register:`,
+          err,
+        );
+      }
+    }
     // Strike caps the `secret` field at 50 chars per
     // docs.strike.me/api/create-subscription. 24 random bytes -> 48 hex chars,
     // safely under the limit while still 192 bits of entropy.
     const secret = generateHexSecret(24);
-    const webhookUrl = `${args.webhookBaseUrl}?conn=${conn.id}`;
     try {
       const sub = await strikeCreateSubscription(creds, {
         webhookUrl,
@@ -158,10 +242,15 @@ export async function drainStrikeQueue(args: {
       });
       const { error } = await args.serviceClient
         .from('connections')
-        .update({ strike_subscription_id: sub.id, strike_webhook_secret: secret })
+        .update({
+          strike_subscription_id: sub.id,
+          strike_webhook_secret: secret,
+          strike_needs_resubscribe: false,
+          strike_subscription_checked_at: new Date().toISOString(),
+        })
         .eq('id', conn.id);
       if (error) throw error;
-      console.log(`[strike-queue] registered subscription ${sub.id} for connection ${conn.id}`);
+      console.log(`[strike-queue] registered subscription ${sub.id} for connection ${conn.id}${staleSubscriptionId ? ' (resubscribe)' : ''}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // Map the failure to an actionable marker on EVERY subscription-failure

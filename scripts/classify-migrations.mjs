@@ -1,0 +1,1373 @@
+#!/usr/bin/env node
+/**
+ * classify-migrations.mjs
+ *
+ * Classify each migration file as REVERSIBLE, IRREVERSIBLE or UNPARSEABLE.
+ *
+ * WHY THIS EXISTS (OR-T1518, from the ruling on OR-T0537). Our production
+ * migration rule says a reversible change is two party between fleet seats and
+ * an irreversible one needs the founder. Until this script, nothing in the
+ * pipeline could tell the two apart, so the rule was prose: a GRANT and a DROP
+ * TABLE took the same path, the same reviewers and the same single click.
+ *
+ * THE ONE RULE THAT MATTERS. UNPARSEABLE IS IRREVERSIBLE. This script never
+ * concludes REVERSIBLE from an absence. If it cannot read a file, cannot find
+ * the end of a quote, cannot tell whether a block executes at apply time, or is
+ * handed no files at all, it exits non-zero. Every caller must treat ANY
+ * non-zero exit as "do not apply", never as "the check did not run".
+ *
+ * THE SAME RULE APPLIED TO DYNAMIC SQL. A DO block that runs at apply time can
+ * assemble a statement at run time and hand it to EXECUTE. When the text being
+ * executed comes from a variable, the file does not say what will run, so the
+ * absence of a DROP in the file is not evidence that no DROP happens. That is
+ * refused (DYNAMIC EXECUTE). An EXECUTE whose statement IS written out in the
+ * file, as a literal or as format() with a literal template using only %I and
+ * %L, is read normally: those quote what they interpolate and cannot introduce
+ * a statement, so the rules below see the real SQL and judge it on its merits.
+ *
+ * USAGE
+ *   node scripts/classify-migrations.mjs FILE [FILE...]
+ *   node scripts/classify-migrations.mjs --from-list <path>   one path per line
+ *   node scripts/classify-migrations.mjs --selftest           fixtures, both ways
+ *   ... [--json <path>]                                       machine readable
+ *
+ * EXIT CODES
+ *   0  every file examined is REVERSIBLE, and at least one file was examined
+ *   2  at least one file is IRREVERSIBLE or UNPARSEABLE, or no file was given
+ *   1  the classifier itself could not run (bad usage, selftest failure)
+ *   Any non-zero exit means DO NOT APPLY.
+ *
+ * WHAT IT IS NOT. It does not decide whether a change is correct, safe, or
+ * wanted. It decides one thing: whether the change has a restore path. A
+ * reversible change can still be a bad change; that is what review is for.
+ */
+
+import { readFileSync, existsSync, readdirSync, writeFileSync } from 'node:fs';
+import { basename, join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const FIXTURE_DIR = join(HERE, 'fixtures', 'migration-classifier');
+
+export const REVERSIBLE = 'REVERSIBLE';
+export const IRREVERSIBLE = 'IRREVERSIBLE';
+export const UNPARSEABLE = 'UNPARSEABLE';
+
+/**
+ * The name in a CREATE [OR REPLACE] FUNCTION|PROCEDURE header, schema qualified
+ * or not, quoted identifiers allowed. If this does not match we do not know
+ * which routine a body belongs to, so we cannot ask whether the file invokes it,
+ * and an unaskable question is a refusal rather than a skip (OR-T1658).
+ */
+const ROUTINE_NAME =
+  /\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\s+((?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][A-Za-z0-9_$]*))*)/i;
+
+/** Escape a routine name so it can be dropped into a RegExp as a literal. */
+function escapeForRegExp(s) {
+  return s.replace(/[^A-Za-z0-9_]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Canonicalise a schema-qualified, possibly quoted routine name so the
+ * definition side and the invocation side agree on the same token for the
+ * same SQL (OR-T1708). Structural whitespace, the kind that tolerates
+ * `public . thing`, is removed entirely. Whitespace INSIDE a quoted
+ * identifier is significant in PostgreSQL and is only collapsed to a single
+ * space here, never stripped, which is exactly what the invocation side does
+ * to the same text once its quotes are removed (see isInvokedBy). A blanket
+ * `.replace(/\s+/g, '')` on the definition side used to delete the space
+ * inside `public."purge audit"` too, producing a name ("purgeaudit") that
+ * does not exist, so the two sides could never agree and the body was never
+ * scanned (OR-T1666, OR-T1708).
+ */
+function normalizeQualifiedName(raw) {
+  const parts = [];
+  let i = 0;
+  const n = raw.length;
+  while (i < n) {
+    if (/\s/.test(raw[i]) || raw[i] === '.') {
+      i += 1;
+      continue;
+    }
+    if (raw[i] === '"') {
+      let j = i + 1;
+      while (j < n && raw[j] !== '"') j += 1;
+      parts.push(raw.slice(i + 1, j).replace(/\s+/g, ' ').trim());
+      i = j + 1;
+      continue;
+    }
+    let j = i;
+    while (j < n && !/[\s."]/.test(raw[j])) j += 1;
+    parts.push(raw.slice(i, j));
+    i = j;
+  }
+  return parts.join('.');
+}
+
+/**
+ * Statement forms that NAME a routine without causing it to run: its own
+ * definition, and the housekeeping around it.
+ *
+ * Everything else that mentions the routine with an argument list is treated as
+ * a possible invocation. That is deliberately generous: over-scanning a body
+ * costs an unnecessary refusal that a human can clear in a minute, and
+ * under-scanning it costs the data.
+ */
+function namesWithoutInvoking(flat) {
+  return (
+    /^CREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\b/i.test(flat) ||
+    /^(DROP|COMMENT|GRANT|REVOKE)\b/i.test(flat) ||
+    /^ALTER\s+(FUNCTION|PROCEDURE|ROUTINE)\b/i.test(flat)
+  );
+}
+
+/**
+ * Does anything in this statement list cause `routine` to run?
+ *
+ * Double quotes are stripped from the statement before the test. The
+ * definition side already normalises them away (normalizeQualifiedName), so
+ * without this the two halves of one feature disagree about quoting:
+ * public."thing"() is not seen as the same call as public.thing(), the body
+ * is never scanned, and a file that empties a table classifies REVERSIBLE
+ * (OR-T1695). Identifier quotes are the only double quotes that can reach
+ * here, because scrub blanks every string literal before the statements are
+ * split.
+ *
+ * KNOWN AND DELIBERATELY OUT OF SCOPE, recorded so the next reader does not
+ * re-derive them as new (OR-T1695). Two constructions can make a routine run
+ * without naming it with an argument list: an aggregate or an operator
+ * defined over it in the same file, where only the aggregate or the operator
+ * is ever called; and PostgreSQL functional notation, where a call can be
+ * written with no parentheses at all. Both are far from ordinary migration
+ * work and neither is handled here.
+ */
+function isInvokedBy(sts, routine) {
+  const call = new RegExp(`(^|[^A-Za-z0-9_$])${escapeForRegExp(routine.short)}\\s*\\(`, 'i');
+  for (const st of sts) {
+    const flat = st.text.replace(/"/g, '').replace(/\s+/g, ' ').trim();
+    if (!call.test(flat)) continue;
+    if (namesWithoutInvoking(flat)) continue;
+    return true;
+  }
+  return false;
+}
+
+/** 1-based line number of a character offset in `text`. */
+function lineAt(text, offset) {
+  return (text.slice(0, offset).match(/\n/g) || []).length + 1;
+}
+
+/**
+ * Blank out everything that is not executable SQL, character for character, so
+ * that offsets into the returned text still map onto the original file and a
+ * reported line number is the real line number.
+ *
+ * Comments and string literals become spaces. Newlines are preserved.
+ *
+ * Dollar quoted blocks are the interesting case and the reason this is a
+ * scanner rather than a regex:
+ *
+ *   CREATE FUNCTION ... AS $$ ... DROP TABLE t; ... $$;
+ *       Whether this body runs at apply time is a property of the WHOLE file,
+ *       not of this statement. A migration that creates a routine and then
+ *       calls it, or attaches it as a trigger that a later statement fires,
+ *       executes the body during the apply. This is a single forward pass, so
+ *       the rest of the file has not been read yet and the question cannot be
+ *       answered here. The body is set aside with the routine's name and its
+ *       offset, and classifySql decides once everything is scrubbed (OR-T1658,
+ *       OR-T2496). A body whose routine cannot even be NAMED makes the file
+ *       UNPARSEABLE: a question that cannot be asked must not be answered with
+ *       silence.
+ *
+ *   DO $$ BEGIN ... DROP TABLE t; ... END $$;
+ *       The body DOES execute at apply time, so it is scanned. It goes through
+ *       scrubDoBody rather than through this function, because the two want
+ *       opposite things from a string literal. See that function's own comment:
+ *       the difference is deliberate and it is load bearing.
+ *
+ *   $tag$...$tag$ used anywhere else (a plain string constant)
+ *       Dollar quoting is just an alternate way to write a string literal;
+ *       CREATE FUNCTION ... AS and DO are the only two forms above that give
+ *       it special meaning. Most often this is an ARGUMENT, for example the
+ *       scheduled statement passed to cron.schedule(name, schedule, $tag$...
+ *       $tag$). It is not routed around (OR-T1705): the contents are scanned
+ *       under the exact same rules as ordinary SQL below, because a value
+ *       handed to something like cron.schedule keeps running on its own
+ *       schedule with nobody reviewing it again, so a TRUNCATE hiding inside
+ *       the literal is refused on purpose.
+ *
+ *   a dollar quote with no closing tag
+ *       Genuinely unparseable: the file itself is broken. UNPARSEABLE, which
+ *       this script treats as irreversible.
+ */
+function scrub(sql) {
+  const out = [];
+  const notes = [];
+  const routines = [];
+  const n = sql.length;
+  let i = 0;
+
+  const blank = (s) => {
+    for (const c of s) out.push(c === '\n' ? '\n' : ' ');
+  };
+
+  while (i < n) {
+    const two = sql.slice(i, i + 2);
+
+    if (two === '--') {
+      let j = sql.indexOf('\n', i);
+      if (j === -1) j = n;
+      blank(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    if (two === '/*') {
+      let depth = 0;
+      let j = i;
+      while (j < n) {
+        if (sql.slice(j, j + 2) === '/*') {
+          depth += 1;
+          j += 2;
+          continue;
+        }
+        if (sql.slice(j, j + 2) === '*/') {
+          depth -= 1;
+          j += 2;
+          if (depth === 0) break;
+          continue;
+        }
+        j += 1;
+      }
+      if (depth !== 0) {
+        return { error: 'unterminated block comment: the end of the file was reached inside /* ... */' };
+      }
+      blank(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    if (sql[i] === "'") {
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        if (sql[j] === "'") {
+          if (sql[j + 1] === "'") {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          closed = true;
+          break;
+        }
+        j += 1;
+      }
+      if (!closed) {
+        return { error: "unterminated single quoted string literal" };
+      }
+      blank(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    if (sql[i] === '"') {
+      // A quoted identifier is part of the statement, so it is kept, not blanked.
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        if (sql[j] === '"') {
+          if (sql[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          closed = true;
+          break;
+        }
+        j += 1;
+      }
+      if (!closed) {
+        return { error: 'unterminated quoted identifier' };
+      }
+      for (const c of sql.slice(i, j)) out.push(c);
+      i = j;
+      continue;
+    }
+
+    const dq = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
+    if (dq) {
+      const tag = dq[0];
+      const close = sql.indexOf(tag, i + tag.length);
+      if (close === -1) {
+        return { error: `unterminated dollar quoted block opened with ${tag}` };
+      }
+      const end = close + tag.length;
+      const body = sql.slice(i + tag.length, close);
+      const produced = out.join('');
+      const fragment = produced.slice(produced.lastIndexOf(';') + 1);
+
+      if (/\bCREATE\s+(OR\s+REPLACE\s+)?(FUNCTION|PROCEDURE)\b/i.test(fragment)) {
+        // OR-T1658, OR-T2496. SET ASIDE, not dismissed. Whether this body runs
+        // at apply time depends on the rest of the file, which this pass has
+        // not read yet, so record the body with the routine's name and its
+        // offset in the original text and let classifySql answer it. Blanked
+        // here so that a body which turns out to be unreachable costs nothing.
+        const named = ROUTINE_NAME.exec(fragment);
+        if (!named) {
+          return {
+            error:
+              'a routine body was found but the routine it defines could not be named from the ' +
+              'text, so whether this migration invokes it cannot be answered. An unanswered ' +
+              'question takes the irreversible branch, never the silent one',
+          };
+        }
+        const qualified = normalizeQualifiedName(named[1]);
+        routines.push({
+          name: qualified,
+          short: qualified.split('.').pop(),
+          body,
+          bodyOffset: i + tag.length,
+        });
+        blank(sql.slice(i, end));
+      } else if (/(^|;)\s*DO\b/i.test(fragment)) {
+        // OR-T1709. The body executes at apply time, so it is scanned. It is
+        // scanned by scrubDoBody and NOT by this function: a comment inside a
+        // DO body is not executable SQL and must be blanked like any other
+        // comment, while a string literal inside a DO body usually IS the
+        // statement EXECUTE is about to run and must be kept. This copied the
+        // body through character for character, which left comments in the
+        // scanned text and let one of them supply the token that exempts the
+        // next EXECUTE from the dynamic-SQL check.
+        const inner = scrubDoBody(body);
+        if (inner.error) {
+          return { error: `a DO block body could not be read: ${inner.error}` };
+        }
+        blank(tag);
+        for (const c of inner.text) out.push(c);
+        blank(tag);
+      } else {
+        // OR-T1705. Syntactically this IS just a string constant (dollar
+        // quoting has no other meaning outside the two forms above), most
+        // often an argument such as the scheduled statement passed to
+        // cron.schedule. A value like that keeps running on its own schedule
+        // with nobody reviewing it again, so it is not waved through: its
+        // contents are scanned under the same rules as everything else,
+        // exactly like a DO block, instead of being refused unread.
+        notes.push(
+          `dollar quoted block ${tag} is a string literal argument, not a routine body or a ` +
+            'DO block: for example the scheduled statement passed to cron.schedule. Its ' +
+            'contents were scanned under the same rules as ordinary SQL',
+        );
+        blank(tag);
+        for (const c of body) out.push(c);
+        blank(tag);
+      }
+      i = end;
+      continue;
+    }
+
+    out.push(sql[i]);
+    i += 1;
+  }
+
+  return { text: out.join(''), notes, routines };
+}
+
+/**
+ * Scrub the body of a DO block. This is a DIFFERENT scrub from the one above,
+ * on purpose, and the difference is the whole point of OR-T1709.
+ *
+ * A DO body executes when the migration is applied, so it has to be scanned.
+ * But it is also the one place in a migration where a string literal is usually
+ * not data: it is the statement EXECUTE is about to run, and it is the only
+ * readable copy of that statement anywhere in the file. The two scrubs
+ * therefore want opposite things:
+ *
+ *   comments            BLANKED. A comment never executes, here or anywhere.
+ *                       Leaving them in let a comment be read as code in both
+ *                       directions. Prose mentioning DROP TABLE refused a clean
+ *                       file, and a comment whose last word was GRANT or REVOKE
+ *                       satisfied the exemption in executeIsUnreadable for the
+ *                       EXECUTE on the next line, because that anchor ends in
+ *                       \s and \s matches a newline.
+ *
+ *   string literals     KEPT, character for character, because they carry the
+ *                       dynamic SQL. Blanking them would flatten
+ *                       EXECUTE 'drop table t' to EXECUTE, no rule would match,
+ *                       and the file would read as clean while it drops a table.
+ *                       Only a semicolon INSIDE a literal is blanked, so a
+ *                       literal cannot split a statement it merely mentions.
+ *
+ *   quoted identifiers  Kept, same as at the top level, semicolons aside.
+ *
+ *   dollar quoted text  Treated as another way of writing a literal: kept, with
+ *                       its semicolons blanked. An unterminated one is an error,
+ *                       never silence.
+ *
+ * THE TRADE, stated rather than hidden. A literal that really is prose, such as
+ * a RAISE NOTICE explaining why nothing was truncated, is now scanned as if it
+ * were SQL and can refuse a file that is perfectly fine. That is the safe
+ * direction and it is accepted deliberately. The opposite trade lets a real
+ * DROP through, and this script never concludes REVERSIBLE from an absence.
+ *
+ * Length preserving on every branch: one character out for every character in,
+ * newlines kept as newlines. That is what lets the caller fold the result back
+ * at the same offset and still report real line numbers.
+ */
+function scrubDoBody(sql) {
+  const out = [];
+  const n = sql.length;
+  let i = 0;
+
+  const blank = (s) => {
+    for (const c of s) out.push(c === '\n' ? '\n' : ' ');
+  };
+
+  // Kept as written, except that a semicolon inside it must not be able to end
+  // a statement: the text is quoted, so the semicolon is content, not a
+  // separator.
+  const keepButNeverSplit = (s) => {
+    for (const c of s) out.push(c === ';' ? ' ' : c);
+  };
+
+  while (i < n) {
+    const two = sql.slice(i, i + 2);
+
+    if (two === '--') {
+      let j = sql.indexOf('\n', i);
+      if (j === -1) j = n;
+      blank(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    if (two === '/*') {
+      let depth = 0;
+      let j = i;
+      while (j < n) {
+        if (sql.slice(j, j + 2) === '/*') {
+          depth += 1;
+          j += 2;
+          continue;
+        }
+        if (sql.slice(j, j + 2) === '*/') {
+          depth -= 1;
+          j += 2;
+          if (depth === 0) break;
+          continue;
+        }
+        j += 1;
+      }
+      if (depth !== 0) {
+        return { error: 'unterminated block comment inside a DO block body' };
+      }
+      blank(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    if (sql[i] === "'") {
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        if (sql[j] === "'") {
+          if (sql[j + 1] === "'") {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          closed = true;
+          break;
+        }
+        j += 1;
+      }
+      if (!closed) {
+        return { error: 'unterminated single quoted string literal inside a DO block body' };
+      }
+      keepButNeverSplit(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    if (sql[i] === '"') {
+      let j = i + 1;
+      let closed = false;
+      while (j < n) {
+        if (sql[j] === '"') {
+          if (sql[j + 1] === '"') {
+            j += 2;
+            continue;
+          }
+          j += 1;
+          closed = true;
+          break;
+        }
+        j += 1;
+      }
+      if (!closed) {
+        return { error: 'unterminated quoted identifier inside a DO block body' };
+      }
+      keepButNeverSplit(sql.slice(i, j));
+      i = j;
+      continue;
+    }
+
+    const dq = /^\$([A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(i));
+    if (dq) {
+      const tag = dq[0];
+      const close = sql.indexOf(tag, i + tag.length);
+      if (close === -1) {
+        return {
+          error: `unterminated dollar quoted block opened with ${tag} inside a DO block body`,
+        };
+      }
+      keepButNeverSplit(sql.slice(i, close + tag.length));
+      i = close + tag.length;
+      continue;
+    }
+
+    out.push(sql[i]);
+    i += 1;
+  }
+
+  return { text: out.join('') };
+}
+
+/** Split scrubbed SQL into statements, keeping each one's offset in the file. */
+function statements(text) {
+  const found = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    if (text[i] === ';') {
+      found.push({ text: text.slice(start, i), offset: start });
+      start = i + 1;
+    }
+  }
+  const tail = text.slice(start);
+  if (tail.trim().length > 0) found.push({ text: tail, offset: start });
+  return found.filter((s) => s.text.trim().length > 0);
+}
+
+/**
+ * Index just past the closing quote of the single quoted literal starting at i,
+ * or -1 if the literal is never closed. Callers treat -1 as unreadable rather
+ * than skipping it, so a malformed quote can never widen what is allowed.
+ */
+function endOfLiteral(text, i) {
+  let j = i + 1;
+  while (j < text.length) {
+    if (text[j] === "'") {
+      if (text[j + 1] === "'") {
+        j += 2;
+        continue;
+      }
+      return j + 1;
+    }
+    j += 1;
+  }
+  return -1;
+}
+
+/** Split on a separator that is not inside a literal and not inside parentheses. */
+function splitTop(text, sep) {
+  const parts = [];
+  let depth = 0;
+  let start = 0;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "'") {
+      const end = endOfLiteral(text, i);
+      i = end === -1 ? text.length : end;
+      continue;
+    }
+    if (c === '(') {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (c === ')') {
+      if (depth > 0) depth -= 1;
+      i += 1;
+      continue;
+    }
+    if (depth === 0 && text.startsWith(sep, i)) {
+      parts.push(text.slice(start, i));
+      i += sep.length;
+      start = i;
+      continue;
+    }
+    i += 1;
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/** The EXECUTE argument itself: everything up to a top level USING or INTO. */
+function executeArgument(after) {
+  let depth = 0;
+  let i = 0;
+  while (i < after.length) {
+    const c = after[i];
+    if (c === "'") {
+      const end = endOfLiteral(after, i);
+      i = end === -1 ? after.length : end;
+      continue;
+    }
+    if (c === '(') {
+      depth += 1;
+      i += 1;
+      continue;
+    }
+    if (c === ')') {
+      if (depth === 0) break;
+      depth -= 1;
+      i += 1;
+      continue;
+    }
+    if (depth === 0 && /\s/.test(c) && /^\s+(USING|INTO)\b/i.test(after.slice(i))) break;
+    i += 1;
+  }
+  return after.slice(0, i);
+}
+
+/**
+ * Is one piece of an EXECUTE argument readable from the file?
+ *
+ * Readable means the SQL text is HERE, so the rules below can judge it:
+ *   'DROP TABLE t'                       a literal, read as written
+ *   format('CREATE INDEX %I ON t (a)', x) a literal template. %I and %L quote
+ *                                        what they interpolate, so an argument
+ *                                        cannot smuggle in a statement. %s
+ *                                        splices raw text and is NOT readable.
+ *   quote_ident(x)                       emits one quoted token, never a
+ *                                        statement
+ * Anything else, a bare variable most of all, is not readable: the statement
+ * that will run is decided at run time and is not in this file.
+ */
+function readablePiece(piece) {
+  const p = piece.trim();
+  if (p === '') return false;
+  if (p.startsWith("'")) return endOfLiteral(p, 0) === p.length;
+  if (/^(quote_ident|quote_literal|quote_nullable)\s*\([\s\S]*\)$/i.test(p)) return true;
+  const fmt = /^format\s*\(([\s\S]*)\)$/i.exec(p);
+  if (!fmt) return false;
+  const template = splitTop(fmt[1], ',')[0] ?? '';
+  if (!splitTop(template, '||').every(readablePiece)) return false;
+  return !/%(?![ILil%])/.test(template);
+}
+
+/**
+ * A run of privilege names, comma separated, each optionally followed by a
+ * parenthesised column list (`SELECT (a, b)`), and nothing else. Used to spot
+ * a guarded word (TRUNCATE, EXECUTE) sitting inside a GRANT/REVOKE privilege
+ * list when it is NOT the first privilege named: Postgres privilege lists are
+ * comma separated and the order is arbitrary, so `GRANT SELECT, TRUNCATE ...`
+ * names a privilege exactly as much as `GRANT TRUNCATE ...` does. Anchored
+ * the same way the single-word check it replaces was anchored: nothing here
+ * accepts arbitrary text between GRANT/REVOKE and the guarded word, only more
+ * privilege names, so OR-T2188's anchoring is not reopened.
+ */
+const PRIVILEGE_LIST_PREFIX =
+  /\b(?:GRANT|REVOKE)\s+(?:[A-Za-z]+(?:\s*\([^()]*\))?\s*,\s*)*$/i;
+
+/**
+ * CREATE TRIGGER ... FOR EACH ROW EXECUTE FUNCTION name(args), and the legacy
+ * spelling EXECUTE PROCEDURE, name which routine to attach. Nothing is
+ * assembled at run time here: the routine identifier is written out in the
+ * file, same as any other call, and classifySql already reads that routine's
+ * body separately once it proves the trigger is invoked (see the routine scan
+ * in classifySql). Treating this EXECUTE as a dynamic-SQL statement made every
+ * migration that creates an ordinary trigger classify IRREVERSIBLE regardless
+ * of what the trigger actually does, which is exactly the false-positive
+ * noise that pushes a pipeline to route around a gate instead of trusting it.
+ * Anchored the same way as the GRANT/REVOKE exemption below: only the token
+ * immediately after EXECUTE is tested, never the whole statement.
+ */
+const TRIGGER_EXECUTE_ROUTINE = /^\s*(?:FUNCTION|PROCEDURE)\b/i;
+
+/**
+ * True when this statement runs SQL that cannot be read from the file.
+ *
+ * GRANT EXECUTE and REVOKE EXECUTE name a privilege on a function. They run
+ * nothing, so they are excluded: a gate that refuses every GRANT would fire on
+ * ordinary work and be routed around within a month.
+ *
+ * The exemption is anchored to the token IMMEDIATELY before EXECUTE, and that
+ * anchoring is the control, not a detail of it. Testing the whole prefix of the
+ * statement instead means one occurrence of the word GRANT or REVOKE anywhere
+ * earlier, in a comment as easily as in code, switches this check off for every
+ * EXECUTE after it. Comments in this repo's security migrations say REVOKE
+ * constantly, so that is reachable with ordinary text, and it fails in the
+ * direction that costs data: REVERSIBLE on a file that drops a table at apply
+ * time. The anchor accepts a privilege LIST before EXECUTE (see
+ * PRIVILEGE_LIST_PREFIX), not only the bare word, so `GRANT USAGE, EXECUTE ...`
+ * is recognised as a privilege grant the same as `GRANT EXECUTE ...` is
+ * (OR-T2212).
+ */
+function executeIsUnreadable(flat) {
+  const re = /\bEXECUTE\b/gi;
+  let m = re.exec(flat);
+  while (m !== null) {
+    const rest = flat.slice(m.index + 'EXECUTE'.length);
+    if (!PRIVILEGE_LIST_PREFIX.test(flat.slice(0, m.index)) && !TRIGGER_EXECUTE_ROUTINE.test(rest)) {
+      const arg = executeArgument(rest);
+      if (!splitTop(arg, '||').every(readablePiece)) return true;
+    }
+    m = re.exec(flat);
+  }
+  return false;
+}
+
+/**
+ * Does the TRUNCATE at `matchIndex` in `s` actually empty a table, or is it
+ * just the name of a privilege in a GRANT or REVOKE?
+ *
+ * GRANT TRUNCATE and REVOKE TRUNCATE name the privilege; they do not empty
+ * anything. The exemption is anchored to the token IMMEDIATELY before
+ * TRUNCATE, the same way executeIsUnreadable anchors its own GRANT/REVOKE
+ * exemption above. Testing the whole statement instead (the previous
+ * behaviour) let a real TRUNCATE hide behind an unrelated REVOKE anywhere
+ * earlier in the same statement, reachable once a single EXECUTE literal can
+ * carry more than one real SQL statement (OR-T1709 stopped blanking the
+ * semicolons that used to split them apart). See OR-T2188.
+ *
+ * The anchor accepts a privilege LIST before TRUNCATE (see
+ * PRIVILEGE_LIST_PREFIX), not only the bare word: privilege lists are comma
+ * separated and the order is arbitrary, so `GRANT SELECT, TRUNCATE ...` names
+ * a privilege exactly as much as `GRANT TRUNCATE ...` does (OR-T2212).
+ */
+function truncateIsPrivilegeName(s, matchIndex) {
+  return PRIVILEGE_LIST_PREFIX.test(s.slice(0, matchIndex));
+}
+
+/**
+ * Does the DELETE FROM ending at `afterIndex` in `s` carry its own WHERE
+ * clause?
+ *
+ * The previous rule asked "does WHERE appear ANYWHERE in this statement",
+ * which is only safe when a statement really is one DELETE. Once a DO block's
+ * EXECUTE literal can carry `DELETE FROM a; UPDATE b SET x = 1 WHERE y = 2` as
+ * one flattened piece (OR-T1709 blanks the literal's own semicolons so it is
+ * not split), a WHERE that belongs to a LATER statement excused an
+ * unqualified DELETE it has nothing to do with. This reads forward from the
+ * DELETE FROM only as far as the next statement-starting keyword, the same
+ * "read no further than the next real boundary" anchoring executeArgument
+ * already uses for USING/INTO, so a WHERE past that boundary belongs to
+ * someone else's statement and does not count. See OR-T2188.
+ *
+ * The scan for that boundary keyword skips over parenthesised text (see
+ * maskNested below), because SELECT is itself a statement-start keyword and a
+ * `DELETE FROM t USING (SELECT ...) WHERE ...` has its own WHERE sitting
+ * after a parenthesised SELECT that must not be read as the boundary
+ * (OR-T2212).
+ */
+const STATEMENT_START =
+  /\b(SELECT|INSERT|UPDATE|DELETE|TRUNCATE|DROP|ALTER|CREATE|GRANT|REVOKE|DO|WITH|BEGIN|COMMIT|ROLLBACK|VACUUM|ANALYZE|COPY|CALL)\b/i;
+
+/**
+ * `text` with everything inside parentheses, and inside string literals,
+ * replaced by spaces, character for character, so offsets into the result
+ * still line up with `text`. Lets deleteHasOwnWhere regex-match a
+ * statement-start keyword that is only meaningful at the top level, without a
+ * keyword sitting inside a subquery being mistaken for one.
+ */
+function maskNested(text) {
+  const out = [];
+  let depth = 0;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "'") {
+      const end = endOfLiteral(text, i);
+      const stop = end === -1 ? text.length : end;
+      out.push(' '.repeat(stop - i));
+      i = stop;
+      continue;
+    }
+    if (c === '(') {
+      depth += 1;
+      out.push(' ');
+      i += 1;
+      continue;
+    }
+    if (c === ')') {
+      depth = Math.max(0, depth - 1);
+      out.push(' ');
+      i += 1;
+      continue;
+    }
+    out.push(depth === 0 ? c : ' ');
+    i += 1;
+  }
+  return out.join('');
+}
+
+function deleteHasOwnWhere(s, afterIndex) {
+  const rest = maskNested(s.slice(afterIndex));
+  const whereMatch = /\bWHERE\b/i.exec(rest);
+  if (!whereMatch) return false;
+  const boundaryMatch = STATEMENT_START.exec(rest);
+  if (boundaryMatch && boundaryMatch.index < whereMatch.index) return false;
+  return true;
+}
+
+/**
+ * The irreversible classes. Each one is a change with NO restore path: running
+ * it wrong costs the data, not a revert.
+ *
+ * Several rules are deliberately blunt because the file alone cannot answer the
+ * precise question. Those say so in `why`, so the log explains the refusal
+ * instead of just asserting it.
+ */
+const RULES = [
+  {
+    id: 'DROP TABLE',
+    test: (s) => /\bDROP\s+TABLE\b/i.test(s),
+    why: 'drops a table and every row in it',
+  },
+  {
+    id: 'DROP SCHEMA',
+    test: (s) => /\bDROP\s+SCHEMA\b/i.test(s),
+    why: 'drops a schema and everything inside it',
+  },
+  {
+    id: 'DROP DATABASE',
+    test: (s) => /\bDROP\s+DATABASE\b/i.test(s),
+    why: 'drops a whole database',
+  },
+  {
+    id: 'DROP TYPE',
+    test: (s) => /\bDROP\s+TYPE\b/i.test(s),
+    why: 'drops a type, and any column still using it goes with it',
+  },
+  {
+    id: 'TRUNCATE',
+    // Anchored to the token immediately before each TRUNCATE occurrence (see
+    // truncateIsPrivilegeName above), not to whether GRANT or REVOKE appear
+    // anywhere in the statement.
+    test: (s) => {
+      const re = /\bTRUNCATE\b/gi;
+      let m = re.exec(s);
+      while (m !== null) {
+        if (!truncateIsPrivilegeName(s, m.index)) return true;
+        m = re.exec(s);
+      }
+      return false;
+    },
+    why: 'empties a table with no restore path',
+  },
+  {
+    id: 'DELETE WITHOUT WHERE',
+    // Checked per DELETE FROM occurrence (see deleteHasOwnWhere above), not by
+    // whether WHERE appears anywhere in the statement.
+    test: (s) => {
+      const re = /\bDELETE\s+FROM\b/gi;
+      let m = re.exec(s);
+      while (m !== null) {
+        if (!deleteHasOwnWhere(s, m.index + m[0].length)) return true;
+        m = re.exec(s);
+      }
+      return false;
+    },
+    why: 'deletes every row in the table: a DELETE with no WHERE clause',
+  },
+  {
+    id: 'DROP INDEX',
+    test: (s) => /\bDROP\s+INDEX\b/i.test(s),
+    why:
+      'the file cannot say whether this index backs a uniqueness guarantee, ' +
+      'and dropping one that does silently permits duplicate rows, so the class is refused',
+  },
+  {
+    id: 'ALTER COLUMN TYPE',
+    test: (s) =>
+      /\bALTER\s+TABLE\b/i.test(s) &&
+      /\bALTER\s+(COLUMN\s+)?[^\s,]+\s+(SET\s+DATA\s+)?TYPE\b/i.test(s),
+    why:
+      'a column type change rewrites the column. Whether it is a widening or a ' +
+      'narrowing cannot be answered from the file, because the old type is not in it, ' +
+      'so the class is refused rather than guessed',
+  },
+  {
+    id: 'SET NOT NULL',
+    test: (s) => /\bALTER\s+TABLE\b/i.test(s) && /\bSET\s+NOT\s+NULL\b/i.test(s),
+    why:
+      'the file cannot say whether the column is already populated, and on a populated ' +
+      'column this either fails the apply or hard codes an assumption about existing rows',
+  },
+  {
+    id: 'ALTER TABLE DROP',
+    test: (s) =>
+      /\bALTER\s+TABLE\b/i.test(s) &&
+      /\bDROP\s+(?!DEFAULT\b|NOT\s+NULL\b|IDENTITY\b|EXPRESSION\b)/i.test(s),
+    why:
+      'drops a column or a constraint. A dropped column takes its data with it, and a ' +
+      'dropped constraint can be backing a uniqueness guarantee',
+  },
+  {
+    id: 'DYNAMIC EXECUTE',
+    test: (s) => executeIsUnreadable(s),
+    why:
+      'runs SQL that is assembled at run time. The statement it will execute is not in ' +
+      'this file, so whether it drops anything cannot be read here, and an absence of ' +
+      'findings is not evidence of safety. Write the statement out, or apply it under an ' +
+      'explicit authority',
+  },
+];
+
+/** Classify one already read SQL string. Returns a verdict plus findings. */
+export function classifySql(sql) {
+  const scrubbed = scrub(sql);
+  if (scrubbed.error) {
+    return { verdict: UNPARSEABLE, findings: [{ line: 0, id: 'UNPARSEABLE', why: scrubbed.error, snippet: '' }], notes: [] };
+  }
+
+  const sts = statements(scrubbed.text);
+  if (sts.length === 0) {
+    return {
+      verdict: UNPARSEABLE,
+      findings: [
+        {
+          line: 0,
+          id: 'NO STATEMENT',
+          why:
+            'no executable statement was found in this file. An empty migration is either a ' +
+            'mistake or a file whose contents this scanner could not see, and neither may be ' +
+            'read as REVERSIBLE',
+          snippet: '',
+        },
+      ],
+      notes: scrubbed.notes,
+    };
+  }
+
+  const findings = [];
+  const notes = [...scrubbed.notes];
+
+  const applyRules = (flat, line) => {
+    for (const rule of RULES) {
+      if (rule.test(flat)) {
+        findings.push({
+          line,
+          id: rule.id,
+          why: rule.why,
+          snippet: flat.length > 160 ? `${flat.slice(0, 160)} ...` : flat,
+        });
+      }
+    }
+  };
+
+  for (const st of sts) {
+    const lead = st.text.length - st.text.replace(/^\s+/, '').length;
+    applyRules(st.text.replace(/\s+/g, ' ').trim(), lineAt(scrubbed.text, st.offset + lead));
+  }
+
+  // OR-T1658, OR-T2496. A routine body is only harmless if nothing in this same
+  // file can make it run. The scrub set each body aside rather than judging it,
+  // because a single forward pass cannot see the statements that come after.
+  // Now that the whole file is scrubbed, ask the question per routine and,
+  // where the answer is yes, scan the body under exactly the rules above.
+  //
+  // Scanning one body can reveal a call to ANOTHER routine defined in the same
+  // file, so this runs to a fixed point rather than once.
+  const routines = scrubbed.routines || [];
+  const scanned = new Set();
+  let reachable = sts;
+  let progressed = true;
+
+  while (progressed) {
+    progressed = false;
+    for (const routine of routines) {
+      if (scanned.has(routine)) continue;
+      if (!isInvokedBy(reachable, routine)) continue;
+      scanned.add(routine);
+      progressed = true;
+
+      const inner = scrub(routine.body);
+      if (inner.error) {
+        return {
+          verdict: UNPARSEABLE,
+          findings: [
+            {
+              line: lineAt(sql, routine.bodyOffset),
+              id: 'UNPARSEABLE',
+              why:
+                `this migration invokes ${routine.name}, so its body runs when the migration ` +
+                `is applied, and the body could not be read: ${inner.error}`,
+              snippet: '',
+            },
+          ],
+          notes,
+        };
+      }
+      if ((inner.routines || []).length > 0) {
+        return {
+          verdict: UNPARSEABLE,
+          findings: [
+            {
+              line: lineAt(sql, routine.bodyOffset),
+              id: 'UNPARSEABLE',
+              why:
+                `this migration invokes ${routine.name}, and that body itself defines a ` +
+                'routine. Whether the inner one runs cannot be answered from the file, so this ' +
+                'is refused rather than read as clean',
+              snippet: '',
+            },
+          ],
+          notes,
+        };
+      }
+
+      const bodyLine0 = lineAt(sql, routine.bodyOffset) - 1;
+      const innerSts = statements(inner.text);
+      for (const st of innerSts) {
+        const lead = st.text.length - st.text.replace(/^\s+/, '').length;
+        applyRules(
+          st.text.replace(/\s+/g, ' ').trim(),
+          bodyLine0 + lineAt(inner.text, st.offset + lead),
+        );
+      }
+      reachable = reachable.concat(innerSts);
+      notes.push(
+        `the body of ${routine.name} was SCANNED: this migration invokes it, so the body runs ` +
+          'when the migration is applied',
+      );
+    }
+  }
+
+  for (const routine of routines) {
+    if (scanned.has(routine)) continue;
+    notes.push(
+      `the body of ${routine.name} was not scanned: no statement in this migration calls it, ` +
+        'attaches it as a trigger, or otherwise names it with an argument list, so applying ' +
+        'this migration does not run it',
+    );
+  }
+
+  return {
+    verdict: findings.length > 0 ? IRREVERSIBLE : REVERSIBLE,
+    findings,
+    notes,
+    statementCount: sts.length,
+  };
+}
+
+/** Classify one file by path. An unreadable file is UNPARSEABLE, never skipped. */
+export function classifyFile(path) {
+  let sql;
+  try {
+    sql = readFileSync(path, 'utf8');
+  } catch (err) {
+    return {
+      file: basename(path),
+      path,
+      verdict: UNPARSEABLE,
+      findings: [{ line: 0, id: 'UNREADABLE', why: `could not read the file: ${err.message}`, snippet: '' }],
+      notes: [],
+    };
+  }
+  return { file: basename(path), path, ...classifySql(sql) };
+}
+
+function report(results) {
+  const counts = { [REVERSIBLE]: 0, [IRREVERSIBLE]: 0, [UNPARSEABLE]: 0 };
+  for (const r of results) {
+    counts[r.verdict] += 1;
+    console.log(`== ${r.file}: ${r.verdict}`);
+    for (const note of r.notes || []) console.log(`   note: ${note}`);
+    for (const f of r.findings) {
+      const where = f.line > 0 ? `line ${f.line}` : 'whole file';
+      console.log(`   ${r.verdict}  ${where}  [${f.id}]  ${f.why}`);
+      if (f.snippet) console.log(`     ${f.snippet}`);
+    }
+  }
+  console.log('');
+  console.log(
+    `EXAMINED ${results.length} file(s): ${counts[REVERSIBLE]} REVERSIBLE, ` +
+      `${counts[IRREVERSIBLE]} IRREVERSIBLE, ${counts[UNPARSEABLE]} UNPARSEABLE`,
+  );
+  return counts;
+}
+
+/**
+ * The self test. A classifier that has never refused anything is
+ * indistinguishable from a classifier that CANNOT refuse anything, so this
+ * asserts both directions: the reversible fixture must pass and every
+ * irreversible and unparseable fixture must be caught, by the named rule.
+ */
+const EXPECTED = {
+  '20990101000001_reversible_everything_allowed.sql': { verdict: REVERSIBLE, id: null },
+  '20990101000002_irreversible_drop_table.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE' },
+  '20990101000003_irreversible_drop_column.sql': { verdict: IRREVERSIBLE, id: 'ALTER TABLE DROP' },
+  '20990101000004_irreversible_delete_without_where.sql': { verdict: IRREVERSIBLE, id: 'DELETE WITHOUT WHERE' },
+  '20990101000005_irreversible_truncate_in_do_block.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
+  '20990101000006_irreversible_alter_column_type.sql': { verdict: IRREVERSIBLE, id: 'ALTER COLUMN TYPE' },
+  '20990101000007_irreversible_drop_constraint.sql': { verdict: IRREVERSIBLE, id: 'ALTER TABLE DROP' },
+  '20990101000008_unparseable_unterminated_dollar_quote.sql': { verdict: UNPARSEABLE, id: 'UNPARSEABLE' },
+  '20990101000009_unparseable_no_statement.sql': { verdict: UNPARSEABLE, id: 'NO STATEMENT' },
+  '20990101000010_irreversible_dynamic_execute.sql': { verdict: IRREVERSIBLE, id: 'DYNAMIC EXECUTE' },
+  '20990101000011_reversible_dynamic_execute_format.sql': { verdict: REVERSIBLE, id: null },
+  '20990101000012_irreversible_execute_format_drop_constraint.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'ALTER TABLE DROP',
+  },
+  // The word revoke appears only in a comment in this one, and the verb is
+  // built by concatenation so no static rule can match it. It classified
+  // REVERSIBLE while the GRANT and REVOKE exemption tested the whole statement
+  // prefix instead of the token immediately before EXECUTE.
+  '20990101000015_irreversible_dynamic_execute_after_revoke_comment.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'DYNAMIC EXECUTE',
+  },
+  // OR-T1709, the two directions of reading a DO block body.
+  //
+  // 16 is the false positive: a comment inside the body mentions DROP TABLE and
+  // nothing in the body is irreversible, so the file must classify REVERSIBLE.
+  // 17 is the false negative, and it is the one that costs data: the comment
+  // ends in the word revoke, which is exactly the token that exempts the next
+  // EXECUTE from the dynamic-SQL check, and the verb is concatenated so no
+  // static rule can catch it.
+  // 18 is the control on the fix for both: a literal inside a DO body is the
+  // statement EXECUTE will run, so it must stay readable.
+  '20990101000016_reversible_do_block_comment_names_drop_table.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+  },
+  '20990101000017_irreversible_do_block_comment_ends_in_revoke.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'DYNAMIC EXECUTE',
+  },
+  '20990101000018_irreversible_do_block_execute_literal_drop_table.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'DROP TABLE',
+  },
+  // OR-T2188. A REVOKE and a TRUNCATE folded into one EXECUTE literal by the
+  // semicolon blanking OR-T1709 added: the TRUNCATE rule must not read the
+  // earlier REVOKE as exempting it.
+  '20990101000019_irreversible_truncate_after_revoke_in_execute_literal.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'TRUNCATE',
+  },
+  // OR-T2188. An unqualified DELETE followed, in the same literal, by an
+  // unrelated statement's WHERE: the DELETE WITHOUT WHERE rule must not read
+  // that later WHERE as covering it.
+  '20990101000020_irreversible_delete_without_where_before_later_where.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'DELETE WITHOUT WHERE',
+  },
+  // OR-T2212, defect 1: TRUNCATE and EXECUTE named as a privilege inside a
+  // privilege list where they are not the first privilege, so the anchor must
+  // accept a privilege LIST, not just the bare word immediately after
+  // GRANT/REVOKE.
+  '20990101000021_reversible_truncate_and_execute_privilege_list_ordering.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+  },
+  // OR-T2212, defect 2: a DELETE's own WHERE sits after a parenthesised
+  // SELECT in a USING clause. SELECT is a statement-start keyword, so the
+  // boundary scan must skip parenthesised text or it reads the subquery's
+  // SELECT as the boundary and misses the WHERE that follows it.
+  '20990101000022_reversible_delete_using_subquery_has_own_where.sql': {
+    verdict: REVERSIBLE,
+    id: null,
+  },
+  // OR-T1658, OR-T2496. A routine body is not inert by virtue of being a
+  // routine body. These three assert the difference between one this file
+  // calls, one it attaches as a trigger that a later statement fires, and one
+  // nothing in the file can reach. The third is the one that keeps the gate
+  // usable: it carries a DROP TABLE in its body on purpose, so if the
+  // invocation analysis ever starts over-reporting, this fixture goes red
+  // instead of the gate quietly starting to refuse ordinary work.
+  //
+  // Fresh ordinals from 000023, not 000010 as on the two now-dead branches
+  // this was ported from: those numbers are already taken here by the
+  // OR-T1709/OR-T2188/OR-T2212 dynamic-EXECUTE and DO-block fixtures above.
+  //
+  // `line` is asserted wherever it is given. A refusal that names the wrong
+  // line is a refusal a human cannot act on.
+  '20990101000023_irreversible_routine_invoked_in_same_file.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE', line: 22 },
+  '20990101000024_irreversible_routine_attached_as_trigger.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 27 },
+  '20990101000025_reversible_routine_never_invoked.sql': { verdict: REVERSIBLE, id: null },
+  // OR-T1666. A quoted identifier must not hide a routine body invoked
+  // DIRECTLY: plain quoted name, then the same shape with internal
+  // whitespace in the name. Before the fix a blanket whitespace strip on the
+  // definition side normalised "drop helper" into "drophelper", an
+  // identifier that appears nowhere in the file, so the body was never
+  // scanned.
+  '20990101000026_irreversible_routine_invoked_via_quoted_identifier_direct.sql': { verdict: IRREVERSIBLE, id: 'DROP TABLE', line: 14 },
+  '20990101000027_irreversible_routine_invoked_via_quoted_identifier_direct_with_space.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 14 },
+  // OR-T1695, OR-T1708. The quoted twin of 20990101000024: the routine is
+  // ATTACHED AS A TRIGGER rather than called directly, named as a quoted
+  // identifier, plain and then with internal whitespace. A different code
+  // path from the pair above (isInvokedBy sees a trigger-attach statement,
+  // not a direct call), so both are kept rather than one standing in for the
+  // other.
+  '20990101000028_irreversible_routine_invoked_via_quoted_identifier_trigger.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 27 },
+  // Line 23 is `begin`, not line 24's `truncate`: PL/pgSQL has no semicolon
+  // between BEGIN and the first statement in the block, so the splitter's one
+  // statement runs from BEGIN through the first `;`, and the reported line is
+  // where that statement starts. Fixtures 24 and 28 above hit the identical
+  // shape and are asserted at their own `begin` line for the same reason.
+  '20990101000029_irreversible_routine_invoked_via_quoted_identifier_trigger_with_space.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE', line: 23 },
+  // OR-T1518. CREATE TRIGGER ... EXECUTE FUNCTION names which routine to
+  // attach; it assembles no SQL at run time. Before this fixture existed,
+  // executeIsUnreadable treated that EXECUTE exactly like a dynamic plpgsql
+  // EXECUTE, so ANY migration creating an ordinary trigger classified
+  // IRREVERSIBLE no matter what the trigger did. This asserts the harmless
+  // case comes back REVERSIBLE with zero findings; 24/28/29 above already
+  // cover the case where the attached routine is genuinely dangerous.
+  '20990101000032_reversible_trigger_execute_function_is_not_dynamic_sql.sql': { verdict: REVERSIBLE, id: null },
+  // OR-T1705. A dollar quoted block in ARGUMENT position (the cron.schedule
+  // pattern) is a plain string constant, not a routine body and not a DO
+  // block. These two assert both directions: a scheduled statement that is
+  // harmless classifies REVERSIBLE, and one that carries a refused class
+  // classifies IRREVERSIBLE naming that rule, instead of either one coming
+  // back UNPARSEABLE for the whole file.
+  '20990101000030_reversible_dollar_quoted_argument.sql': { verdict: REVERSIBLE, id: null },
+  '20990101000031_irreversible_dollar_quoted_argument.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
+};
+
+function selftest() {
+  if (!existsSync(FIXTURE_DIR)) {
+    console.error(`SELFTEST FAILED: fixture directory ${FIXTURE_DIR} does not exist.`);
+    return 1;
+  }
+  const onDisk = readdirSync(FIXTURE_DIR).filter((f) => f.endsWith('.sql')).sort();
+  const expectedNames = Object.keys(EXPECTED).sort();
+  let failures = 0;
+
+  if (onDisk.join(',') !== expectedNames.join(',')) {
+    console.error('SELFTEST FAILED: the fixture directory and the expectation table disagree.');
+    console.error(`  on disk : ${onDisk.join(', ')}`);
+    console.error(`  expected: ${expectedNames.join(', ')}`);
+    failures += 1;
+  }
+
+  for (const name of onDisk) {
+    const want = EXPECTED[name];
+    if (!want) continue;
+    const got = classifyFile(join(FIXTURE_DIR, name));
+    const ids = got.findings.map((f) => f.id);
+    const verdictOk = got.verdict === want.verdict;
+    const ruleOk = want.id === null ? ids.length === 0 : ids.includes(want.id);
+    // A fixture that pins a line is asserted on it. A fixture that does not
+    // carry one is judged exactly as before, so this adds an assertion and
+    // removes none.
+    const lineOk =
+      want.line === undefined || got.findings.some((f) => f.id === want.id && f.line === want.line);
+    const wantWhere = want.line === undefined ? '' : ` at line ${want.line}`;
+    if (verdictOk && ruleOk && lineOk) {
+      console.log(`  ok   ${name}: ${got.verdict}${want.id ? ` [${want.id}]` : ''}${wantWhere}`);
+    } else {
+      failures += 1;
+      const gotWhere =
+        want.line === undefined
+          ? ''
+          : ` at line(s) ${got.findings.map((f) => f.line).join(', ') || 'none'}`;
+      console.error(
+        `  FAIL ${name}: wanted ${want.verdict}${want.id ? ` [${want.id}]` : ' with no finding'}${wantWhere}, ` +
+          `got ${got.verdict} [${ids.join(', ') || 'no finding'}]${gotWhere}`,
+      );
+    }
+  }
+
+  // An empty input list must never be a pass. This is the single most important
+  // line in OR-T1518: the classifier may not conclude REVERSIBLE from nothing.
+  const emptyRc = run([]);
+  if (emptyRc === 0) {
+    failures += 1;
+    console.error('  FAIL empty input list: the classifier exited 0 on no files at all.');
+  } else {
+    console.log(`  ok   empty input list is refused (exit ${emptyRc}), not read as clean`);
+  }
+
+  if (failures > 0) {
+    console.error(`SELFTEST FAILED: ${failures} case(s) wrong. The classifier is not trustworthy; do not apply anything on its word.`);
+    return 1;
+  }
+  console.log('SELFTEST PASSED: the classifier fires on every irreversible and unparseable fixture, and is silent on the reversible one.');
+  return 0;
+}
+
+/** Classify a list of paths and report. Returns the process exit code. */
+function run(paths, jsonPath) {
+  if (paths.length === 0) {
+    console.error(
+      '::error::classify-migrations was given NO files. Refusing to conclude REVERSIBLE ' +
+        'from an empty list: an empty list means the caller could not work out what would ' +
+        'be applied, which is not the same fact as nothing being applied.',
+    );
+    return 2;
+  }
+  const results = paths.map(classifyFile);
+  const counts = report(results);
+  if (jsonPath) {
+    writeFileSync(
+      jsonPath,
+      `${JSON.stringify(
+        {
+          examined: results.length,
+          reversible: counts[REVERSIBLE],
+          irreversible: counts[IRREVERSIBLE],
+          unparseable: counts[UNPARSEABLE],
+          files: results.map((r) => ({ file: r.file, verdict: r.verdict, findings: r.findings })),
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  }
+  return counts[IRREVERSIBLE] > 0 || counts[UNPARSEABLE] > 0 ? 2 : 0;
+}
+
+function main(argv) {
+  const args = [...argv];
+  let jsonPath = null;
+  let fromList = null;
+  const paths = [];
+
+  while (args.length > 0) {
+    const a = args.shift();
+    if (a === '--selftest') return selftest();
+    if (a === '--json') {
+      jsonPath = args.shift();
+      if (!jsonPath) {
+        console.error('usage: --json <path>');
+        return 1;
+      }
+      continue;
+    }
+    if (a === '--from-list') {
+      fromList = args.shift();
+      if (!fromList) {
+        console.error('usage: --from-list <path>');
+        return 1;
+      }
+      continue;
+    }
+    if (a.startsWith('--')) {
+      console.error(`unknown option ${a}`);
+      return 1;
+    }
+    paths.push(a);
+  }
+
+  if (fromList) {
+    if (!existsSync(fromList)) {
+      console.error(
+        `::error::classify-migrations could not read the file list ${fromList}. ` +
+          'The set of migrations this run would apply is UNKNOWN, so nothing may be applied.',
+      );
+      return 2;
+    }
+    for (const line of readFileSync(fromList, 'utf8').split('\n')) {
+      const t = line.trim();
+      if (t) paths.push(t);
+    }
+  }
+
+  return run(paths, jsonPath);
+}
+
+process.exit(main(process.argv.slice(2)));
