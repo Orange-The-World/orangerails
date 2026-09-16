@@ -67,6 +67,13 @@
  *                                 request on this one, never on external_wallet_id.
  *
  * Response 404 if platform_slug unknown; 400 on missing fields.
+ *
+ * A 500 after connection creation also returns:
+ *   link_state:    "rolled_back" | "incomplete"
+ *   retryable:     boolean (true means the same widget token was released)
+ *   connection_id: string only when cleanup failed and the row remains pending
+ *
+ * Callers must not interpret either failure state as an account selection.
  */
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.111.0";
@@ -111,6 +118,101 @@ interface LinkCompleteBody {
   encrypted_metadata?: string;
 }
 
+export interface IncompleteLinkRecovery {
+  connectionRemoved: boolean;
+  tokenReleased: boolean;
+  error: string | null;
+}
+
+/**
+ * Remove a connection whose source-wallet selection did not finish, then make
+ * the claimed widget token reusable for an immediate retry.
+ *
+ * The connection is inserted as pending until every selected wallet exists,
+ * so the status guard prevents this compensation from deleting a connection
+ * that another path has already made usable. Deleting the connection cascades
+ * to any source_wallets inserted by an earlier batch in the same request.
+ * The token is released only after that delete succeeds: releasing it while a
+ * pending connection remains would let the retry create a duplicate.
+ */
+export async function recoverIncompleteLink(
+  service: SupabaseClient,
+  connectionId: string,
+  widgetToken?: string,
+): Promise<IncompleteLinkRecovery> {
+  let removed: { data: { id: string } | null; error: { message: string } | null };
+  try {
+    removed = await service
+      .from("connections")
+      .delete()
+      .eq("id", connectionId)
+      .eq("status", "pending")
+      .select("id")
+      .maybeSingle();
+  } catch (error) {
+    return {
+      connectionRemoved: false,
+      tokenReleased: false,
+      error: `connection rollback threw: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  if (removed.error) {
+    return {
+      connectionRemoved: false,
+      tokenReleased: false,
+      error: `connection rollback failed: ${removed.error.message}`,
+    };
+  }
+  if (!removed.data) {
+    return {
+      connectionRemoved: false,
+      tokenReleased: false,
+      error: "connection rollback affected no pending row",
+    };
+  }
+
+  // Tokenless legacy calls need no token recovery. Their clean retry path is
+  // restored as soon as the incomplete connection has been removed.
+  if (!widgetToken) {
+    return { connectionRemoved: true, tokenReleased: true, error: null };
+  }
+
+  let released: { data: { id: string } | null; error: { message: string } | null };
+  try {
+    released = await service
+      .from("pending_widget_sessions")
+      .update({ used_at: null })
+      .eq("id", widgetToken)
+      .not("used_at", "is", null)
+      .select("id")
+      .maybeSingle();
+  } catch (error) {
+    return {
+      connectionRemoved: true,
+      tokenReleased: false,
+      error: `widget token release threw: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+
+  if (released.error) {
+    return {
+      connectionRemoved: true,
+      tokenReleased: false,
+      error: `widget token release failed: ${released.error.message}`,
+    };
+  }
+  if (!released.data) {
+    return {
+      connectionRemoved: true,
+      tokenReleased: false,
+      error: "widget token release affected no claimed row",
+    };
+  }
+
+  return { connectionRemoved: true, tokenReleased: true, error: null };
+}
+
 function makeServiceClient(): SupabaseClient {
   return createClient(
     Deno.env.get("SUPABASE_URL") ?? "",
@@ -129,6 +231,10 @@ Deno.serve(
     const cors = buildCorsHeaders(req);
     if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
     if (req.method !== "POST") return jsonResponse({ error: "Method not allowed" }, 405, cors);
+
+    let recoveryClient: SupabaseClient | null = null;
+    let incompleteConnectionId: string | null = null;
+    let claimedWidgetToken: string | undefined;
 
     try {
       const raw = await readBoundedText(req);
@@ -200,6 +306,7 @@ Deno.serve(
       }
 
       const serviceClient = makeServiceClient();
+      recoveryClient = serviceClient;
 
       // 1. Resolve platform by slug.
       const { data: platform, error: platErr } = await serviceClient
@@ -269,6 +376,7 @@ Deno.serve(
         if (!claimed) {
           return jsonResponse({ error: "Invalid widget token" }, 401, cors);
         }
+        claimedWidgetToken = body.widget_token;
       } else if (requireToken) {
         return jsonResponse(
           { error: "widget_token required -- call or-link-mint-token first" },
@@ -422,7 +530,7 @@ Deno.serve(
       // compatibility with V3/OW which haven't migrated yet.
       const atomicConfirmRequired =
         (Deno.env.get("ATOMIC_CONFIRM_REQUIRED") ?? "false").toLowerCase() === "true";
-      const initialStatus = atomicConfirmRequired ? "pending" : "active";
+      const completedStatus = atomicConfirmRequired ? "pending" : "active";
 
       // 4. Fingerprint each picked wallet.
       //
@@ -560,7 +668,7 @@ Deno.serve(
               encrypted_label: body.encrypted_label ?? null,
               encrypted_credentials: body.encrypted_credentials,
               credentials_key_version: 1,
-              status: initialStatus,
+              status: completedStatus,
             })
             .eq("id", connId);
           if (updErr) {
@@ -594,7 +702,9 @@ Deno.serve(
       }
 
       // 5b. First connect, or a partial reconnect where some picked wallets are
-      // new. Mint a connection to carry the new wallets.
+      // new. Mint a pending connection to carry the new wallets. It must not
+      // become active until every selected source_wallet row has been resolved;
+      // zero rows is the legacy all-sync signal, not a safe failure default.
       //
       // Mint the account emitted id (random, derived from nothing, stable
       // forever) and compute the fingerprint (internal only: the fingerprint
@@ -614,7 +724,7 @@ Deno.serve(
           encrypted_label: body.encrypted_label ?? null,
           encrypted_credentials: body.encrypted_credentials,
           credentials_key_version: 1,
-          status: initialStatus,
+          status: "pending",
           account_fingerprint: accountFingerprint,
           account_emitted_id: accountEmittedId,
         })
@@ -626,27 +736,34 @@ Deno.serve(
         return jsonResponse({ error: "DatabaseError", code: insConnErr?.code ?? "unknown" }, 500, cors);
       }
       const connectionId = createdConn.id as string;
+      incompleteConnectionId = connectionId;
 
-      // DL-1414-C: re-drive any or-quiltt-sync events that deferred because this
-      // connections row did not exist yet. Now that it does, clearing opk_deferred_at
-      // lets them re-enter the pending queue on the next drain tick without waiting
-      // for reDriveReadyDeferrals to sweep them (which it would do anyway, since the
-      // subaccount has OPK set). Non-fatal: a failure here only delays re-drive by
-      // at most one drain interval.
-      {
-        const { error: reDriveErr } = await serviceClient
-          .from('quiltt_webhook_inbox')
-          .update({ opk_deferred_at: null })
-          .eq('subaccount_id', subaccountId)
-          .is('processed_at', null)
-          .not('opk_deferred_at', 'is', null);
-        if (reDriveErr) {
-          console.warn(
-            '[or-link-complete] failed to re-drive deferred quiltt_webhook_inbox events:',
-            reDriveErr.message,
-          );
+      const failIncompleteConnection = async (
+        error: string,
+        code: string,
+      ): Promise<Response> => {
+        const recovery = await recoverIncompleteLink(
+          serviceClient,
+          connectionId,
+          claimedWidgetToken,
+        );
+        incompleteConnectionId = null;
+        if (recovery.error) {
+          console.error("[or-link-complete] incomplete link recovery failed:", recovery.error);
+          await reportError(new Error(recovery.error), "or-link-complete", req);
         }
-      }
+        return jsonResponse(
+          {
+            error,
+            code,
+            link_state: recovery.connectionRemoved ? "rolled_back" : "incomplete",
+            retryable: recovery.tokenReleased,
+            connection_id: recovery.connectionRemoved ? undefined : connectionId,
+          },
+          500,
+          cors,
+        );
+      };
 
       // 6. Insert the new wallets, in two batches.
       //
@@ -698,7 +815,7 @@ Deno.serve(
         if (err || !created) {
           console.error("[or-link-complete] source_wallet insert failed:", err);
           await reportError(err ?? new Error('source_wallet insert returned no data'), 'or-link-complete', req);
-          return jsonResponse({ error: "DatabaseError", code: err?.code ?? "unknown" }, 500, cors);
+          return await failIncompleteConnection("DatabaseError", err?.code ?? "unknown");
         }
         for (const row of created) {
           // A row we just inserted stores the id we were sent, so the two agree.
@@ -757,7 +874,7 @@ Deno.serve(
         if (err) {
           console.error("[or-link-complete] source_wallet upsert failed:", err);
           await reportError(err, 'or-link-complete', req);
-          return jsonResponse({ error: "DatabaseError", code: err.code ?? "unknown" }, 500, cors);
+          return await failIncompleteConnection("DatabaseError", err.code ?? "unknown");
         }
         for (const row of created ?? []) {
           // Ours won the insert, so the stored id is the one we were sent.
@@ -809,7 +926,7 @@ Deno.serve(
               lost.length,
             );
             await reportError(reErr ?? new Error('conflict re-read returned partial result set'), 'or-link-complete', req);
-            return jsonResponse({ error: "DatabaseError", code: reErr?.code ?? "unknown" }, 500, cors);
+            return await failIncompleteConnection("DatabaseError", reErr?.code ?? "unknown");
           }
           for (const row of raced) {
             const submitted = submittedByFingerprint.get(row.wallet_fingerprint as string);
@@ -824,7 +941,7 @@ Deno.serve(
                   "matches no submitted wallet; refusing to guess the correlation",
               );
               await reportError(new Error('conflict re-read returned a row whose fingerprint matches no submitted wallet'), 'or-link-complete', req);
-              return jsonResponse({ error: "InternalError" }, 500, cors);
+              return await failIncompleteConnection("InternalError", "unknown");
             }
             sourceWallets.push({
               id: row.id as string,
@@ -849,10 +966,67 @@ Deno.serve(
         });
       }
 
-      if (sourceWallets.length === 0) {
-        console.error("[or-link-complete] no source wallets resolved for a non-empty selection");
-        await reportError(new Error('no source wallets resolved for a non-empty selection'), 'or-link-complete', req);
-        return jsonResponse({ error: "InternalError" }, 500, cors);
+      if (sourceWallets.length !== wallets.length) {
+        console.error(
+          "[or-link-complete] source-wallet resolution returned %d of %d selected wallets",
+          sourceWallets.length,
+          wallets.length,
+        );
+        await reportError(
+          new Error('source-wallet resolution returned a partial selection'),
+          'or-link-complete',
+          req,
+        );
+        return await failIncompleteConnection("InternalError", "partial_selection");
+      }
+
+      if (completedStatus === "active") {
+        const activated = await serviceClient
+          .from("connections")
+          .update({ status: "active" })
+          .eq("id", connectionId)
+          .eq("status", "pending")
+          .select("id")
+          .maybeSingle();
+        if (activated.error || !activated.data) {
+          console.error(
+            "[or-link-complete] connection activation failed:",
+            activated.error?.message ?? "no pending row updated",
+          );
+          await reportError(
+            activated.error ?? new Error('connection activation returned no data'),
+            'or-link-complete',
+            req,
+          );
+          return await failIncompleteConnection(
+            "DatabaseError",
+            activated.error?.code ?? "activation_failed",
+          );
+        }
+      }
+
+      // From here the selection is complete. In atomic-confirm mode the row is
+      // intentionally still pending for the consumer acknowledgement; otherwise
+      // it has just been promoted to active.
+      incompleteConnectionId = null;
+
+      // DL-1414-C: re-drive any or-quiltt-sync events that deferred because this
+      // connections row did not exist yet. Do this only after the selection is
+      // complete, so a deferred sync cannot observe the temporary zero-row state.
+      // Non-fatal: a failure here only delays re-drive by at most one drain interval.
+      {
+        const { error: reDriveErr } = await serviceClient
+          .from('quiltt_webhook_inbox')
+          .update({ opk_deferred_at: null })
+          .eq('subaccount_id', subaccountId)
+          .is('processed_at', null)
+          .not('opk_deferred_at', 'is', null);
+        if (reDriveErr) {
+          console.warn(
+            '[or-link-complete] failed to re-drive deferred quiltt_webhook_inbox events:',
+            reDriveErr.message,
+          );
+        }
       }
 
       return jsonResponse(
@@ -875,6 +1049,28 @@ Deno.serve(
     } catch (err) {
       console.error("[or-link-complete] fatal:", err);
       await reportError(err, 'or-link-complete', req);
+      if (recoveryClient && incompleteConnectionId) {
+        const connectionId = incompleteConnectionId;
+        const recovery = await recoverIncompleteLink(
+          recoveryClient,
+          connectionId,
+          claimedWidgetToken,
+        );
+        if (recovery.error) {
+          console.error("[or-link-complete] fatal-path recovery failed:", recovery.error);
+          await reportError(new Error(recovery.error), 'or-link-complete', req);
+        }
+        return jsonResponse(
+          {
+            error: "InternalError",
+            link_state: recovery.connectionRemoved ? "rolled_back" : "incomplete",
+            retryable: recovery.tokenReleased,
+            connection_id: recovery.connectionRemoved ? undefined : connectionId,
+          },
+          500,
+          cors,
+        );
+      }
       return jsonResponse({ error: "InternalError" }, 500, cors);
     }
   }, 'or-link-complete'),
