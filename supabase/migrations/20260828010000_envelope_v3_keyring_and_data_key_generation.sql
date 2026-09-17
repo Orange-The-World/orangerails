@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: verified on dev (fzwmnzmtqidumdqjdddz) 2026-09-05 that the
+-- OUT-OF-ORDER-OK: fzwmnzmtqidumdqjdddz verified on dev (fzwmnzmtqidumdqjdddz) 2026-09-05 that the
 -- two remaining column additions in this file (connections and
 -- encrypted_transactions data_key_generation) already exist with matching
 -- type/default/nullability and identical column comments, so applying this

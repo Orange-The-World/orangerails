@@ -7,7 +7,7 @@
 --   DROP FUNCTION IF EXISTS public.clear_customer_vault_meta_on_account_removal();
 --   DROP FUNCTION IF EXISTS public.enforce_customer_vault_meta_no_direct_delete();
 --
--- OUT-OF-ORDER-OK: approved 2026-08-28, merged 2026-09-05 after 191h waiting on
+-- OUT-OF-ORDER-OK: fzwmnzmtqidumdqjdddz approved 2026-08-28, merged 2026-09-05 after 191h waiting on
 -- the DBA to land it (OR-T2277); dev applied 40+ later migrations while it
 -- waited. It is additive only (new triggers and SECURITY DEFINER functions on
 -- customer_vault_meta and auth.users), does not depend on any schema those

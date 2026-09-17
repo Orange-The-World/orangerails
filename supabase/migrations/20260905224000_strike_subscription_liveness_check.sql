@@ -18,7 +18,7 @@
 -- Null means never checked: every connection with an existing subscription
 -- id gets checked on its first sync after this ships, which is the correct
 -- default rather than an opt-in.
--- OUT-OF-ORDER-OK: additive only, one new nullable column with no default on public.connections; independent of every migration currently ahead of it, safe to apply out of order.
+-- OUT-OF-ORDER-OK: fzwmnzmtqidumdqjdddz additive only, one new nullable column with no default on public.connections; independent of every migration currently ahead of it, safe to apply out of order.
 --
 ALTER TABLE public.connections
     ADD COLUMN IF NOT EXISTS strike_subscription_checked_at TIMESTAMPTZ;
