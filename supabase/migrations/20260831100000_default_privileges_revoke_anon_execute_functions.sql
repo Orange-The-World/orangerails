@@ -6,7 +6,7 @@
 -- ============================================================================
 -- OUT OF ORDER, AND WHY THAT IS SAFE FOR THIS PARTICULAR FILE
 -- ============================================================================
--- OUT-OF-ORDER-OK: ALTER DEFAULT PRIVILEGES is forward looking only and this file touches no existing object, so applying it late is identical to applying it on time (OR-T1027).
+-- OUT-OF-ORDER-OK: fzwmnzmtqidumdqjdddz ALTER DEFAULT PRIVILEGES is forward looking only and this file touches no existing object, so applying it late is identical to applying it on time (OR-T1027).
 --
 -- The evidence for that one line, so a reviewer does not have to take it:
 --
