@@ -56,9 +56,10 @@ jobs:
       - name: Migration version uniqueness check
         # A real gate, no continue-on-error. Two files sharing a version prefix means the
         # ledger can only ever track one of them and the other is skipped in silence on every
-        # project. The deploy workflow refuses this too, but only on a push and only after the
-        # apply has already run, so on a pull request nothing was looking. It fails hard when
-        # it enumerates zero files: a run that checked nothing is not a run that passed.
+        # project. The deploy workflow refuses this too, but it only runs on a push. Its
+        # check-duplicate-migrations job gates apply-migrations there; this check covers the
+        # pull request before the colliding pair can merge. It fails hard when it enumerates
+        # zero files: a run that checked nothing is not a run that passed.
         run: node scripts/check-migration-versions.mjs
 
       - name: Migration dependency self-test
