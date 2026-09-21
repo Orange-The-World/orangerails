@@ -22,6 +22,7 @@ import {
 import {
   buildScanRangeArgs,
   classifyScanRangeError,
+  classifySkipReason,
   recordScanRange,
   UNKNOWN_ERROR_CODE,
 } from './scan_range.ts';
