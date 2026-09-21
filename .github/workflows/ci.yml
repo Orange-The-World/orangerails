@@ -90,13 +90,17 @@ jobs:
         # WHY IT IS HERE AND NOT ONLY IN THE DEPLOY WORKFLOW. supabase-deploy.yml already
         # refuses an out-of-order migration, and it does it well. It runs on a push to dev
         # and prod. It never runs on a pull request. So a pull request can be green,
-        # approved and CLEAN while carrying a file that makes the apply job refuse the WHOLE
-        # run the moment it lands: apply-migrations fails, check-pending-migrations fails,
-        # deploy is skipped, and every unrelated change queued behind it stops with them.
-        # On 2026-09-05 dev spent most of the day in that state, and the set of open pull
-        # requests queued to do it again grew from sixteen to twenty six inside one hour
-        # without a single author touching anything, because the bar is the highest applied
-        # version and it rises every time any migration merges. Nothing told any of them.
+        # approved and CLEAN while carrying a file that makes the apply job refuse it the
+        # moment it lands: apply-migrations still ends in failure, check-pending-migrations
+        # still reports UNKNOWN, and deploy is still skipped for that run. Before OR-T2362
+        # (2026-09-14) that refusal aborted the WHOLE apply before anything ran, so every
+        # OTHER pending file queued behind it was blocked too; now the apply job skips only
+        # the refused file by name and still applies every safe sibling, so the backlog
+        # shrinks instead of freezing. On 2026-09-05 dev spent most of the day in the old
+        # whole-run-abort state, and the set of open pull requests queued to do it again grew
+        # from sixteen to twenty six inside one hour without a single author touching
+        # anything, because the bar is the highest applied version and it rises every time
+        # any migration merges. Nothing told any of them.
         #
         # The escape hatch is the same OUT-OF-ORDER-OK line the deploy guard reads, so an
         # author who satisfies this satisfies that one too.
