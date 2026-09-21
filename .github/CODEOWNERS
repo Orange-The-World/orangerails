@@ -5,29 +5,29 @@
 # Match precedence: LAST matching line wins. Catch-all goes first.
 
 # Default owner — every path, unless overridden below.
-*                               @Orange-The-World
+*                               @Making-the-World-Orange
 
 # Adapters — new connectors expand the trust surface. Require an owner review.
-/server/adapters/               @Orange-The-World
+/server/adapters/               @Making-the-World-Orange
 
 # Server + auth + sync logic.
-/server/                        @Orange-The-World
+/server/                        @Making-the-World-Orange
 
 # Supabase schema + RLS — migrations are the source of truth.
-/supabase/                      @Orange-The-World
+/supabase/                      @Making-the-World-Orange
 
 # Cryptographic primitives (vault key derivation, ciphertext shape, link widget).
-/src/lib/                       @Orange-The-World
+/src/lib/                       @Making-the-World-Orange
 
 # Docs — narrative surface of the project.
-/README.md                      @Orange-The-World
-/CONTRIBUTING.md                @Orange-The-World
-/SECURITY.md                    @Orange-The-World
-/CODE_OF_CONDUCT.md             @Orange-The-World
-/docs/                          @Orange-The-World
+/README.md                      @Making-the-World-Orange
+/CONTRIBUTING.md                @Making-the-World-Orange
+/SECURITY.md                    @Making-the-World-Orange
+/CODE_OF_CONDUCT.md             @Making-the-World-Orange
+/docs/                          @Making-the-World-Orange
 
 # GitHub workflows + community health files.
-/.github/                       @Orange-The-World
+/.github/                       @Making-the-World-Orange
 
 # Workflow definitions. A change here can change what CI is allowed to do, so
 # the reviewing account signs it specifically. This line must stay BELOW the
