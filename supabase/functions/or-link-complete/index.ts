@@ -28,10 +28,10 @@
  * server-to-server BEFORE opening the widget URL; the widget passes the
  * token back here for verification). Audit 2026-05-16 High #3.
  *
- * If the env var REQUIRE_WIDGET_TOKEN is set to "true", tokenless requests
- * are rejected. Default is "false" during the rollout window so the V2/V3/OW
- * integrating apps have time to add the mint step. Flip to "true" once they
- * all integrate.
+ * If the env var REQUIRE_WIDGET_TOKEN is set to "false", tokenless requests
+ * are allowed (opt-out for integrators still completing the mint step).
+ * Default is "true" (fail-closed): a missing token returns 401. Set
+ * REQUIRE_WIDGET_TOKEN=false explicitly to opt out.
  *
  * POST body (preferred, multi-wallet):
  *   platform_slug:          string  e.g. 'bitbooks-v2'
@@ -244,7 +244,7 @@ Deno.serve(
       //
       // On success we atomically mark the token used so a replay fails.
       const requireToken =
-        (Deno.env.get("REQUIRE_WIDGET_TOKEN") ?? "false").toLowerCase() === "true";
+        (Deno.env.get("REQUIRE_WIDGET_TOKEN") ?? "true").toLowerCase() === "true";
       if (body.widget_token) {
         // Atomic claim: scope every guard into one UPDATE ... RETURNING row.
         // Postgres serialises concurrent updates on the same row, so exactly
