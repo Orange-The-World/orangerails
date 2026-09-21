@@ -21,6 +21,6 @@
 -- list_coadmin_workspaces() still returns the owner's workspace_key_id and
 -- sig_public_key unchanged. Full output is on OR-T0783.
 --
--- OUT-OF-ORDER-OK: drops one policy, independent of every migration
+-- OUT-OF-ORDER-OK: fzwmnzmtqidumdqjdddz drops one policy, independent of every migration
 -- currently ahead of it, safe to apply out of order.
 DROP POLICY IF EXISTS "co-admins can read owner vault meta" ON public.user_vault_meta;

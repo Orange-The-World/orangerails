@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: drop is guarded by an existence and emptiness check performed at apply time, not by migration order, so applying it after every later-numbered migration already on dev is safe.
+-- OUT-OF-ORDER-OK: fzwmnzmtqidumdqjdddz drop is guarded by an existence and emptiness check performed at apply time, not by migration order, so applying it after every later-numbered migration already on dev is safe.
 --
 -- Drop the dead platforms.quiltt_api_key_ciphertext column.
 --
