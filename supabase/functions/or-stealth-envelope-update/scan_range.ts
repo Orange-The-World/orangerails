@@ -115,7 +115,11 @@ export const UNKNOWN_ERROR_CODE = 'unknown';
  * Decide whether this request records a scan range, and build the RPC payload.
  *
  * Returns null when the caller supplied no usable from_height, which is the
- * documented opt-out: those callers get cursor-only behaviour (DL-1478).
+ * documented opt-out: those callers get cursor-only behaviour (DL-1478). A
+ * null return means the range is NOT recorded at all: no row is written to
+ * the coverage table for it. See classifySkipReason below for why null was
+ * returned; recordScanRange logs that reason so a coverage hole can later be
+ * told apart from a range that was genuinely never submitted.
  *
  * p_app_user_id is req.app_user_id, the caller identity, never a value read
  * back from stealth_connections.
@@ -138,6 +142,28 @@ export function buildScanRangeArgs(req: ScanRangeRequest): ScanRangeRpcArgs | nu
     p_to_height: req.last_block_scanned,
     p_app_user_id: req.app_user_id,
   };
+}
+
+/** The two causes buildScanRangeArgs can return null for. */
+export type ScanRangeSkipReason = 'malformed' | 'out-of-range';
+
+/**
+ * Re-check the same request buildScanRangeArgs just rejected, and name which
+ * of the two causes applies. Only meaningful when buildScanRangeArgs has
+ * already returned null for this exact req; calling it on a request that
+ * would build real args has no defined meaning.
+ *
+ * malformed:    from_height is missing, not a number, not an integer, or
+ *               negative.
+ * out-of-range: from_height is a well-formed integer but exceeds
+ *               last_block_scanned.
+ */
+export function classifySkipReason(req: ScanRangeRequest): ScanRangeSkipReason {
+  const from = req.from_height;
+  if (from === undefined || typeof from !== 'number' || !Number.isInteger(from) || from < 0) {
+    return 'malformed';
+  }
+  return 'out-of-range';
 }
 
 /**
