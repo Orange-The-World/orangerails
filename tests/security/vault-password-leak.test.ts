@@ -64,6 +64,7 @@ const LEAK_VERBS = [
   'sessionStorage.',
   'document.cookie',
   'navigator.sendBeacon',
+  'postMessage',
 ];
 
 // Files allowed to mention sensitive names (the crypto lib itself, types, etc.)
@@ -155,5 +156,22 @@ describe('CR-01 , vault_password never leaves the browser (static check)', () =>
   test('the sensitive name list is non-empty (sanity check on the rule)', () => {
     expect(SENSITIVE_NAMES.length).toBeGreaterThan(0);
     expect(LEAK_VERBS.length).toBeGreaterThan(0);
+  });
+
+  test('CR-01 fires on vaultPassword + postMessage (proves the check can go red)', () => {
+    // This is the exact reintroduction path the check was written to catch:
+    // OR-T2704 / PR #1526 removed vault_password from an outgoing postMessage
+    // payload in src/routes/connect.tsx. If anyone re-adds it, this test must
+    // go red before the change reaches CI review.
+    const syntheticPath = '/fake/src/routes/connect.tsx';
+    const syntheticContent = [
+      '// normal line',
+      'window.opener.postMessage({ vaultPassword: password }, origin);',
+      '// another normal line',
+    ].join('\n');
+    const findings = scanFile(syntheticPath, syntheticContent);
+    expect(findings).toHaveLength(1);
+    expect(findings[0].sensitive).toBe('vaultPassword');
+    expect(findings[0].verb).toBe('postMessage');
   });
 });
