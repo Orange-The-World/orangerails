@@ -201,7 +201,17 @@ export function classifyScanRangeError(
 // deno-lint-ignore no-explicit-any
 export async function recordScanRange(client: any, req: ScanRangeRequest): Promise<ScanRangeOutcome> {
   const args = buildScanRangeArgs(req);
-  if (args === null) return { status: 'skipped' };
+  if (args === null) {
+    const reason = classifySkipReason(req);
+    const detail =
+      reason === 'malformed'
+        ? `from_height is missing, non-integer, or negative (got ${JSON.stringify(req.from_height)})`
+        : `from_height ${req.from_height} exceeds last_block_scanned ${req.last_block_scanned}`;
+    console.info(
+      `[or-stealth-envelope-update] record_stealth_scan_range skipped (reason=${reason}): ${detail}. Range not recorded, no coverage row written.`,
+    );
+    return { status: 'skipped' };
+  }
 
   const { error } = await client.rpc('record_stealth_scan_range', args);
   if (!error) return { status: 'recorded' };
