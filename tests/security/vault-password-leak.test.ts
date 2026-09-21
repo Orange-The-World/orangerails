@@ -160,9 +160,9 @@ describe('CR-01 , vault_password never leaves the browser (static check)', () =>
 
   test('CR-01 fires on vaultPassword + postMessage (proves the check can go red)', () => {
     // This is the exact reintroduction path the check was written to catch:
-    // OR-T2704 / PR #1526 removed vault_password from an outgoing postMessage
-    // payload in src/routes/connect.tsx. If anyone re-adds it, this test must
-    // go red before the change reaches CI review.
+    // OR-T2704 removed vault_password from an outgoing postMessage payload in
+    // src/routes/connect.tsx. If anyone re-adds it, this test must go red
+    // before the change reaches CI review.
     const syntheticPath = '/fake/src/routes/connect.tsx';
     const syntheticContent = [
       '// normal line',
