@@ -500,7 +500,7 @@ export async function loadVaultMetaForRecovery(
   const { data: meta, error } = await supabase
     .from("user_vault_meta")
     .select(
-      "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped",
+      "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped, workspace_key_id",
     )
     .eq("user_id", userId)
     .single();
