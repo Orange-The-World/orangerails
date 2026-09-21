@@ -79,9 +79,8 @@ export async function gotoConnectorsTab(page: Page): Promise<void> {
  * an extra "Vault password" input alongside the provider credential form
  * (connect.tsx line 1609). The user types their vault password there.
  *
- * Note: prior to OR-T2704 / PR #1526, vault_password was forwarded to V2
- * via postMessage so V2 could derive the cred_key. That forwarding was
- * removed. This helper fills the input field; it does not exercise any
+ * Note: OR-T2704 removed vault_password from the outgoing postMessage
+ * payload. This helper fills the input field; it does not exercise any
  * postMessage credential passing.
  *
  * This helper locates that field by its placeholder and fills it from the
