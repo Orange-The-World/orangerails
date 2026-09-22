@@ -3,8 +3,8 @@
  * (OR-T0267).
  *
  * measureOpkDeferredBacklog / checkOpkDeferredBacklogAndAlert already existed
- * (PR #1360, or-quiltt-sync/deferred-backlog.ts) and were fully unit tested,
- * but nothing on dev/prod ever called them: no HTTP route, no cron entry.
+ * (or-quiltt-sync/deferred-backlog.ts) and were fully unit tested, but
+ * nothing on dev/prod ever called them: no HTTP route, no cron entry.
  * This function is that missing call site. It does no measurement itself --
  * it only supplies the Supabase client, the threshold and the alert channel
  * that deferred-backlog.ts already documents as its intended wiring:
@@ -33,6 +33,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
+import { requireCallerAuth } from '../_shared/require-caller-auth.ts';
 import {
   checkOpkDeferredBacklogAndAlert,
   DEFAULT_BACKLOG_THRESHOLD,
@@ -58,9 +59,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   const callerToken = req.headers.get('X-Internal-Worker-Token');
   const expected = Deno.env.get('OR_INTERNAL_WORKER_TOKEN');
   if (!expected) return jsonResponse({ error: 'worker token not configured' }, 503);
-  if (!callerToken || !timingSafeEqual(callerToken, expected)) {
-    return jsonResponse({ error: 'unauthorized' }, 401);
-  }
+  const auth = await requireCallerAuth('internal-worker-token', () =>
+    !!callerToken && timingSafeEqual(callerToken, expected),
+  );
+  if (!auth.ok) return jsonResponse({ error: auth.message }, auth.status ?? 401);
 
   const client = createClient(
     Deno.env.get('SUPABASE_URL')!,
