@@ -53,7 +53,14 @@
  *     subaccount_id, connection_id,
  *     source_wallets: [{ id, external_wallet_id, submitted_external_wallet_id }, ...],
  *     // Backward-compat: if exactly one wallet was created, also return source_wallet_id.
- *     source_wallet_id?: string
+ *     source_wallet_id?: string,
+ *     // OR-T0328: whether subaccounts.opk_public is set for this subaccount, and how
+ *     // many quiltt_webhook_inbox rows are currently parked for lack of one. Neither
+ *     // field refuses the connection; they let the integrator's own code notice a
+ *     // missing background-sync key at connect time instead of only when sync parks
+ *     // something and nobody is watching.
+ *     opk_registered: boolean,
+ *     parked_item_count: number
  *   }
  *
  * The two ids on a returned wallet are NOT interchangeable:
