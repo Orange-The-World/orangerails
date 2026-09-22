@@ -157,6 +157,11 @@ verify_jwt = false
 [functions.or-queue-health]
 verify_jwt = false
 
+# or-quiltt-backlog-alert is invoked by pg_cron the same way (OR-T0267) and
+# validates the same header itself. They ship together for the same reason.
+[functions.or-quiltt-backlog-alert]
+verify_jwt = false
+
 # --- Raw invitation token in the request body -------------------------
 # or-agent-invite-redeem is called by an invitee who has no session yet, so there
 # is no JWT to present and the gateway has to pass the request through. The
