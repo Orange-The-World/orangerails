@@ -75,6 +75,20 @@ interface SealedTransactionInput {
   block_height: number;
   /** Lowercase hex, 64 chars. HMAC-SHA-256 output, not base64. */
   txid_blind_index_hex: string;
+  /**
+   * Lowercase hex, 64 chars. The canonical hash of the block at block_height,
+   * taken from parseBlockHeader's dsha256 of the raw header bytes and checked
+   * by assertBlockContentMatchesHash. Carried through sealing as block_hash_hex
+   * (ZKA Level 2: public chain data, same class as block_height) so the
+   * server-side reorg detector can compare it to the canonical chain without
+   * ever seeing the transaction's plaintext contents.
+   *
+   * Optional: absent on records sealed before this field existed (PR #1431).
+   * NULL in the database means "recorded before we stored hashes; permanently
+   * unverifiable". The reorg detector skips NULL rows and never logs them as
+   * failures. Do not backfill; do not log a NULL as an error.
+   */
+  block_hash_hex?: string;
 }
 
 /**
@@ -147,6 +161,11 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // value the dedup constraint would treat as a distinct transaction forever.
 const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
 
+// A Bitcoin block hash is a double-SHA-256 of the block header: 32 bytes = 64
+// lowercase hex chars, RPC display order (little-endian byte reversal already
+// applied by the block source). Same pattern as BLIND_INDEX_HEX_RE.
+const BLOCK_HASH_HEX_RE = /^[0-9a-f]{64}$/;
+
 // Cap at 10k transactions per request and 16 KB per sealed record. A whole
 // 5-year wallet history with ~500 txs comes in well under that.
 const MAX_TX_PER_REQUEST = 10_000;
@@ -171,7 +190,10 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
     Number.isInteger(o.block_height) &&
     (o.block_height as number) >= 0 &&
     typeof o.txid_blind_index_hex === 'string' &&
-    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string)
+    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string) &&
+    // block_hash_hex is optional; when present it must be exactly 64 lowercase hex chars.
+    (o.block_hash_hex === undefined ||
+      (typeof o.block_hash_hex === 'string' && BLOCK_HASH_HEX_RE.test(o.block_hash_hex as string)))
   );
 }
 
@@ -375,6 +397,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         occurred_at: tx.occurred_at,
         block_height: tx.block_height,
         txid_blind_index_hex: tx.txid_blind_index_hex,
+        // block_hash_hex is optional (absent on records sealed before PR #1431).
+        // When present, write it to block_hash so the reorg detector can compare
+        // against the canonical chain. When absent, leave block_hash as NULL,
+        // meaning "permanently unverifiable": do not backfill, do not log as an
+        // error. The reorg detector skips NULL rows.
+        ...(tx.block_hash_hex !== undefined ? { block_hash: tx.block_hash_hex } : {}),
       }));
 
       // Count duplicates BEFORE insert by checking which txid blind indexes
