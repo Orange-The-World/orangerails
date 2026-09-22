@@ -1,7 +1,8 @@
 # OR-T0957 live verification
 
 This commit exists to trigger a push to dev so the merged ledger-freshness guard
-(PR #1393) can be observed aborting for real, on the real apply-migrations job,
+(scripts/ledger-freshness.sh, already on dev) can be observed aborting for real,
+on the real apply-migrations job,
 instead of inferred from a green PR self-test. Acceptance items 2 and 3 on
 OR-T0957 require this.
 
