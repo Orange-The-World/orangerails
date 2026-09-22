@@ -44,12 +44,14 @@
 --
 -- THE RESIDUAL, AND THE DECISION ON IT. Recorded here so it is not re-derived.
 --
--- REQUIREMENT: no function in schema public may carry an EXECUTE grant to anon,
--- whichever role granted it.
+-- REQUIREMENT: no function in schema public may carry an EXECUTE grant directly
+-- to anon or indirectly through PUBLIC, whichever role granted it.
 --
 -- WHAT THIS FILE ENFORCES: the part owned by postgres. Step 1 closes the default
 -- for new functions created by postgres, step 2 removes the standing grants, and
--- assertion (b) proves no public function holds an anon entry at apply time.
+-- assertion (b) proves no public function holds an anon or bare PUBLIC entry at
+-- apply time. This assertion is not a tripwire: the migration runs once and cannot
+-- see grants or functions created after it applies.
 --
 -- WHAT THIS FILE CANNOT ENFORCE: the platform default-privilege row. We hold no
 -- membership in the role that owns it (pg_has_role returns false), so a function
@@ -74,13 +76,13 @@
 --       JOIN pg_namespace n ON n.oid = p.pronamespace,
 --            unnest(p.proacl) ace
 --      WHERE n.nspname = 'public'
---        AND ace::text LIKE 'anon=%';
+--        AND (ace::text LIKE 'anon=%' OR ace::text LIKE '=%');
 --
 -- Expected result: zero rows. Any row is a regression and names the function.
--- The query was proved able to FAIL before it was trusted: on the dev project a
--- throwaway function was created in public, granted EXECUTE to anon, and the
--- query returned it; the function was dropped and the query returned to zero.
--- A check that has only ever returned empty has not been shown to detect anything.
+-- The historical failure proof covered only a throwaway function granted EXECUTE
+-- directly to anon. The PUBLIC path must also be exercised deliberately: a bare
+-- PUBLIC aclitem renders with an empty grantee, such as =X/postgres. A check that
+-- has not returned each kind has not proved that it detects both kinds.
 --
 -- Running it on a schedule is tracked separately. If you are reading this because
 -- that query just returned a row, the fix is a REVOKE for that specific function,
@@ -100,6 +102,8 @@ REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM anon;
 
 -- 3. Prove it or abort. Both directions in the same transaction.
 DO $$
+DECLARE
+  v_execute_grant_failure text;
 BEGIN
   -- (a) The tap is closed: no anon entry in public functions default ACL.
   IF EXISTS (
@@ -119,24 +123,35 @@ BEGIN
     RAISE EXCEPTION 'FAIL: anon still appears in the postgres default ACL for public functions after revoke';
   END IF;
 
-  -- (b) Blanket revoke landed: anon holds no direct EXECUTE grant on any public function.
-  --     Uses proacl directly, not has_function_privilege, which also returns true for PUBLIC (=X/postgres)
-  --     grants that our REVOKE FROM anon does not touch.
-  --     When proacl IS NULL, unnest returns no rows and EXISTS returns false, which is correct:
-  --     NULL proacl means the function inherits the default ACL, and assertion (a) already confirmed
-  --     the default ACL carries no anon entry.
-  IF EXISTS (
-    SELECT 1
-      FROM pg_proc p
-      JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE n.nspname = 'public'
-       AND EXISTS (
-         SELECT 1
-           FROM unnest(p.proacl) AS ace
-          WHERE ace::text LIKE 'anon=%'
-       )
-  ) THEN
-    RAISE EXCEPTION 'FAIL: anon still holds a direct EXECUTE grant on a public function after blanket revoke';
+  -- (b) No public function grants EXECUTE directly to anon or indirectly through PUBLIC.
+  --     Uses proacl directly so the failure identifies whether it found anon or PUBLIC
+  --     (=X/postgres), which REVOKE FROM anon does not touch.
+  --     When proacl IS NULL, unnest returns no rows and this assertion has no explicit aclitem
+  --     to inspect. The scheduled privilege check separately covers implicit PUBLIC access.
+  SELECT CASE
+           WHEN ace::text LIKE 'anon=%'
+             THEN format(
+               'anon still holds a direct EXECUTE grant on %I.%I after blanket revoke',
+               n.nspname,
+               p.proname
+             )
+           ELSE format(
+             'PUBLIC holds a bare EXECUTE grant on %I.%I; REVOKE FROM anon does not remove PUBLIC',
+             n.nspname,
+             p.proname
+           )
+         END
+    INTO v_execute_grant_failure
+    FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    CROSS JOIN LATERAL unnest(p.proacl) AS ace
+   WHERE n.nspname = 'public'
+     AND (ace::text LIKE 'anon=%' OR ace::text LIKE '=%')
+   ORDER BY (ace::text LIKE 'anon=%') DESC, p.oid
+   LIMIT 1;
+
+  IF v_execute_grant_failure IS NOT NULL THEN
+    RAISE EXCEPTION 'FAIL: %', v_execute_grant_failure;
   END IF;
 END $$;
 
