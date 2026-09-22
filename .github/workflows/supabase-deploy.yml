@@ -78,9 +78,9 @@ jobs:
   # lands.
   #
   #   target                    resolves the project (no secrets, no side effects)
-  #   apply-migrations          needs: target   AUTOMATIC on a push to dev
-  #   check-pending-migrations  needs: target   gates the deploy, does not follow it
-  #   deploy                    needs: gate     cannot ship ahead of its schema
+  #   apply-migrations          needs: target, check-duplicate-migrations   AUTOMATIC on a push to dev
+  #   check-pending-migrations  needs: target, check-duplicate-migrations, apply-migrations   gates the deploy, does not follow it
+  #   deploy                    needs: target, check-pending-migrations, check-rls-policy-baseline, check-types-drift   cannot ship ahead of its schema
   #
   # dev applies on merge, so its backlog can never exceed one and a bad migration
   # breaks dev in front of the person who wrote it. prod keeps the two-party
