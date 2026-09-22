@@ -1340,6 +1340,10 @@ jobs:
       - name: Previous-version handshake gate
         env:
           CONNECT_COMPAT_BASE_URL: http://localhost:4178
+          # TEMPORARY, OR-T0530 criterion 4 proof only. Forces the real handshake
+          # to assert an impossible code, so this required check goes genuinely
+          # RED rather than green or SKIPPED. Never merge this line.
+          CONNECT_COMPAT_NEGATIVE_CONTROL: '1'
         run: |
           bunx playwright test tests/e2e/connect-protocol-compat.spec.ts \
             --forbid-only --retries=1 --reporter=list
