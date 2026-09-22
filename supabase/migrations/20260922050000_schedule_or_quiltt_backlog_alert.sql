@@ -120,20 +120,23 @@ END$$;
 -- 3. Index supporting the check's own query.
 --
 --    measureOpkDeferredBacklog fetches every row where opk_deferred_at IS
---    NOT NULL, ordered by id, paged. idx_quiltt_webhook_inbox_pending
---    (20260730000000) is partial on
---    "processed_at IS NULL AND opk_deferred_at IS NULL" -- the exact
---    opposite predicate -- so it cannot serve this query. Without a
---    matching index this degrades to a full scan of a table that keeps
---    rows indefinitely (only payload is truncated after 30 days, per
---    20260527010000_quiltt_inbox_retention.sql), which grows every day
---    this check runs.
+--    NOT NULL, ordered by received_at, paged. quiltt_webhook_inbox has no
+--    "id" column (its primary key is event_id); received_at matches the
+--    table's existing sibling index (idx_quiltt_webhook_inbox_pending,
+--    20260730000000) and how the check actually pages. That sibling index
+--    is partial on "processed_at IS NULL AND opk_deferred_at IS NULL" --
+--    the exact opposite predicate -- so it cannot serve this query.
+--    Without a matching index this degrades to a full scan of a table
+--    that keeps rows indefinitely (only payload is truncated after 30
+--    days, per 20260527010000_quiltt_inbox_retention.sql), which grows
+--    every day this check runs.
 
 CREATE INDEX IF NOT EXISTS idx_quiltt_webhook_inbox_opk_deferred_backlog
-  ON public.quiltt_webhook_inbox (id)
+  ON public.quiltt_webhook_inbox (received_at)
   WHERE opk_deferred_at IS NOT NULL;
 
 COMMENT ON INDEX public.idx_quiltt_webhook_inbox_opk_deferred_backlog IS
   'Serves or-quiltt-backlog-alert: every currently-deferred row, ordered by '
-  'id. Distinct from idx_quiltt_webhook_inbox_pending, which is partial on '
-  'opk_deferred_at IS NULL and so cannot serve the opposite predicate (OR-T0267).';
+  'received_at. Distinct from idx_quiltt_webhook_inbox_pending, which is '
+  'partial on opk_deferred_at IS NULL and so cannot serve the opposite '
+  'predicate (OR-T0267).';
