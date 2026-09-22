@@ -570,6 +570,37 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           }
         }
 
+        // 6. Server-side reorg check (OR-T0999).
+        //    For every stored transaction within REORG_LOOKBACK_BLOCKS of the
+        //    current tip, the server compares the stored block_hash against the
+        //    canonical chain.  On a mismatch it sets orphaned_at, removing the
+        //    row from the customer-visible balance and list.
+        //
+        //    Non-fatal: a failure here must never fail the sync.  The cursor
+        //    was already written above; the next sync will re-run the check.
+        //
+        //    Only fired when we actually scanned (result.scanned) so that a
+        //    short-circuit run (tip unchanged) does not hammer the block source
+        //    on every poll interval without new data to check.
+        if (result.scanned && !useMock) {
+          const reorgBody = {
+            connection_id: init.connection_id,
+            app_user_id: init.app_user_id,
+            widget_token: currentWidgetToken,
+            chain_tip: result.lastBlockScanned,
+          };
+          try {
+            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+            if (init.access_token) headers['Authorization'] = `Bearer ${init.access_token}`;
+            await fetch(
+              resolveFunctionUrl('or-stealth-reorg-check', init.proxy_base_url),
+              { method: 'POST', headers, body: JSON.stringify(reorgBody) },
+            );
+          } catch (reorgErr) {
+            console.warn('[stealth/sync] reorg check failed (non-fatal):', reorgErr);
+          }
+        }
+
         // If the filter fetch failed permanently after retries, surface the
         // error NOW -- after the cursor was persisted -- so the embedder sees
         // a retryable failure and the next sync resumes from lastBlockScanned
