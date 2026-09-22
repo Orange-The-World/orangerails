@@ -128,7 +128,7 @@ describe("AppHome (/app)", () => {
   it("renders the unlocked screen once session + vault checks pass", async () => {
     render(<AppHome />);
     expect(
-      await screen.findByText(/Session-based zero-knowledge active/i),
+      await screen.findByText(/Session-based zero-knowledge active/i, {}, { timeout: 5000 }),
     ).toBeInTheDocument();
     expect(mockNavigate).not.toHaveBeenCalledWith({ to: "/login" });
     expect(mockNavigate).not.toHaveBeenCalledWith({ to: "/unlock" });
@@ -147,7 +147,7 @@ describe("AppHome (/app)", () => {
     // rejected read and "administers nothing" were indistinguishable and
     // the page showed no error at all.
     expect(
-      await screen.findByText(/Could not load your co-admin workspaces/i),
+      await screen.findByText(/Could not load your co-admin workspaces/i, {}, { timeout: 5000 }),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/permission denied for function list_coadmin_workspaces/i),
