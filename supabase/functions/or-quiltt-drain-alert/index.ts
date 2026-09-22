@@ -92,17 +92,17 @@ interface DrainCronStats {
  * Serialized with JSON.stringify for equality; key order must stay stable.
  */
 interface SignalSnapshot {
-  failure_rate_firing:      boolean;
-  failure_rate:              number | null;
-  zero_completions_firing:  boolean;
-  succeeded_count:           number | null;
-  stall_firing:              boolean;
-  stalled:                   number | null;
-  retired_firing:            boolean;
-  retired:                   number | null;
-  starvation_firing:         boolean;
-  unprocessed_non_deferred:  number | null;
-  query_error:                string | null;
+  failure_rate_firing:     boolean;
+  failure_rate:            number | null;
+  zero_completions_firing: boolean;
+  succeeded_count:         number | null;
+  stall_firing:            boolean;
+  stalled:                 number | null;
+  retired_firing:          boolean;
+  retired:                 number | null;
+  query_error:             string | null;
+  starvation_firing:       boolean;
+  unprocessed_non_deferred: number | null;
 }
 
 function buildSnapshot(
