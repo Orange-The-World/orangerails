@@ -52,6 +52,7 @@ import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
 import { classifyUpstreamError, errorClassName } from '../_shared/upstream-errors.ts';
 import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
+import { postToZulip } from '../_shared/zulip-alert.ts';
 import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
 import {
   getSinkAdapter,
