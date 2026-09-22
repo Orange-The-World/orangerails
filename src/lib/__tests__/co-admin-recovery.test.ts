@@ -371,4 +371,44 @@ describe("a recovery invalidates every co-admin grant", () => {
     expect(result.status).toBe("failed");
     expect(calls.some((c) => c.op === "delete")).toBe(false);
   });
+
+  it("bounds the admin gate and the admin delete by added_at, so a grant made after the rotation survives", async () => {
+    // Mirrors the wrapped-key scoping test above, but for the OTHER table.
+    // workspace_admins has no version counter either: an unconditional delete
+    // on owner_user_id would remove a fresh post-rotation admin row even
+    // though that admin's wrapped_data_keys row survived (it is a live,
+    // working grant). Simulates the real Postgres-side effect of the bound:
+    // two admins are on record, but only the pre-rotation one comes back from
+    // both the gate read and the delete.
+    const { client, calls } = makeFakeClient({
+      selectResult: {
+        wrapped_data_keys: { data: [], error: null },
+        workspace_admins: { data: [{ admin_user_id: "admin-1" }], error: null },
+      },
+      deleteResult: {
+        wrapped_data_keys: { data: [{ recipient_user_id: "admin-1" }], error: null },
+        workspace_admins: { data: [{ admin_user_id: "admin-1" }], error: null },
+      },
+    });
+
+    const result = await invalidate(client);
+
+    const adminRead = calls.find((c) => c.table === "workspace_admins" && c.op === "select");
+    expect(adminRead?.filters).toContainEqual({
+      column: "added_at",
+      value: ROTATION_COMPLETED_AT,
+    });
+
+    const adminDelete = calls.find((c) => c.table === "workspace_admins" && c.op === "delete");
+    expect(adminDelete?.filters).toContainEqual({
+      column: "added_at",
+      value: ROTATION_COMPLETED_AT,
+    });
+
+    // admin-2 (absent from both fixture results above) was granted after the
+    // rotation: not counted, not reported, and, in production, not deleted,
+    // so they keep the access they were actually given.
+    expect(result).toEqual({ status: "invalidated", grantsInvalidated: 1 });
+    expect(coAdminInvalidationMessage(result)).toContain("1 person");
+  });
 });
