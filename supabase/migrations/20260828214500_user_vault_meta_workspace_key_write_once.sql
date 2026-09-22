@@ -53,10 +53,15 @@ BEGIN
 END;
 $$;
 
--- 3. Write once, in the database, in the same shape as the existing
---    enforce_vault_pubkey_write_once guard on this table. A set value cannot be
---    changed, and it cannot be cleared to NULL first either, because NULL is
---    DISTINCT FROM the old value.
+-- 3. Write once, in the database. A set value cannot be changed, and it cannot be
+--    cleared to NULL first either, because NULL is DISTINCT FROM the old value.
+--
+--    CORRECTION 2026-08-31 (OR-T0966): this header previously said the guard is
+--    "in the same shape as the existing enforce_vault_pubkey_write_once guard on
+--    this table". That was false and it mattered. enforce_vault_pubkey_write_once
+--    is attached BEFORE UPDATE over ALL columns; this one is attached BEFORE
+--    UPDATE OF workspace_key_id, so it does not fire at all on an UPDATE that
+--    leaves the column alone. Same intent, different trigger event.
 CREATE OR REPLACE FUNCTION public.enforce_vault_workspace_key_write_once()
 RETURNS TRIGGER
 LANGUAGE plpgsql
@@ -84,6 +89,16 @@ COMMENT ON COLUMN public.user_vault_meta.workspace_key_id IS
   'Owner identity for every public.wrapped_data_keys policy. Allocated once by the first co-admin grant. UNIQUE and write-once in the database: it is not a secret, so nothing may let a caller choose it.';
 
 -- 4. Assertions. A migration that applies is not evidence the control exists.
+--
+--    KNOWN WEAKNESS, recorded rather than silently left (OR-T0966, 2026-08-31):
+--    the trigger assertion below matches on tgname only, so it would pass just as
+--    happily after someone recreated this guard as an AFTER trigger. A file whose
+--    assertions still pass once the control has been swapped out is asserting
+--    nothing. Rewriting the assertions in place would change what a fresh
+--    environment applies, so the stronger version, which pins TIMING and EVENT
+--    through pg_get_triggerdef, lives in
+--    20260831140000_user_vault_meta_workspace_key_server_allocated.sql and covers
+--    this trigger as well as its own.
 DO $$
 BEGIN
   IF NOT EXISTS (
