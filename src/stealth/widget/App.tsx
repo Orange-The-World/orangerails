@@ -204,6 +204,19 @@ export function App() {
         return;
       }
 
+      // THROWAWAY, OR-T0326 CI PROOF ONLY. NOT REAL BEHAVIOUR. NEVER MERGE.
+      // Deliberately makes v1 (N-1) diverge from v2 (current) on the
+      // "missing app_slug" case so connect-protocol-compat.spec.ts has a
+      // real, non-negative-control divergence to catch. See postmessage.ts.
+      if (data.protocol_version === 1 && typeof data.app_slug !== "string") {
+        postError(event.source as Window | null, event.origin, {
+          code: "OR_T0326_THROWAWAY_DIVERGENCE",
+          message: "Deliberate throwaway divergence to prove the N-1 gate can fail (OR-T0326).",
+          retryable: false,
+        });
+        return;
+      }
+
       // Determine seal mode. Anything other than the explicit string 'app'
       // resolves to widget mode, preserving backward compatibility.
       const sealMode = data.seal_mode === "app" ? "app" : "widget";
