@@ -48,20 +48,25 @@
  * Spec lives in STEALTH-SYNC-MASTER-PLAN.md §4.4.
  */
 
-export const STEALTH_PROTOCOL_VERSION = 1 as const;
+export const STEALTH_PROTOCOL_VERSION = 2 as const;
 
 /**
+ * THROWAWAY, OR-T0326 CI PROOF ONLY. NOT A REAL PROTOCOL BUMP. NEVER MERGE.
+ *
+ * This branch exists solely to drive the connect-protocol-compat.spec.ts
+ * "previous protocol version" comparison for real, so the required check
+ * (DL-1809) can be observed going red on a deliberately broken N-1 case per
+ * OR-T0326 acceptance criterion 4. See App.tsx for the matching deliberate
+ * divergence. This PR is opened, its CI run captured, and then closed
+ * unmerged -- the real set stays [1] until an actual protocol bump ships.
+ *
  * The full set of protocol versions this widget build accepts at INIT and
  * advertises in READY. Membership, not equality, is the compatibility rule:
  * an INIT whose protocol_version is anywhere in this set is accepted, and an
  * app can read this set off READY to pick a version both sides speak with no
  * app deploy. STEALTH_PROTOCOL_VERSION stays the current preferred version.
- *
- * This PR ships the mechanism only. The set stays [1] here; a version is
- * added to it only in the release that actually bumps the protocol, per the
- * 90 day deprecation window documented in docs/Stealth-Sync.md.
  */
-export const STEALTH_SUPPORTED_PROTOCOL_VERSIONS = [1] as const;
+export const STEALTH_SUPPORTED_PROTOCOL_VERSIONS = [1, 2] as const;
 
 /**
  * Union of every version this widget build accepts. Derived from
