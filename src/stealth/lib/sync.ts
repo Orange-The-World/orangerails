@@ -1141,7 +1141,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // a block that matched addr0 but not addr5 is not a hit for the extension
   // pass (addr5-only scan). If a block has BOTH addr0 and addr5 outputs it
   // WILL appear in both the initial hits and the extension hits; the
-  // processedTxids set below prevents double-counting in normalized.
+  // txAcc accumulator below merges both sightings into one record
+  // instead of double-counting or dropping either one (OR-T2724).
   //
   // req 4: filter bytes from the initial scan are cached in filterCache.
   // Extension passes re-match locally; CDN re-downloads only occur on a cache
