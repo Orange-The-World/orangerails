@@ -1547,6 +1547,9 @@ const STALE_THRESHOLD_DAYS = 7;
 // connection, this one flags a connection nobody has synced in a month,
 // which is a different problem and gets its own, more urgent, treatment.
 const STALE_NUDGE_THRESHOLD_DAYS = 30;
+// Case B threshold (OR-T0079): gap between last_sync_at and latest imported
+// transaction date, in days. CTO confirmed 14 days on 2026-09-22.
+const DATA_STALE_THRESHOLD_DAYS = 14;
 
 function isStaleConnection(lastSyncAt: string, thresholdDays: number = STALE_THRESHOLD_DAYS): boolean {
   const ageMs = Date.now() - new Date(lastSyncAt).getTime();
@@ -1591,6 +1594,17 @@ function ConnectionRow({
   // (sync ran but is old): here the sync claims to have run recently but
   // the accounts page is empty.
   const noDataImported = !neverSynced && latestTxAt === undefined;
+  // Case B (OR-T0079): sync has run and there is data, but the most recent
+  // transaction is more than DATA_STALE_THRESHOLD_DAYS older than the last
+  // sync. The provider is syncing but delivering no new transactions.
+  const dataStale =
+    !neverSynced &&
+    latestTxAt !== undefined &&
+    new Date(conn.last_sync_at!).getTime() - new Date(latestTxAt).getTime() >
+      DATA_STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
+  const dataStaleAgeDays = dataStale
+    ? Math.floor((Date.now() - new Date(latestTxAt!).getTime()) / (24 * 60 * 60 * 1000))
+    : 0;
 
   return (
     <div className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
@@ -1643,6 +1657,14 @@ function ConnectionRow({
             className="text-xs text-amber-600 dark:text-amber-400"
           >
             Sync active but no data imported yet.
+          </div>
+        )}
+        {dataStale && (
+          <div
+            data-testid="data-stale-banner"
+            className="text-xs text-amber-600 dark:text-amber-400"
+          >
+            Sync running but last imported data is {dataStaleAgeDays} day{dataStaleAgeDays === 1 ? "" : "s"} old.
           </div>
         )}
         <div className="text-xs text-muted-foreground flex items-center gap-2">
