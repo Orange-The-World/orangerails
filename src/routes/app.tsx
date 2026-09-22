@@ -217,6 +217,18 @@ export function AppHome() {
   const [workspaceLoadIssues, setWorkspaceLoadIssues] = useState<
     { ownerUserId: string; ownerEmail: string; message: string }[]
   >([]);
+  // RPC-level failure of list_coadmin_workspaces. Same reason as
+  // workspaceLoadIssues: it must not live in `err`. refresh() starts with
+  // setErr(null), and refresh's identity changes when myKemSecretWrapped
+  // changes (getActiveCredentialsKey / getActiveTransactionsKey deps). The
+  // PQC key backfill below is fired and not awaited, so it can resolve AFTER
+  // this RPC has already failed and written a message. If that message is in
+  // `err`, the backfill's setMyKemSecretWrapped retriggers refresh and the
+  // user is left with an empty list and no explanation (OR-T1789). Set only
+  // by the loader effect; refresh() never touches it.
+  const [coAdminWorkspacesLoadError, setCoAdminWorkspacesLoadError] = useState<
+    string | null
+  >(null);
   // Cached admin subkeys , persists until tab closes (MVP limitation).
   const adminSubkeysRef = useRef<
     Map<string, { credentialsKey: CryptoKey; transactionsKey: CryptoKey }>
@@ -352,17 +364,24 @@ export function AppHome() {
       // is what dev now does for every read on this page (OR-T1768). "empty"
       // is the ordinary case of administering nothing and stays silent; only
       // "error" is surfaced. A failed call must never look like "you are a
-      // co-admin of nothing", so unlike the other reads on this page it is
-      // loud: setErr as well as the log, because an empty list here is
-      // indistinguishable to the user from a real answer.
-      if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
+      // co-admin of nothing": the message goes into coAdminWorkspacesLoadError,
+      // not `err`, because refresh() would wipe `err` (OR-T1789), and we do
+      // not replace adminWorkspaces with [] because the switcher is hidden
+      // when that list is empty.
+      const coAdminWorkspacesLoadFailed =
+        classifyRead(myAdminOf, myAdminOfErr) === "error";
+      if (coAdminWorkspacesLoadFailed) {
         console.error("Failed to load co-admin workspaces:", myAdminOfErr);
-        setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
+        setCoAdminWorkspacesLoadError(
+          `Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`,
+        );
+      } else {
+        setCoAdminWorkspacesLoadError(null);
       }
 
       const workspaces: WorkspaceOption[] = [];
       const issues: { ownerUserId: string; message: string }[] = [];
-      if (myAdminOf && myAdminOf.length > 0) {
+      if (!coAdminWorkspacesLoadFailed && myAdminOf && myAdminOf.length > 0) {
         for (const ownerRow of myAdminOf) {
           const ownerId = ownerRow.owner_user_id;
           const ownerKeyId = ownerRow.workspace_key_id;
@@ -441,15 +460,17 @@ export function AppHome() {
       }
 
       setCoAdmins(adminRows.map((r) => ({ ...r, adminEmail: emailMap.get(r.admin_user_id) })));
-      setAdminWorkspaces(
-        workspaces.map((w) => ({ ...w, ownerEmail: emailMap.get(w.ownerUserId) ?? w.ownerUserId })),
-      );
-      // Replaces the previous list wholesale: this effect only re-runs on
-      // [isUnlocked, navigate], so a duplicate row the owner has since fixed
-      // clears on the next real reload rather than lingering forever.
-      setWorkspaceLoadIssues(
-        issues.map((i) => ({ ...i, ownerEmail: emailMap.get(i.ownerUserId) ?? i.ownerUserId })),
-      );
+      if (!coAdminWorkspacesLoadFailed) {
+        setAdminWorkspaces(
+          workspaces.map((w) => ({ ...w, ownerEmail: emailMap.get(w.ownerUserId) ?? w.ownerUserId })),
+        );
+        // Replaces the previous list wholesale: this effect only re-runs on
+        // [isUnlocked, navigate], so a duplicate row the owner has since fixed
+        // clears on the next real reload rather than lingering forever.
+        setWorkspaceLoadIssues(
+          issues.map((i) => ({ ...i, ownerEmail: emailMap.get(i.ownerUserId) ?? i.ownerUserId })),
+        );
+      }
     })();
   }, [isUnlocked, navigate]);
 
@@ -497,6 +518,8 @@ export function AppHome() {
   const refresh = useCallback(async () => {
     setLoading(true);
     setErr(null);
+    // Does not clear coAdminWorkspacesLoadError or workspaceLoadIssues.
+    // Those belong to the loader effect (OR-T1789, OR-T1291).
     try {
       // Resolve which user's connections to show and which keys to use.
       const isAdminView = !!activeWorkspace;
@@ -1029,7 +1052,9 @@ export function AppHome() {
         <div className="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="font-semibold">OrangeRails</div>
           <div className="flex items-center gap-4 flex-wrap">
-            {/* Workspace switcher , only shown when this user is a co-admin of at least one workspace */}
+            {/* Workspace switcher , only shown when this user is a co-admin of at least one workspace.
+                A failed list_coadmin_workspaces must not hide this by writing []. The
+                load-failure message below is what distinguishes that from "none". */}
             {adminWorkspaces.length > 0 && (
               <select
                 value={activeWorkspace?.workspaceKeyId ?? ""}
@@ -1110,6 +1135,15 @@ export function AppHome() {
         {err && (
           <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
             {err}
+          </div>
+        )}
+        {/* RPC-level list failure (OR-T1789). Own state, own banner, next to
+            the workspace switcher this message is about. refresh() does not
+            clear it. Empty adminWorkspaces plus this banner is "load failed";
+            empty adminWorkspaces without it is "you administer nothing". */}
+        {coAdminWorkspacesLoadError && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+            {coAdminWorkspacesLoadError}
           </div>
         )}
         {/* Surfaced next to the workspace list itself (OR-T1291), not as a
