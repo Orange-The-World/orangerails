@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: placeholder for orphan ledger row already applied to dev; apply-migrations skips on ledger match (OR-T2621)
 -- 20260905230000_revoke_authenticated_execute_vault_meta_no_direct_delete.sql
 --
 -- PLACEHOLDER FILE: this migration version was already applied to dev
