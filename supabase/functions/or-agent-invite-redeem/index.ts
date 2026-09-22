@@ -17,6 +17,11 @@
  * (OR-T0993 sync commit: forces a fresh CI run against dev's current auth-marker gate,
  * which added the invitation-token exemption after this branch was cut, see OR-T1983.)
  *
+ * (OR-T0993 redeploy commit, 2026-09-15: this function merged to dev on 2026-09-14 but
+ * sb_functions on hosted orangerails_dev shows it never actually shipped there. This
+ * touch forces the deploy workflow's targeted git-diff to include this directory on the
+ * next merge to dev, regardless of why the original deploy did not land it.)
+ *
  * WHAT IT DOES NOT DO. It does not make redemption non public. A pre-auth endpoint is
  * reachable by anyone on the internet whether the gateway JWT check is off or it merely
  * accepts the anon key, which ships in every browser bundle. The raw token remains the only
