@@ -217,6 +217,19 @@ export function AppHome() {
   const [workspaceLoadIssues, setWorkspaceLoadIssues] = useState<
     { ownerUserId: string; ownerEmail: string; message: string }[]
   >([]);
+  // The co-admin *workspaces* RPC failing outright (as opposed to one
+  // workspace's wrapped key read failing, which is workspaceLoadIssues
+  // above) used to go through setErr(...). err is cleared unconditionally
+  // by refresh() on every run (OR-T1291), and refresh() re-fires whenever
+  // its own dependencies change identity, including decryptText /
+  // decryptTransaction from useVault(), which are new function references
+  // on every render under the mocked VaultContext used in app.test.tsx.
+  // That produced a real scheduling race, not a CI-timeout flake
+  // (OR-T2725): whichever setErr call landed last won, so a genuine RPC
+  // failure could be shown and cleared again before anyone saw it. Kept
+  // separate from `err` for the same reason workspaceLoadIssues is:
+  // refresh() never touches it.
+  const [coAdminWorkspacesErr, setCoAdminWorkspacesErr] = useState<string | null>(null);
   // Cached admin subkeys , persists until tab closes (MVP limitation).
   const adminSubkeysRef = useRef<
     Map<string, { credentialsKey: CryptoKey; transactionsKey: CryptoKey }>
@@ -353,11 +366,20 @@ export function AppHome() {
       // is the ordinary case of administering nothing and stays silent; only
       // "error" is surfaced. A failed call must never look like "you are a
       // co-admin of nothing", so unlike the other reads on this page it is
-      // loud: setErr as well as the log, because an empty list here is
-      // indistinguishable to the user from a real answer.
+      // loud: setCoAdminWorkspacesErr as well as the log, because an empty
+      // list here is indistinguishable to the user from a real answer. This
+      // used to go through setErr, which refresh() clears unconditionally on
+      // every run and whose own effect re-fires on effectively every render
+      // under test (OR-T2725) -- a genuine failure could be shown and cleared
+      // again within the same tick, depending on render scheduling. Its own
+      // state slot, only ever touched here, removes the race.
       if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
         console.error("Failed to load co-admin workspaces:", myAdminOfErr);
-        setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
+        setCoAdminWorkspacesErr(
+          `Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`,
+        );
+      } else {
+        setCoAdminWorkspacesErr(null);
       }
 
       const workspaces: WorkspaceOption[] = [];
@@ -1110,6 +1132,16 @@ export function AppHome() {
         {err && (
           <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
             {err}
+          </div>
+        )}
+        {/* Own state slot for the same reason as workspaceLoadIssues below
+            (OR-T2725): refresh() clears `err` unconditionally on every run,
+            so a genuine co-admin-workspaces RPC failure sharing that slot
+            could be shown and cleared again before a user, or a test, ever
+            saw it. */}
+        {coAdminWorkspacesErr && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+            {coAdminWorkspacesErr}
           </div>
         )}
         {/* Surfaced next to the workspace list itself (OR-T1291), not as a
