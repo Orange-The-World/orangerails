@@ -8,8 +8,12 @@
  *   - strikeSubscriptionErrorMarker  (no I/O, maps an error string to a marker)
  *   - resolveInvoiceWallet           (async, but only calls crypto + a Map lookup)
  *
- * drainStrikeQueue requires a live SupabaseClient and a Strike API and is not
- * unit-tested here.
+ * drainStrikeQueue as a whole still needs a live SupabaseClient and a Strike
+ * API for its provider-facing branches (invoice/payment/etc lookups) and is
+ * not fully exercised here. Its mark-processed database-write failure path
+ * (OR-T0335) IS covered below: routing every fixture event through the
+ * unrecognized-event_type branch never calls the Strike API, so that one
+ * write can be driven with a minimal fake SupabaseClient.
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
