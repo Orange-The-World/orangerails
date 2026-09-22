@@ -958,6 +958,28 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
 
   const normalized: NormalizedTransaction[] = [];
 
+  // ── cross-window amount accumulator (OR-T2724) ──────────────────────
+  // A tx whose inputs or outputs span BOTH the address window known when
+  // its block is first scanned AND an address discovered only by a LATER
+  // rolling-window extension pass (see the extension loop below) must not
+  // have its amount finalized until every pass that could touch it has
+  // run. Each pass ADDS whatever it independently detects for a txid into
+  // this accumulator; direction and amount_sats are computed once, after
+  // the extension loop completes, from the fully-accumulated totals --
+  // never from a single pass's partial view of the address window.
+  const txAcc = new Map<string, {
+    block_height: number;
+    block_hash: string;
+    occurred_at: string;
+    timestamp: string;
+    vin_count: number;
+    vout_count: number;
+    spentInputs: bigint;
+    receivedAmount: bigint;
+    receivedAddress: string;
+    recipientAddress: string;
+  }>();
+
   // Track the highest address index matched on each chain (receive=0,
   // change=1). -1 means no match yet. Updated in the receive detection
   // loop below; used after block parsing to detect exhaustion (#352).
@@ -1051,64 +1073,46 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         }
       }
 
-      // ─── Emit normalized records ───────────────────────────────────
-      if (spentInputs > 0n) {
-        // SPEND. amount_sats = what left our wallet net of change.
-        //   spentInputs    , total value of UTXOs we destroyed
-        //   receivedAmount , total value of new outputs paying us back (change)
-        // The difference is "what we paid out" (and includes the network fee).
-        // Pure self-transfer (consolidation) → amount = fee only.
-        const netOut = spentInputs - receivedAmount;
-        // Best-effort recipient address: first output that does NOT pay
-        // us. Empty if every output pays us (pure consolidation).
+      // ─── Emit into the accumulator (OR-T2724) ─────────────────────
+      // Do not finalize here: a later extension pass may still add
+      // spentInputs or receivedAmount for this exact txid once it derives
+      // an address this initial pass cannot yet see. Direction and
+      // amount_sats are computed once, after ALL extension passes, from
+      // the fully accumulated totals (see the finalize step below).
+      if (spentInputs > 0n || anyReceive) {
+        // Best-effort recipient address: first output that does NOT pay a
+        // KNOWN address at this point in the scan. Empty if every output
+        // pays us (pure consolidation). Computed only the first time this
+        // txid is classified as a spend, matching the pre-existing
+        // best-effort behaviour.
         let recipientAddress = '';
-        for (const out of tx.outputs) {
-          let isOurs = false;
-          for (const d of derived) {
-            if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
-          }
-          if (!isOurs) {
-            recipientAddress = scriptToAddressBestEffort(out.script);
-            if (recipientAddress) break;
+        if (spentInputs > 0n) {
+          for (const out of tx.outputs) {
+            let isOurs = false;
+            for (const d of derived) {
+              if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+            }
+            if (!isOurs) {
+              recipientAddress = scriptToAddressBestEffort(out.script);
+              if (recipientAddress) break;
+            }
           }
         }
-        normalized.push({
-          txid: tx.txid,
+        txAcc.set(tx.txid, {
           block_height: blockHeight,
           block_hash: hits[i].blockHashHex,
           occurred_at: occurredAt,
           timestamp: occurredAtInstant,
-          direction: 'out',
-          amount_sats: Number(netOut),
-          address: recipientAddress,
           vin_count: tx.vinCount,
           vout_count: tx.voutCount,
-          memo: null,
+          spentInputs,
+          receivedAmount,
+          receivedAddress,
+          recipientAddress,
         });
         // Add change outputs to UTXO map so future spends can reference
         // them. (A receive that is also a change-back from our own spend
         // still counts as a UTXO we own.)
-        for (const u of newUtxos) {
-          utxoMap.set(utxoKey(tx.txid, u.idx), {
-            value: u.value,
-            address: u.address,
-          });
-        }
-      } else if (anyReceive) {
-        // RECEIVE only , pure incoming, no inputs of ours were spent.
-        normalized.push({
-          txid: tx.txid,
-          block_height: blockHeight,
-          block_hash: hits[i].blockHashHex,
-          occurred_at: occurredAt,
-          timestamp: occurredAtInstant,
-          direction: 'in',
-          amount_sats: Number(receivedAmount),
-          address: receivedAddress,
-          vin_count: tx.vinCount,
-          vout_count: tx.voutCount,
-          memo: null,
-        });
         for (const u of newUtxos) {
           utxoMap.set(utxoKey(tx.txid, u.idx), {
             value: u.value,
@@ -1122,7 +1126,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     emit(opts, progress('fetching_blocks', pct, `${i + 1} of ${hits.length} blocks.`));
   }
   emit(opts, progress('fetching_blocks', 100));
-  emit(opts, progress('building_txs', 100, `${normalized.length} transactions.`));
+  emit(opts, progress('building_txs', 100, `${txAcc.size} transactions so far (before rolling-window extension).`));
 
   // ── rolling-window extension (issue #353) ───────────────────────────
   // After the initial filter scan, check whether any chain has a match within
@@ -1145,9 +1149,6 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // the full [fromHeight, tip] range.
   let windowPass = 0;
   let windowExhausted = false;
-  // Txids recorded in normalized so far. Used to prevent double-counting when
-  // extension scans hit blocks already processed in an earlier pass.
-  const processedTxids = new Set<string>(normalized.map((tx) => tx.txid));
 
   extensionLoop: while (windowPass < MAX_WINDOW_PASSES) {
     const chain0Near = maxMatchedIndexPerChain[0] >= chainWindowEnd[0] - gapLimit;
@@ -1307,47 +1308,76 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
           }
         }
 
-        // Only add to normalized if this txid has not been recorded in a
-        // prior pass. Double-adding the same txid would corrupt the balance.
-        const alreadySeen = processedTxids.has(tx.txid);
-
-        if (spentInputs > 0n && !alreadySeen) {
-          const netOut = spentInputs - receivedAmount;
-          let recipientAddress = '';
-          for (const out of tx.outputs) {
-            let isOurs = false;
-            for (const d of derived) {
-              if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+        // Merge into the accumulator (OR-T2724) rather than skip-or-push.
+        // A tx already recorded by the initial pass, or by an earlier
+        // extension pass, can still gain spentInputs or receivedAmount here
+        // once THIS pass derives the address that touches it -- e.g.
+        // ordinary coin selection consolidating an old-window UTXO with one
+        // from just beyond the previous gap-limit window, or a tx paying
+        // both an old and a newly-active address. Dropping that extra
+        // amount (the pre-fix behaviour) silently mis-stated amount_sats.
+        // Adding it in unconditionally cannot double-count: each pass
+        // contributes its own independently detected spentInputs /
+        // receivedAmount for a given txid exactly once, since a pass
+        // processes each block, and each tx within it, exactly once, an
+        // input is consumed (utxoMap.delete) the first time any pass
+        // spends it, and each pass's receive-side match only ever checks
+        // that pass's own newly-derived addresses, disjoint from every
+        // other pass's.
+        const existing = txAcc.get(tx.txid);
+        if (spentInputs > 0n || anyReceive) {
+          if (existing) {
+            existing.spentInputs += spentInputs;
+            existing.receivedAmount += receivedAmount;
+            if (!existing.receivedAddress && receivedAddress) {
+              existing.receivedAddress = receivedAddress;
             }
-            if (!isOurs) {
-              recipientAddress = scriptToAddressBestEffort(out.script);
-              if (recipientAddress) break;
+            if (!existing.recipientAddress && spentInputs > 0n) {
+              let recipientAddress = '';
+              for (const out of tx.outputs) {
+                let isOurs = false;
+                for (const d of derived) {
+                  if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+                }
+                if (!isOurs) {
+                  recipientAddress = scriptToAddressBestEffort(out.script);
+                  if (recipientAddress) break;
+                }
+              }
+              existing.recipientAddress = recipientAddress;
             }
+          } else {
+            let recipientAddress = '';
+            if (spentInputs > 0n) {
+              for (const out of tx.outputs) {
+                let isOurs = false;
+                for (const d of derived) {
+                  if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+                }
+                if (!isOurs) {
+                  recipientAddress = scriptToAddressBestEffort(out.script);
+                  if (recipientAddress) break;
+                }
+              }
+            }
+            txAcc.set(tx.txid, {
+              block_height: blockHeight,
+              block_hash: extHits[ei].blockHashHex,
+              occurred_at: occurredAt,
+              timestamp: occurredAtInstant,
+              vin_count: tx.vinCount,
+              vout_count: tx.voutCount,
+              spentInputs,
+              receivedAmount,
+              receivedAddress,
+              recipientAddress,
+            });
           }
-          normalized.push({
-            txid: tx.txid, block_height: blockHeight, block_hash: extHits[ei].blockHashHex,
-            occurred_at: occurredAt,
-            timestamp: occurredAtInstant, direction: 'out',
-            amount_sats: Number(netOut), address: recipientAddress,
-            vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
-          });
-          processedTxids.add(tx.txid);
-          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
-        } else if (anyReceive && !alreadySeen) {
-          normalized.push({
-            txid: tx.txid, block_height: blockHeight, block_hash: extHits[ei].blockHashHex,
-            occurred_at: occurredAt,
-            timestamp: occurredAtInstant, direction: 'in',
-            amount_sats: Number(receivedAmount), address: receivedAddress,
-            vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
-          });
-          processedTxids.add(tx.txid);
-          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
-        } else if (anyReceive || spentInputs > 0n) {
-          // txid was already processed in an earlier pass. Still update utxoMap
-          // for new-address UTXOs so future spends in later blocks can find them.
-          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
         }
+        // Always update utxoMap for new-address UTXOs, whether this is the
+        // first or a later pass to see them, so future spends in later
+        // blocks (this pass or a subsequent one) can find them.
+        for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
       }
     }
     windowPass++;
@@ -1366,6 +1396,44 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         `stealth/sync: address window exhausted after ${MAX_WINDOW_PASSES} extension passes` +
         ` -- wallet history beyond the scanned window may be missing`,
       );
+    }
+  }
+
+  // ── finalize (OR-T2724): compute direction and amount_sats once ────
+  // Every pass that could touch a txid -- the initial scan and every
+  // rolling-window extension pass -- has now run and merged into txAcc.
+  // Decide direction and amount_sats exactly once per txid, from the
+  // fully accumulated totals, never from a single pass's partial view of
+  // the address window.
+  for (const [txid, acc] of txAcc) {
+    if (acc.spentInputs > 0n) {
+      normalized.push({
+        txid,
+        block_height: acc.block_height,
+        block_hash: acc.block_hash,
+        occurred_at: acc.occurred_at,
+        timestamp: acc.timestamp,
+        direction: 'out',
+        amount_sats: Number(acc.spentInputs - acc.receivedAmount),
+        address: acc.recipientAddress,
+        vin_count: acc.vin_count,
+        vout_count: acc.vout_count,
+        memo: null,
+      });
+    } else if (acc.receivedAmount > 0n) {
+      normalized.push({
+        txid,
+        block_height: acc.block_height,
+        block_hash: acc.block_hash,
+        occurred_at: acc.occurred_at,
+        timestamp: acc.timestamp,
+        direction: 'in',
+        amount_sats: Number(acc.receivedAmount),
+        address: acc.receivedAddress,
+        vin_count: acc.vin_count,
+        vout_count: acc.vout_count,
+        memo: null,
+      });
     }
   }
 
