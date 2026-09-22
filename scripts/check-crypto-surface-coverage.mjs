@@ -157,13 +157,15 @@ function main() {
     }
   }
 
-  const primitiveAbs = CRYPTO_PRIMITIVES.map((p) => join(REPO_ROOT, p)).filter((p) => {
-    if (!existsSync(p)) {
-      console.error(`::warning::crypto-surface-coverage: seed file not found on disk, skipping: ${relative(REPO_ROOT, p)}`);
-      return false;
+  const missingSeeds = CRYPTO_PRIMITIVES.map((p) => join(REPO_ROOT, p)).filter((p) => !existsSync(p));
+  if (missingSeeds.length > 0) {
+    for (const p of missingSeeds) {
+      console.error(`::error::crypto-surface-coverage: seed file not found on disk: ${relative(REPO_ROOT, p)}`);
     }
-    return true;
-  });
+    console.error('::error::crypto-surface-coverage: a missing or renamed seed would silently narrow the crypto surface instead of covering it. Refusing to run with an incomplete seed list.');
+    process.exit(1);
+  }
+  const primitiveAbs = CRYPTO_PRIMITIVES.map((p) => join(REPO_ROOT, p));
 
   const surface = new Set(primitiveAbs);
   const queue = [...primitiveAbs];
