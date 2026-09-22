@@ -336,10 +336,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     // Count total rows for this connection. Returned on every page so the
     // widget can show overall progress without exhausting all pages.
+    // Exclude orphaned transactions (block_hash mismatch detected by reorg
+    // check): a customer must never see money that was invalidated by a reorg.
     const { count: totalCount, error: countErr } = await ctx.serviceClient
       .from('stealth_transactions')
       .select('id', { count: 'exact', head: true })
-      .eq('connection_id', body.connection_id);
+      .eq('connection_id', body.connection_id)
+      .is('orphaned_at', null);
     if (countErr) {
       console.error('[or-stealth-transactions-list] count failed:', countErr);
       return jsonResponse({ error: 'Failed to count transactions' }, 500, cors);
@@ -350,7 +353,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     let txQuery = ctx.serviceClient
       .from('stealth_transactions')
       .select('id, sealed_record, occurred_at, block_height, txid_blind_index_hex, created_at')
-      .eq('connection_id', body.connection_id);
+      .eq('connection_id', body.connection_id)
+      // Orphaned rows are excluded: they represent transactions that were
+      // invalidated by a blockchain reorg and must not appear in the
+      // customer-visible history or balance.
+      .is('orphaned_at', null);
 
     // Ordering comes from PAGE_ORDER rather than from literal .order() calls
     // so that production and the pagination test cannot drift apart.
