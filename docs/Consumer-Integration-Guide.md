@@ -237,6 +237,8 @@ The widget closes itself ~1.2s after posting. If the user cancels, you get `{ ty
 
 The keepalive POST that records a successful link (`completeLinkOnOR` inside the popup) survives the popup closing. The `postMessage` telling your opener the outcome does not: if the user closes the popup (or it closes itself) before that message is sent, your opener has no signal at all, even though the bank link succeeded server-side. `or-quiltt-link-status` exists so your backend can ask directly instead of guessing.
 
+This endpoint only resolves Quiltt-backed bank links. The row it reads is written solely by `or-quiltt-link-complete`, so if you opened the widget for a Strike, BTCPay, or other non-Quiltt provider, this endpoint returns `not_linked` forever regardless of what actually happened, poll or no poll. Use it only when `provider` at popup-open time was a Quiltt-backed bank.
+
 ```
 POST /functions/v1/or-quiltt-link-status
 Header: X-Platform-API-Key: <hex64>
