@@ -33,6 +33,7 @@
     "or-queue-health": "internal-worker-token",
     "or-quiltt-accounts": "platform-api-key",
     "or-quiltt-disconnect": "platform-api-key",
+    "or-quiltt-backlog-alert": "internal-worker-token",
     "or-quiltt-drain-alert": "internal-worker-token",
     "or-quiltt-link-complete": "widget-token",
     "or-quiltt-session": "platform-api-key",
