@@ -12,5 +12,5 @@ sees zero ledger rows against a populated database and aborts POPULATED, before
 the apply loop runs. The ledger is restored from the snapshot immediately after
 the run reaches that point, whatever the outcome.
 
-See OR-T0957 in delivery-db for the full record, the run link, and the before
-and after row counts.
+See ticket OR-T0957 for the full record, the run link, and the before and
+after row counts.
