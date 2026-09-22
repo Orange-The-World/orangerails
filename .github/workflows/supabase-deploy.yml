@@ -555,6 +555,15 @@ jobs:
       # of a live forced-failure workflow_dispatch run, which this seat has
       # no tool to trigger.
       - name: "Self-test: prove the retry-loop if-shape reaches the code after 3 failures under bash -e"
+        # OR-T1536 hotfix 2026-09-22, follow-up to adb1f7b9: continue-on-error added.
+        # This self-test's BUGGY-shape assertion cannot pass: the left side of a
+        # `cmd && cmd2` list is exempt from bash's errexit, so it never dies early
+        # here, and the self-test always fails. With no continue-on-error, that
+        # failure was skipping the next step, Check pending DB migrations, the
+        # real drift check, on every push since the merge. This restores that
+        # check now. The self-test itself still needs a real fix or removal,
+        # tracked on OR-T1536.
+        continue-on-error: true
         run: |
           set -uo pipefail
 
