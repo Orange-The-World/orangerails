@@ -44,7 +44,11 @@
  * it carries the same workspace_key_id as the dead pre-rotation grants. An
  * unconditional delete on that id alone would destroy it too, silently. So the
  * caller passes rotationCompletedAt, the instant the rotation was proven, and
- * the delete only removes rows created at or before it.
+ * the wrapped_data_keys delete only removes rows created at or before it. The
+ * workspace_admins read and delete below carry the SAME bound, on added_at,
+ * for the same reason: a fresh admin row made in that window is a working
+ * grant and must survive, or the owner's admin list silently drops someone
+ * who still holds one.
  *
  * IT DOES NOT THROW. By the time it runs the recovery has already succeeded.
  * Reporting a cleanup failure as a failed recovery would tell the user
@@ -154,7 +158,8 @@ export async function invalidateCoAdminGrantsAfterRecovery(
   const { data: admins, error: adminReadErr } = await supabase
     .from("workspace_admins")
     .select("admin_user_id")
-    .eq("owner_user_id", ownerUserId);
+    .eq("owner_user_id", ownerUserId)
+    .lte("added_at", rotationCompletedAt);
   if (adminReadErr) {
     return {
       status: "failed",
@@ -200,10 +205,17 @@ export async function invalidateCoAdminGrantsAfterRecovery(
     };
   }
 
+  // Bounded by added_at for the same reason the wrapped_data_keys delete
+  // above is bounded by created_at: a co-admin grant made from a second tab
+  // after the rotation landed is a live, working grant (its wrapped_data_keys
+  // row already survived the delete above), so its workspace_admins row must
+  // survive too. Without this bound the admin list would silently drop a
+  // person who still holds emergency access.
   const { data: removedAdmins, error: adminErr } = await supabase
     .from("workspace_admins")
     .delete()
     .eq("owner_user_id", ownerUserId)
+    .lte("added_at", rotationCompletedAt)
     .select("admin_user_id");
   if (adminErr) {
     // The dangerous half succeeded: no dead key material is left. What remains
