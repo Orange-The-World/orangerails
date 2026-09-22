@@ -14,7 +14,14 @@
  *   encrypted_credentials: string  base64 AES-256-GCM (ORK-encrypted)
  *
  * Response:
- *   { connection_id: uuid }
+ *   {
+ *     connection_id: uuid,
+ *     // OR-T0328: same fields as or-link-complete. Not a refusal, just a
+ *     // flag: false / nonzero means the integrator has not called
+ *     // or-sync-key-register for this subaccount yet.
+ *     opk_registered: boolean,
+ *     parked_item_count: number,
+ *   }
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
