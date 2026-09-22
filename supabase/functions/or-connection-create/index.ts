@@ -77,7 +77,30 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'DatabaseError', code: insErr?.code ?? 'unknown' }, 500, cors);
     }
 
-    return jsonResponse({ connection_id: created.id as string }, 200, cors);
+    // OR-T0328: flag, do not refuse, a subaccount with no background-sync
+    // seal key (OPK) registered, and report how many quiltt_webhook_inbox
+    // rows are parked for it right now. Read-only, no key material touched.
+    const { data: opkRow } = await ctx.serviceClient
+      .from('subaccounts')
+      .select('opk_public')
+      .eq('id', subaccountId)
+      .maybeSingle();
+    const { count: parkedItemCount } = await ctx.serviceClient
+      .from('quiltt_webhook_inbox')
+      .select('id', { count: 'exact', head: true })
+      .eq('subaccount_id', subaccountId)
+      .is('processed_at', null)
+      .not('opk_deferred_at', 'is', null);
+
+    return jsonResponse(
+      {
+        connection_id: created.id as string,
+        opk_registered: opkRow?.opk_public != null,
+        parked_item_count: parkedItemCount ?? 0,
+      },
+      200,
+      cors,
+    );
   } catch (err) {
     console.error('[or-connection-create] fatal:', err);
     await reportError(err, 'or-connection-create', req);
