@@ -366,11 +366,20 @@ export function AppHome() {
       // is the ordinary case of administering nothing and stays silent; only
       // "error" is surfaced. A failed call must never look like "you are a
       // co-admin of nothing", so unlike the other reads on this page it is
-      // loud: setErr as well as the log, because an empty list here is
-      // indistinguishable to the user from a real answer.
+      // loud: setCoAdminWorkspacesErr as well as the log, because an empty
+      // list here is indistinguishable to the user from a real answer. This
+      // used to go through setErr, which refresh() clears unconditionally on
+      // every run and whose own effect re-fires on effectively every render
+      // under test (OR-T2725) -- a genuine failure could be shown and cleared
+      // again within the same tick, depending on render scheduling. Its own
+      // state slot, only ever touched here, removes the race.
       if (classifyRead(myAdminOf, myAdminOfErr) === "error") {
         console.error("Failed to load co-admin workspaces:", myAdminOfErr);
-        setErr(`Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`);
+        setCoAdminWorkspacesErr(
+          `Could not load your co-admin workspaces: ${formatError(myAdminOfErr)}`,
+        );
+      } else {
+        setCoAdminWorkspacesErr(null);
       }
 
       const workspaces: WorkspaceOption[] = [];
