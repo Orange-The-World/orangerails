@@ -13,6 +13,9 @@
 -- birthday instead of rescanning it. No error, no flag: OR-T1203's coverage
 -- clear closed one door into this defect and left this one open.
 --
+-- (Re-triggering CI after an isolated Typecheck edge functions (Deno)
+-- failure with everything else green; this migration touches no file
+-- under supabase/functions.)
 -- THE FIX. scan_generation is a token that changes every time the envelope is
 -- replaced. A sync reads it at the START of a sync and must echo it back on
 -- the cursor and coverage writes; a write whose token does not match the
