@@ -75,6 +75,14 @@ interface SealedTransactionInput {
   block_height: number;
   /** Lowercase hex, 64 chars. HMAC-SHA-256 output, not base64. */
   txid_blind_index_hex: string;
+  /**
+   * Canonical block hash at block_height, lowercase hex 64 chars.
+   * Captured client-side from the .json sidecar before sealing (PR #1431).
+   * Absent on records sealed before this field was added -- those are stored
+   * with block_hash=NULL and the reorg detector skips them as unverifiable
+   * (OR-T0407 ruling: NULL means pre-hash, not an error).
+   */
+  block_hash_hex?: string;
 }
 
 /**
@@ -375,6 +383,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         occurred_at: tx.occurred_at,
         block_height: tx.block_height,
         txid_blind_index_hex: tx.txid_blind_index_hex,
+        // Persist the canonical block hash so the server-side reorg detector
+        // can compare it against the chain later.  NULL means this record was
+        // uploaded before hash capture was added and is permanently unverifiable;
+        // the detector skips NULL rows in silence, never logs them as failures.
+        block_hash: tx.block_hash_hex ?? null,
       }));
 
       // Count duplicates BEFORE insert by checking which txid blind indexes
