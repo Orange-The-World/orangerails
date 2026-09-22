@@ -81,6 +81,7 @@ const KNOWN_EXCEPTIONS = new Set([
   "or-stealth-envelope-fetch",
   "or-stealth-envelope-update",
   "or-stealth-transactions-list",
+  "or-stealth-reorg-check",
   "or-stealth-transactions-store",
   "or-strike-webhook",
   "or-sync",
