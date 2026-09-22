@@ -22,6 +22,27 @@ Deno.test('redacts a 6+ digit run', () => {
   assert(out.includes('[redacted]'), out);
 });
 
+Deno.test('redacts a keyword-adjacent number whole, even with mixed group lengths (OR-T0362, OR-C2021)', () => {
+  // Repro from OR-C2021: the unconditional 6+ digit pass used to run first
+  // and match only the 7-digit second group ("4567890") in isolation (a
+  // hyphen is a word boundary), stranding the connected 3-digit first group
+  // ("123") below the keyword pass's 4-digit floor once the string had
+  // already been split by "[redacted]". That left "Account 123-[redacted]
+  // declined" -- a real fragment of the account number in plaintext.
+  const out = redactedUpstreamDetail('Account 123-4567890 declined');
+  assert(!out.includes('123'), out);
+  assert(!out.includes('4567890'), out);
+  assert(out.includes('[redacted]'), out);
+  assert(out.includes('declined'), out);
+});
+
+Deno.test('redacts the reverse mixed grouping too (short group first, long group second)', () => {
+  const out = redactedUpstreamDetail('acct 4567890-123 on file');
+  assert(!out.includes('123'), out);
+  assert(!out.includes('4567890'), out);
+  assert(out.includes('[redacted]'), out);
+});
+
 Deno.test('redacts a UUID', () => {
   const out = redactedUpstreamDetail('failed on 550e8400-e29b-41d4-a716-446655440000 mid-sync');
   assert(!out.includes('550e8400-e29b-41d4-a716-446655440000'), out);
