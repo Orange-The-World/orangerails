@@ -415,10 +415,29 @@ export async function drainStrikeQueue(args: {
       .update({ processed_at: new Date().toISOString() })
       .in('id', processedIds);
     if (markErr) {
-      // Marking the events processed failed , non-fatal, they'll just be
-      // reprocessed on the next sync (idempotent thanks to the
-      // transactions sink's UNIQUE (connection_id, external_id) constraint)
-      console.error('[strike-queue] mark-processed failed:', markErr);
+      // Marking the events processed failed. The events themselves stay
+      // retryable (processed_at is unchanged) and will be reprocessed on
+      // the next sync, idempotent thanks to the transactions sink's
+      // UNIQUE (connection_id, external_id) constraint , that part was
+      // already correct. What was missing: this IS the systemic
+      // database-write failure the 2026-08-12 incident was actually
+      // caused by, and it must count toward the breaker and alert a
+      // human, not sit in a log nobody is paged to read.
+      //
+      // Weighted by processedIds.length because this single write can
+      // cover up to DRAIN_BATCH=100 rows at once, unlike the per-event
+      // API failures above which increment reasonCounts one at a time.
+      console.error(`[strike-queue] mark-processed failed for ${processedIds.length} event(s):`, markErr);
+      reasonCounts.set('DB_WRITE_FAILED', (reasonCounts.get('DB_WRITE_FAILED') ?? 0) + processedIds.length);
+      const systemic = detectSystemicFailure(reasonCounts, SYSTEMIC_FAILURE_THRESHOLD);
+      if (systemic) {
+        breakerTripped = true;
+        tripReason = systemic;
+        console.error(
+          `[strike-queue] CIRCUIT BREAKER TRIPPED conn=${conn.id} reason=${systemic} ` +
+          `threshold=${SYSTEMIC_FAILURE_THRESHOLD}; mark-processed write failed for ${processedIds.length} event(s), left retryable`,
+        );
+      }
     }
   }
 
