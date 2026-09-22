@@ -233,6 +233,28 @@ window.addEventListener('message', (event) => {
 
 The widget closes itself ~1.2s after posting. If the user cancels, you get `{ type: 'or-link-cancel' }`.
 
+### Recovering when the popup closes before you get a postMessage
+
+The keepalive POST that records a successful link (`completeLinkOnOR` inside the popup) survives the popup closing. The `postMessage` telling your opener the outcome does not: if the user closes the popup (or it closes itself) before that message is sent, your opener has no signal at all, even though the bank link succeeded server-side. `or-quiltt-link-status` exists so your backend can ask directly instead of guessing.
+
+This endpoint only resolves Quiltt-backed bank links. The row it reads is written solely by `or-quiltt-link-complete`, so if you opened the widget for a Strike, BTCPay, or other non-Quiltt provider, this endpoint returns `not_linked` forever regardless of what actually happened, poll or no poll. Use it only when `provider` at popup-open time was a Quiltt-backed bank.
+
+```
+POST /functions/v1/or-quiltt-link-status
+Header: X-Platform-API-Key: <hex64>
+Body: {
+  app_user_id:   string,    // same value you passed to open the widget
+  widget_token?: string     // the uuid or-link-mint-token minted for this attempt;
+                             // omit to get the caller's most recent attempt
+}
+200: { status: 'linked', connection_id: string, subaccount_id: string }
+   | { status: 'not_linked', connection_id: null, subaccount_id: null }
+```
+
+This is platform-mode only (`X-Platform-API-Key`), so the poll happens from **your server**, not the browser: the opener page cannot hold a platform key. Have the opener tell your backend "watch this attempt" (passing `app_user_id` and the `widget_token` you minted), then poll from there.
+
+`not_linked` deliberately covers every state short of a confirmed success (no session found, still mid-flight, or expired) rather than distinguishing them, so give up on your own timeout, not because this endpoint told you to. The endpoint is designed around a client polling roughly every 2 seconds, with a rate limit of 40 requests/minute per platform (headroom for your own retry jitter, not an invitation to poll tighter than that). Pick and document your own recovery window; if the poll has not confirmed `linked` inside it, surface a recoverable "unconfirmed" state to the user rather than leaving the connection silently unresolved. → [Reference: `supabase/functions/or-quiltt-link-status/index.ts`, DL-1115.]
+
 ### Save the wallet on your side
 
 Per `source_wallet`, create one of your local wallet rows with:
