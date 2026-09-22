@@ -1134,6 +1134,16 @@ export function AppHome() {
             {err}
           </div>
         )}
+        {/* Own state slot for the same reason as workspaceLoadIssues below
+            (OR-T2725): refresh() clears `err` unconditionally on every run,
+            so a genuine co-admin-workspaces RPC failure sharing that slot
+            could be shown and cleared again before a user, or a test, ever
+            saw it. */}
+        {coAdminWorkspacesErr && (
+          <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+            {coAdminWorkspacesErr}
+          </div>
+        )}
         {/* Surfaced next to the workspace list itself (OR-T1291), not as a
             page-level error: it does not share a slot with `err`, so it is
             not cleared by refresh(), and each ambiguous owner gets their own
