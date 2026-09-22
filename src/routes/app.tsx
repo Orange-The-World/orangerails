@@ -217,6 +217,19 @@ export function AppHome() {
   const [workspaceLoadIssues, setWorkspaceLoadIssues] = useState<
     { ownerUserId: string; ownerEmail: string; message: string }[]
   >([]);
+  // The co-admin *workspaces* RPC failing outright (as opposed to one
+  // workspace's wrapped key read failing, which is workspaceLoadIssues
+  // above) used to go through setErr(...). err is cleared unconditionally
+  // by refresh() on every run (OR-T1291), and refresh() re-fires whenever
+  // its own dependencies change identity, including decryptText /
+  // decryptTransaction from useVault(), which are new function references
+  // on every render under the mocked VaultContext used in app.test.tsx.
+  // That produced a real scheduling race, not a CI-timeout flake
+  // (OR-T2725): whichever setErr call landed last won, so a genuine RPC
+  // failure could be shown and cleared again before anyone saw it. Kept
+  // separate from `err` for the same reason workspaceLoadIssues is:
+  // refresh() never touches it.
+  const [coAdminWorkspacesErr, setCoAdminWorkspacesErr] = useState<string | null>(null);
   // Cached admin subkeys , persists until tab closes (MVP limitation).
   const adminSubkeysRef = useRef<
     Map<string, { credentialsKey: CryptoKey; transactionsKey: CryptoKey }>
