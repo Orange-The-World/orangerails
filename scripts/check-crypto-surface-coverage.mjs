@@ -60,8 +60,8 @@ const RULES_PATH = join(REPO_ROOT, '.github', 'ship-rules.json');
 // per OR-T2160. "co-admin-keyring" and "vault-persist" did not resolve to a
 // file under those names when this script was first written (searched the
 // tree, zero matches); both now exist on dev at src/lib/co-admin-keyring.ts
-// and src/lib/vault-persist.ts (confirmed present, review on PR #1357,
-// 2026-09-05) and are seeded below.
+// and src/lib/vault-persist.ts (confirmed present on dev during review of
+// this change, OR-T2210) and are seeded below.
 const CRYPTO_PRIMITIVES = [
   'src/lib/vault.ts',
   'src/lib/key-derivation.ts',
