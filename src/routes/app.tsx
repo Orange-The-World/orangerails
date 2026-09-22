@@ -1155,15 +1155,29 @@ export function AppHome() {
             </div>
           ) : (
             <div className="space-y-2">
-              {connections.map((c) => (
-                <ConnectionRow
-                  key={c.id}
-                  conn={c}
-                  syncing={syncingId === c.id}
-                  onSync={() => handleSync(c)}
-                  onDelete={() => handleDelete(c)}
-                />
-              ))}
+              {(() => {
+                // Build a map of connection_id -> latest occurred_at from the
+                // already-loaded transactions state. occurred_at is stored
+                // plaintext on encrypted_transactions so no extra decryption
+                // or query is needed (OR-T0079).
+                const latestTxAtByConn = new Map<string, string>();
+                for (const tx of transactions) {
+                  const existing = latestTxAtByConn.get(tx.connection_id);
+                  if (!existing || tx.occurred_at > existing) {
+                    latestTxAtByConn.set(tx.connection_id, tx.occurred_at);
+                  }
+                }
+                return connections.map((c) => (
+                  <ConnectionRow
+                    key={c.id}
+                    conn={c}
+                    syncing={syncingId === c.id}
+                    onSync={() => handleSync(c)}
+                    onDelete={() => handleDelete(c)}
+                    latestTxAt={latestTxAtByConn.get(c.id)}
+                  />
+                ));
+              })()}
             </div>
           )}
         </section>
@@ -1548,11 +1562,15 @@ function ConnectionRow({
   syncing,
   onSync,
   onDelete,
+  latestTxAt,
 }: {
   conn: Connection;
   syncing: boolean;
   onSync: () => void;
   onDelete: () => void;
+  /** ISO date string of the most recent imported transaction for this
+   *  connection. undefined means no transactions imported yet (OR-T0079). */
+  latestTxAt?: string;
 }) {
   const statusColor =
     conn.status === "active"
@@ -1568,6 +1586,11 @@ function ConnectionRow({
   // Takes precedence over `stale` when both are true: 30+ days is always
   // also 7+ days, and the nudge is the more urgent, more specific case.
   const staleNudge = !neverSynced && isStaleConnection(conn.last_sync_at!, STALE_NUDGE_THRESHOLD_DAYS);
+  // Connection has synced at least once but zero transactions ever imported
+  // (OR-T0079). Distinct from neverSynced (no sync attempt yet) and stale
+  // (sync ran but is old): here the sync claims to have run recently but
+  // the accounts page is empty.
+  const noDataImported = !neverSynced && latestTxAt === undefined;
 
   return (
     <div className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
@@ -1612,6 +1635,14 @@ function ConnectionRow({
         {neverSynced && (
           <div className="text-xs text-muted-foreground">
             Not yet active
+          </div>
+        )}
+        {noDataImported && (
+          <div
+            data-testid="no-data-imported-banner"
+            className="text-xs text-amber-600 dark:text-amber-400"
+          >
+            Sync active but no data imported yet.
           </div>
         )}
         <div className="text-xs text-muted-foreground flex items-center gap-2">
