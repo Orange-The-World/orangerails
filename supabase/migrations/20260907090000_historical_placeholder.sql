@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: placeholder for orphan ledger row already applied to dev; apply-migrations skips on ledger match (OR-T2621)
 -- 20260907090000_historical_placeholder.sql
 --
 -- PLACEHOLDER FILE: this migration version was already applied to dev
