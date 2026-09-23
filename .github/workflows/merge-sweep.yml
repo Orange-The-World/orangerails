@@ -148,12 +148,20 @@ jobs:
             # The branch ruleset does not dismiss stale reviews on push, so GitHub
             # keeps reporting APPROVED after new commits land. Check it here.
             # Timestamps are ISO-8601 UTC, so a lexical sort is a chronological one.
-            approved_at=$(gh api --paginate "repos/$R/pulls/$number/reviews" \
+            if ! approved_at=$(gh api --paginate "repos/$R/pulls/$number/reviews" \
                             -q '.[]|select(.state=="APPROVED")|.submitted_at' </dev/null \
-                          | sort | tail -n1)
-            commit_at=$(gh api --paginate "repos/$R/pulls/$number/commits" \
+                          | sort | tail -n1); then
+              echo "::warning::${url}: could not fetch reviews. Skipping, escalating."
+              escalated="${escalated}- [${title}](${url})"$'\n'"    - could not fetch reviews this run, so staleness could not be checked."$'\n'
+              continue
+            fi
+            if ! commit_at=$(gh api --paginate "repos/$R/pulls/$number/commits" \
                           -q '.[].commit.committer.date' </dev/null \
-                        | sort | tail -n1)
+                        | sort | tail -n1); then
+              echo "::warning::${url}: could not fetch commits. Skipping, escalating."
+              escalated="${escalated}- [${title}](${url})"$'\n'"    - could not fetch commits this run, so staleness could not be checked."$'\n'
+              continue
+            fi
             if [ -z "$approved_at" ] || [ -z "$commit_at" ]; then continue; fi
             if [ "$(date -d "$approved_at" +%s)" -lt "$(date -d "$commit_at" +%s)" ]; then
               echo "${url}: the approval predates the newest commit. STALE, not merging."
