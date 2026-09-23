@@ -185,6 +185,10 @@ export function AppHome() {
   const [email, setEmail] = useState<string | null>(null);
   const [connections, setConnections] = useState<Connection[]>([]);
   const [transactions, setTransactions] = useState<DecryptedTxRow[]>([]);
+  // True once the transactions fetch completes successfully at least once.
+  // Prevents the "no data imported" banner from firing during the initial
+  // load window or after a failed fetch (OR-T0079 defect 1).
+  const [txLoadComplete, setTxLoadComplete] = useState(false);
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
@@ -494,6 +498,7 @@ export function AppHome() {
   // their subkeys for decryption. When null, only load the current user's own.
   const refresh = useCallback(async () => {
     setLoading(true);
+    setTxLoadComplete(false);
     setErr(null);
     try {
       // Resolve which user's connections to show and which keys to use.
@@ -668,6 +673,7 @@ export function AppHome() {
         }),
       );
       setTransactions(decrypted.filter((t): t is DecryptedTxRow => t !== null));
+      setTxLoadComplete(true);
     } catch (e) {
       setErr(formatError(e));
     } finally {
@@ -1167,16 +1173,31 @@ export function AppHome() {
                     latestTxAtByConn.set(tx.connection_id, tx.occurred_at);
                   }
                 }
-                return connections.map((c) => (
-                  <ConnectionRow
-                    key={c.id}
-                    conn={c}
-                    syncing={syncingId === c.id}
-                    onSync={() => handleSync(c)}
-                    onDelete={() => handleDelete(c)}
-                    latestTxAt={latestTxAtByConn.get(c.id)}
-                  />
-                ));
+                // If the 1000-row cap was reached, a connection absent from
+                // the map may have data outside the window. Pass null (unknown)
+                // rather than undefined (confirmed absent) so the banner stays
+                // hidden (OR-T0079 defect 2).
+                const capReached = transactions.length >= 1000;
+                return connections.map((c) => {
+                  let latestTxAt: string | null | undefined;
+                  if (!txLoadComplete) {
+                    latestTxAt = null; // still loading -- hide banner
+                  } else if (capReached && !latestTxAtByConn.has(c.id)) {
+                    latestTxAt = null; // cap reached, absence unconfirmed
+                  } else {
+                    latestTxAt = latestTxAtByConn.get(c.id);
+                  }
+                  return (
+                    <ConnectionRow
+                      key={c.id}
+                      conn={c}
+                      syncing={syncingId === c.id}
+                      onSync={() => handleSync(c)}
+                      onDelete={() => handleDelete(c)}
+                      latestTxAt={latestTxAt}
+                    />
+                  );
+                });
               })()}
             </div>
           )}
@@ -1560,7 +1581,7 @@ function isStaleConnection(lastSyncAt: string, thresholdDays: number = STALE_THR
 // Sub-components
 // ------------------------------------------------------------------
 
-function ConnectionRow({
+export function ConnectionRow({
   conn,
   syncing,
   onSync,
@@ -1571,9 +1592,15 @@ function ConnectionRow({
   syncing: boolean;
   onSync: () => void;
   onDelete: () => void;
-  /** ISO date string of the most recent imported transaction for this
-   *  connection. undefined means no transactions imported yet (OR-T0079). */
-  latestTxAt?: string;
+  /**
+   * State of the transaction import for this connection (OR-T0079).
+   * - string:    ISO date of the most recent imported transaction.
+   * - undefined: load complete, cap not reached; confirmed no data imported.
+   *              Show the "no data imported" banner.
+   * - null:      Still loading, or the 1000-row cap was reached so absence
+   *              cannot be distinguished from presence. Hide the banner.
+   */
+  latestTxAt?: string | null;
 }) {
   const statusColor =
     conn.status === "active"
@@ -1600,6 +1627,7 @@ function ConnectionRow({
   const dataStale =
     !neverSynced &&
     latestTxAt !== undefined &&
+    latestTxAt !== null &&
     new Date(conn.last_sync_at!).getTime() - new Date(latestTxAt).getTime() >
       DATA_STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
   const dataStaleAgeDays = dataStale
