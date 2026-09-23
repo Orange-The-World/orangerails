@@ -56,7 +56,7 @@ SELECT public.t_assert_update_count(
   1
 );
 
--- THE GAP THE AUDITOR NAMED ON PR #1559, 2026-09-23: every assertion above
+-- THE GAP THE AUDITOR NAMED IN REVIEW, 2026-09-23: every assertion above
 -- only bumps vault_key_version, so none of them observes the actual
 -- DL-1958 question, whether the missing WITH CHECK stops a user from
 -- reassigning ROW OWNERSHIP itself by writing a new user_id. Per the
