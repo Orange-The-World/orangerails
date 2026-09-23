@@ -189,8 +189,10 @@ describe("AppHome (/app)", () => {
       };
 
       render(<AppHome />);
-      // Connection row must appear; banner must not.
-      await screen.findByText(/blink/i);
+      // Wait for the failed transactions fetch to surface its error text:
+      // that proves the refresh cycle actually finished, so the assertion
+      // is not testing the trivially-false initial-load path.
+      await screen.findByText("transactions fetch failed");
       expect(screen.queryByTestId("no-data-imported-banner")).not.toBeInTheDocument();
     });
 
@@ -209,7 +211,9 @@ describe("AppHome (/app)", () => {
       };
 
       render(<AppHome />);
-      await screen.findByText(/blink/i);
+      // Wait for tx-load-complete sentinel: txLoadComplete===true means the
+      // cap guard is tested against real state, not the initial-loading null.
+      await screen.findByTestId("tx-load-complete");
       expect(screen.queryByTestId("no-data-imported-banner")).not.toBeInTheDocument();
     });
 
@@ -265,7 +269,7 @@ describe("AppHome (/app)", () => {
       };
 
       render(<AppHome />);
-      await screen.findByText(/blink/i);
+      await screen.findByTestId("tx-load-complete");
       expect(screen.queryByTestId("data-stale-banner")).not.toBeInTheDocument();
     });
   });
