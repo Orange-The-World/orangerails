@@ -63,7 +63,7 @@ BEGIN
 END $$;
 
 -- CASE 2/2: t_assert_reassign_outcome, the assertion the Auditor's review
--- of PR #1559 required (2026-09-23): a signed-in user reassigning their
+-- required (2026-09-23): a signed-in user reassigning their
 -- OWN row's user_id to someone else's id must be refused. The real answer
 -- is refused=true; demanding refused=false (must NOT be reported as
 -- refused) is known false.
