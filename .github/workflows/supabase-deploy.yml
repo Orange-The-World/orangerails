@@ -2441,6 +2441,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: "Self-test: prove the invariant response processor can refuse and can pass"
+        # The live assertion step below runs only when the workflow fires (push to
+        # dev or prod) and the Supabase API is reachable. Before this PR is merged
+        # there is no run to observe. This step runs the same BAD-count and exit
+        # logic against synthetic JSON -- one response carrying a FAIL row and one
+        # carrying only PASS/SKIP -- and fails loud if either is handled wrong.
+        # A step that has never gone red is a step nobody proved: this makes the
+        # job go red on the first execution if the decision logic is broken.
+        run: |
+          set -euo pipefail
+          FAIL_RESP='[{"ord":1,"name":"table_present","status":"PASS","detail":"x"},{"ord":2,"name":"no_content_inspection","status":"FAIL","detail":"x"},{"ord":3,"name":"no_algorithm_coupling","status":"PASS","detail":"x"},{"ord":4,"name":"one_complete_presence_rule","status":"SKIP","detail":"x"}]'
+          PASS_RESP='[{"ord":1,"name":"table_present","status":"PASS","detail":"x"},{"ord":2,"name":"no_content_inspection","status":"PASS","detail":"x"},{"ord":3,"name":"no_algorithm_coupling","status":"PASS","detail":"x"},{"ord":4,"name":"one_complete_presence_rule","status":"SKIP","detail":"x"}]'
+          BAD_F=$(echo "$FAIL_RESP" | jq -r '[.[] | select(.status == "FAIL" or .status == "UNKNOWN")] | length')
+          BAD_P=$(echo "$PASS_RESP" | jq -r '[.[] | select(.status == "FAIL" or .status == "UNKNOWN")] | length')
+          if [ "$BAD_F" = "0" ]; then
+            echo "::error::self-test failed: a response with a FAIL row counted as 0 bad rows; the job would pass on a broken schema"
+            exit 1
+          fi
+          if [ "$BAD_P" != "0" ]; then
+            echo "::error::self-test failed: a response with no FAIL rows counted as ${BAD_P} bad rows; the job would fail on a clean schema"
+            exit 1
+          fi
+          echo "self-test: FAIL response counted ${BAD_F} bad row(s), PASS response counted 0. Decision logic is correct."
+
       - name: Assert the wrapped_data_keys design rules against the live schema
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
