@@ -92,7 +92,7 @@ function normalizeQualifiedName(raw) {
     if (raw[i] === '"') {
       let j = i + 1;
       while (j < n && raw[j] !== '"') j += 1;
-      parts.push(raw.slice(i + 1, j).replace(/\s+/g, ' ').trim());
+      parts.push(raw.slice(i + 1, j).replace(/\s+/g, ''));
       i = j + 1;
       continue;
     }
