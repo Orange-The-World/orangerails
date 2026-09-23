@@ -77,7 +77,7 @@ interface SealedTransactionInput {
   txid_blind_index_hex: string;
   /**
    * Canonical block hash at block_height, lowercase hex 64 chars.
-   * Captured client-side from the .json sidecar before sealing (PR #1431).
+   * Captured client-side from the .json sidecar before sealing (OR-T0999).
    * Absent on records sealed before this field was added -- those are stored
    * with block_hash=NULL and the reorg detector skips them as unverifiable
    * (OR-T0407 ruling: NULL means pre-hash, not an error).
