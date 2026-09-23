@@ -22,6 +22,7 @@ import {
 import {
   buildScanRangeArgs,
   classifyScanRangeError,
+  classifySkipReason,
   recordScanRange,
   UNKNOWN_ERROR_CODE,
 } from './scan_range.ts';
@@ -257,4 +258,93 @@ Deno.test('records at the boundary: from_height 0 is a genesis-start scan, not a
   });
   assertEquals(args?.p_from_height, 0);
   assertEquals(args?.p_app_user_id, CALLER);
+});
+
+/**
+ * OR-T1953: buildScanRangeArgs returns null for two different causes that a
+ * caller could not tell apart, and recordScanRange used to drop that null on
+ * the floor with no log line at all. These tests prove the two causes are
+ * distinguishable (classifySkipReason) and that recordScanRange now logs one
+ * line naming which cause applied, for each cause separately.
+ */
+
+Deno.test('classifySkipReason: malformed from_height (missing, non-integer, negative)', () => {
+  const base = { connection_id: CONN_ID, app_user_id: CALLER, last_block_scanned: 900_100 };
+  assertEquals(classifySkipReason(base), 'malformed');
+  assertEquals(classifySkipReason({ ...base, from_height: -1 }), 'malformed');
+  assertEquals(classifySkipReason({ ...base, from_height: 900_000.5 }), 'malformed');
+});
+
+Deno.test('classifySkipReason: well-formed from_height above last_block_scanned is out-of-range', () => {
+  assertEquals(
+    classifySkipReason({
+      connection_id: CONN_ID,
+      app_user_id: CALLER,
+      last_block_scanned: 900_000,
+      from_height: 900_001,
+    }),
+    'out-of-range',
+  );
+});
+
+Deno.test('recordScanRange logs the malformed cause and never calls the RPC', async () => {
+  const logs: unknown[][] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => {
+    logs.push(args);
+  };
+  try {
+    const client = {
+      rpc() {
+        throw new Error('must not be called: a malformed request should never reach the RPC');
+      },
+    };
+
+    const outcome = await recordScanRange(client, {
+      connection_id: CONN_ID,
+      app_user_id: CALLER,
+      last_block_scanned: 900_100,
+      from_height: -1,
+    });
+
+    assertEquals(outcome.status, 'skipped');
+    assertEquals(logs.length, 1, 'exactly one log line must fire for the skip');
+    const line = String(logs[0][0]);
+    assertEquals(line.includes('reason=malformed'), true, `expected reason=malformed in: ${line}`);
+  } finally {
+    console.info = originalInfo;
+  }
+});
+
+Deno.test('recordScanRange logs the out-of-range cause and never calls the RPC', async () => {
+  const logs: unknown[][] = [];
+  const originalInfo = console.info;
+  console.info = (...args: unknown[]) => {
+    logs.push(args);
+  };
+  try {
+    const client = {
+      rpc() {
+        throw new Error('must not be called: an out-of-range request should never reach the RPC');
+      },
+    };
+
+    const outcome = await recordScanRange(client, {
+      connection_id: CONN_ID,
+      app_user_id: CALLER,
+      last_block_scanned: 900_000,
+      from_height: 900_001,
+    });
+
+    assertEquals(outcome.status, 'skipped');
+    assertEquals(logs.length, 1, 'exactly one log line must fire for the skip');
+    const line = String(logs[0][0]);
+    assertEquals(
+      line.includes('reason=out-of-range'),
+      true,
+      `expected reason=out-of-range in: ${line}`,
+    );
+  } finally {
+    console.info = originalInfo;
+  }
 });
