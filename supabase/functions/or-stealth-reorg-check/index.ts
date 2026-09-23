@@ -28,7 +28,7 @@
  * This decision is written here so the next reader does not have to work it out.
  *
  * NULL block_hash. A NULL block_hash means the record was uploaded before hash
- * capture was added (PR #1431). It is permanently unverifiable. The detector
+ * capture was added (OR-T0999). It is permanently unverifiable. The detector
  * skips these rows in silence -- they are never logged as failures and never marked
  * orphaned_at. OR-T0407 ruling: never delete a customer row, only mark orphaned_at.
  *
@@ -61,7 +61,10 @@ import { wrapSentryHandler } from '../_shared/sentry.ts';
  */
 export const REORG_LOOKBACK_BLOCKS = 100;
 
-const BLOCK_SOURCE_BASE = 'https://blocks.orangerails.com';
+// Value must be set in Supabase function config. If unset the function
+// degrades gracefully: fetchCanonicalBlockHash returns null and rows are
+// skipped as unverifiable (same behaviour as an unreachable block source).
+const BLOCK_SOURCE_BASE = Deno.env.get('BLOCK_SOURCE_BASE') ?? '';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BLOCK_HASH_RE = /^[0-9a-f]{64}$/;
 
