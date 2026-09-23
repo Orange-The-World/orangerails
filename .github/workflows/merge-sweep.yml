@@ -84,10 +84,13 @@ jobs:
           # with --squash hardcoded, so it would have failed EVERY merge in the
           # repo it was written for, and the failure would have looked like a
           # flaky merge rather than a wrong flag.
-          methods=$(gh api "repos/$R" \
+          if ! methods=$(gh api "repos/$R" \
             -q '[(if .allow_squash_merge then "--squash" else empty end),
                  (if .allow_merge_commit then "--merge"  else empty end),
-                 (if .allow_rebase_merge then "--rebase" else empty end)] | .[]')
+                 (if .allow_rebase_merge then "--rebase" else empty end)] | .[]'); then
+            echo "::error::gh api repos/$R failed. Cannot determine an allowed merge method, so nothing can merge this run."
+            exit 1
+          fi
           METHOD=$(printf '%s\n' "$methods" | head -n1)
           if [ -z "$METHOD" ]; then
             echo "::error::This repository allows no merge method at all. Nothing to do."
