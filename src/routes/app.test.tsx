@@ -34,24 +34,33 @@ vi.mock("@tanstack/react-router", async (importOriginal) => {
   };
 });
 
+// A single stable mock object returned by every useVault() call.
+// If the factory returned a NEW object literal each call, every function
+// reference would change on each render, causing any useEffect that depends
+// on vault functions to re-fire endlessly and preventing the component from
+// ever reaching "loaded" state (tx-load-complete / data-stale-banner never
+// render). vi.hoisted() runs before vi.mock hoisting, so mockVault is
+// available in the factory closure.
+const mockVault = vi.hoisted(() => ({
+  isUnlocked: true,
+  saltB64: "test-salt",
+  lock: vi.fn(),
+  encryptCredentials: vi.fn(async (s: string) => s),
+  decryptText: vi.fn(async (s: string) => s),
+  encryptText: vi.fn(async (s: string) => s),
+  decryptTransaction: vi.fn(async (s: string) => JSON.parse(s)),
+  encryptTransaction: vi.fn(async (t: unknown) => JSON.stringify(t)),
+  exportCredentialsKeyForSync: vi.fn(),
+  exportTransactionsKeyForSync: vi.fn(),
+  ensurePqcKeypairs: vi.fn(async () => ({ generated: false })),
+  grantCoAdmin: vi.fn(),
+  revokeCoAdmin: vi.fn(),
+  loadAdminSubkeys: vi.fn(),
+  changeVaultPassword: vi.fn(),
+}));
+
 vi.mock("@/context/VaultContext", () => ({
-  useVault: () => ({
-    isUnlocked: true,
-    saltB64: "test-salt",
-    lock: vi.fn(),
-    encryptCredentials: vi.fn(async (s: string) => s),
-    decryptText: vi.fn(async (s: string) => s),
-    encryptText: vi.fn(async (s: string) => s),
-    decryptTransaction: vi.fn(async (s: string) => JSON.parse(s)),
-    encryptTransaction: vi.fn(async (t: unknown) => JSON.stringify(t)),
-    exportCredentialsKeyForSync: vi.fn(),
-    exportTransactionsKeyForSync: vi.fn(),
-    ensurePqcKeypairs: vi.fn(async () => ({ generated: false })),
-    grantCoAdmin: vi.fn(),
-    revokeCoAdmin: vi.fn(),
-    loadAdminSubkeys: vi.fn(),
-    changeVaultPassword: vi.fn(),
-  }),
+  useVault: () => mockVault,
 }));
 
 interface ReadResult {
