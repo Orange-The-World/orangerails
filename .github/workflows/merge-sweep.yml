@@ -60,6 +60,38 @@ jobs:
         run: |
           set -euo pipefail
 
+          # RETRY TRANSIENT GITHUB API FAILURES. The predecessor this workflow
+          # replaces (approved-green-pr-sweep.yml) hard-failed on exactly this
+          # shape: gh issue list hit a 504 Gateway Timeout or a truncated JSON
+          # body from api.github.com, with no retry, under set -e. That is a
+          # confirmed root cause (OR-T1280), not a guess, and the two calls
+          # below share the same endpoint family. Ported from the fix already
+          # built and reviewed for that workflow (branch sol/or-t1280) rather
+          # than inventing a second pattern for the same problem.
+          gh_retry() {
+            local attempt=1
+            local max_attempts=4
+            local delay=3
+            local output status
+            while true; do
+              if output=$("$@" 2>&1); then
+                printf '%s' "$output"
+                return 0
+              else
+                status=$?
+              fi
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                echo "::warning::gh_retry: giving up after ${attempt} attempts on: $*" >&2
+                printf '%s' "$output" >&2
+                return "$status"
+              fi
+              echo "::warning::gh_retry: attempt ${attempt} failed (exit ${status}), retrying in ${delay}s: $*" >&2
+              sleep "$delay"
+              delay=$((delay * 2))
+              attempt=$((attempt + 1))
+            done
+          }
+
           R="$GITHUB_REPOSITORY"
           RULES=.github/ship-rules.json
           if [ ! -f "$RULES" ]; then
