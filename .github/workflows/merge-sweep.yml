@@ -242,12 +242,12 @@ jobs:
 
           # A clean run is SILENT. Only things needing a human get written down,
           # and they go to a GitHub issue rather than to chat.
-          existing=$(gh issue list --repo "$R" --state open --limit 100 \
+          existing=$(gh_retry gh issue list --repo "$R" --state open --limit 100 \
                        --json number,title \
                      | jq -r --arg t "$ISSUE_TITLE" 'map(select(.title==$t))|.[0].number // empty')
 
           if [ -z "$escalated" ]; then
-            [ -n "$existing" ] && gh issue close "$existing" --repo "$R" \
+            [ -n "$existing" ] && gh_retry gh issue close "$existing" --repo "$R" \
               --comment "Nothing sensitive is waiting. Merged ${merged} low-risk change(s) this run." || true
             exit 0
           fi
@@ -261,8 +261,14 @@ jobs:
             "These changes are approved and green, but they touch files the ship rules classify as sensitive, so they are not merged automatically. Each entry lists the files that matched." \
             "${escalated}")
 
+          # Printed before the post, not after. If gh_retry exhausts its retries
+          # the job still fails loud (an escalation that could not be delivered
+          # should not report success), but the text is at least in this run's
+          # own log instead of lost with the failed job.
+          echo "${body}"
+
           if [ -n "$existing" ]; then
-            gh issue edit "$existing" --repo "$R" --body "$body"
+            gh_retry gh issue edit "$existing" --repo "$R" --body "$body"
           else
-            gh issue create --repo "$R" --title "$ISSUE_TITLE" --body "$body"
+            gh_retry gh issue create --repo "$R" --title "$ISSUE_TITLE" --body "$body"
           fi
