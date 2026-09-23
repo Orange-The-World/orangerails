@@ -131,7 +131,7 @@ jobs:
               continue
             fi
             if ! files=$(gh api --paginate "repos/$R/pulls/$number/files" \
-                      -q '.[].path' </dev/null); then
+                      -q '.[].filename // empty' </dev/null); then
               echo "::warning::${url}: could not fetch the changed-file list. Skipping, escalating."
               escalated="${escalated}- [${title}](${url})"$'\n'"    - could not fetch the changed-file list this run, so it was not evaluated."$'\n'
               continue
