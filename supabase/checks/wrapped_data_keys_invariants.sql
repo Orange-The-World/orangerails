@@ -24,8 +24,8 @@
 --     rows reads exactly like a clean pass.
 --
 --   2 no_content_inspection
---     No check constraint that mentions coadmin_keyring_ciphertext or
---     wrapped_cak inspects their CONTENTS. Property test on the definition, not
+--     No check constraint that mentions coadmin_keyring_ciphertext,
+--     wrapped_cak, or wrapped_ciphertext inspects their CONTENTS. Property test on the definition, not
 --     an allow list of constraint NAMES, so a future constraint cannot hide
 --     behind a name this file happens to know. The grant ciphertext columns are
 --     opaque, never parsed and never length pinned, because pinning a
@@ -52,7 +52,7 @@
 --     widens this list on purpose. That is the direction this check should err
 --     in.
 --
---     FIXED 2026-09-05 (OR-T0828, Auditor review 5053481295 at head 06738fed):
+--     FIXED 2026-09-05 (OR-T0828, Auditor review at head 06738fed):
 --     the strip used to remove num_nonnulls together with an
 --     open-ended run of its own argument characters via
 --     num_nonnulls [a-z0-9_, ]*. That character class has no terminator and
@@ -60,10 +60,10 @@
 --     num_nonnulls(wrapped_cak, coadmin_keyring_ciphertext) IS NOT NULL) AND
 --     (get_byte(wrapped_cak, 0) IS NOT NULL it greedily consumed "IS NOT NULL
 --     AND get_byte" too and reported PASS on a constraint that reads a byte
---     out of the ciphertext. Reproduced live against fzwmnzmtqidumdqjdddz
+--     out of the ciphertext. Reproduced live against the dev project
 --     (read only, no schema touched): that exact bypass def, plus md5(),
 --     strpos() and a bare comparison, all strip to an EMPTY residual under
---     the old rule. Fixed by stripping individual allowed WORDS (the two
+--     the old rule. Fixed by stripping individual allowed WORDS (the three
 --     opaque column names, num_nonnulls, check, is, not, null, and, or) with
 --     word-boundary matches instead of an open-ended phrase: a token not on
 --     that list survives no matter what sits next to it. Re-verified against
@@ -132,8 +132,9 @@ material AS (SELECT conname, def, norm FROM cons
 opaque AS (
   SELECT conname, def,
          -- Allowlist of TOKENS a permitted null-presence test may use,
-         -- matched whole-word so nothing can hide by concatenation: the two
-         -- opaque column names, num_nonnulls, and the keywords a null test
+         -- matched whole-word so nothing can hide by concatenation: the three
+         -- opaque column names (coadmin_keyring_ciphertext, wrapped_cak,
+         -- wrapped_ciphertext), num_nonnulls, and the keywords a null test
          -- is built from. Anything left after stripping these, and after
          -- stripping all remaining punctuation and whitespace, means the
          -- constraint does something to an opaque column other than
@@ -142,10 +143,10 @@ opaque AS (
          -- together with an open-ended run of its own argument characters,
          -- which a real bypass walked straight through.
          regexp_replace(
-           regexp_replace(norm, '\m(coadmin_keyring_ciphertext|wrapped_cak|num_nonnulls|check|is|not|null|and|or)\M', ' ', 'gi'),
+           regexp_replace(norm, '\m(coadmin_keyring_ciphertext|wrapped_cak|wrapped_ciphertext|num_nonnulls|check|is|not|null|and|or)\M', ' ', 'gi'),
            '[,()[:space:]]', '', 'g') AS residual
     FROM cons
-   WHERE norm ~* '\m(coadmin_keyring_ciphertext|wrapped_cak)\M'),
+   WHERE norm ~* '\m(coadmin_keyring_ciphertext|wrapped_cak|wrapped_ciphertext)\M'),
 inspectors AS (SELECT string_agg(conname, ', ' ORDER BY conname) AS names FROM opaque
                 WHERE residual <> ''),
 algo AS (SELECT string_agg(conname, ', ' ORDER BY conname) AS names FROM cons
