@@ -23,6 +23,7 @@ import {
   buildScanRangeArgs,
   classifyScanRangeError,
   recordScanRange,
+  reportScanRangeOutcome,
   UNKNOWN_ERROR_CODE,
 } from './scan_range.ts';
 
@@ -257,4 +258,54 @@ Deno.test('records at the boundary: from_height 0 is a genesis-start scan, not a
   });
   assertEquals(args?.p_from_height, 0);
   assertEquals(args?.p_app_user_id, CALLER);
+});
+
+// --- OR-T0645 / OR-C1710: index.ts wiring ---
+//
+// reportScanRangeOutcome is the function index.ts calls to turn a 'failed'
+// outcome into both a Sentry report and the scan_range_failed response field.
+// This repo has no HTTP-level integration test for this handler, so these two
+// tests are the closest available proof that deleting the failed-branch wiring
+// in index.ts goes red: reportScanRangeOutcome IS that wiring, unit-tested
+// directly.
+
+Deno.test('reportScanRangeOutcome: a failed outcome reports exactly once, code only, and sets scan_range_failed', () => {
+  const calls: Array<{ message: string; fnName: string }> = [];
+  const req = new Request('https://example.com/or-stealth-envelope-update');
+
+  const fields = reportScanRangeOutcome(
+    { status: 'failed', code: '42501', message: 'permission denied for app_user_id 11111111-1111-1111-1111-111111111111' },
+    'or-stealth-envelope-update',
+    req,
+    (err, fnName) => {
+      calls.push({ message: err.message, fnName });
+    },
+  );
+
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].fnName, 'or-stealth-envelope-update');
+  assertEquals(calls[0].message, 'record_stealth_scan_range failed: code=42501');
+  // The driver message (which carried an app_user_id above) must never reach
+  // the reported error. Only the code may leave the function.
+  assertEquals(calls[0].message.includes('app_user_id'), false);
+  assertEquals(fields, { scan_range_failed: { code: '42501' } });
+});
+
+Deno.test('reportScanRangeOutcome: recorded, rejected and skipped stay exactly as quiet as before this ticket', () => {
+  const req = new Request('https://example.com/or-stealth-envelope-update');
+  let reportCalled = false;
+  const report = () => { reportCalled = true; };
+
+  for (
+    const outcome of [
+      { status: 'recorded' as const },
+      { status: 'rejected' as const, code: 'P0001' },
+      { status: 'skipped' as const },
+    ]
+  ) {
+    const fields = reportScanRangeOutcome(outcome, 'or-stealth-envelope-update', req, report);
+    assertEquals(fields, {});
+  }
+
+  assertEquals(reportCalled, false);
 });
