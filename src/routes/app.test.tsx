@@ -16,6 +16,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 
+// Radix UI (Checkbox, Select) calls ResizeObserver internally; jsdom does not
+// ship it. Stub it so tests that render TransactionsPanel do not throw
+// "ResizeObserver is not defined" (OR-T0079).
+globalThis.ResizeObserver = class ResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+
 const mockNavigate = vi.fn();
 vi.mock("@tanstack/react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@tanstack/react-router")>();
@@ -199,12 +208,15 @@ describe("AppHome (/app)", () => {
     it("no-data-imported banner is hidden when 1000-row cap reached and connection absent from window (OR-T0079 defect 2)", async () => {
       tableResults.connections = { data: [SYNCED_CONN], error: null };
       // 1000 rows for a different connection -- conn-1 absent from the map.
+      // One row has an undecryptable payload so transactions.length===999
+      // while txFetchedCount===1000: proves the cap guard reads the raw fetch
+      // count, not the post-decrypt count (Auditor item C).
       tableResults.encrypted_transactions = {
         data: Array.from({ length: 1000 }, (_, i) => ({
           id: `tx-${i}`,
           connection_id: "conn-other",
           external_id: `ext-${i}`,
-          encrypted_payload: "{}",
+          encrypted_payload: i === 0 ? "not-valid-json" : "{}",
           occurred_at: new Date(Date.now() - i * 1000).toISOString(),
         })),
         error: null,
