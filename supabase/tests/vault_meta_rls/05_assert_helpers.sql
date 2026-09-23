@@ -77,3 +77,66 @@ EXCEPTION WHEN OTHERS THEN
   RAISE;
 END;
 $$;
+
+-- Run, as p_as_user, an UPDATE that attempts to reassign the CALLER's own
+-- row's user_id to p_new_user_id, and assert the outcome matches
+-- p_expect_refused. true means the statement must be refused: either it
+-- raises an error (the Postgres-manual-documented shape for a missing
+-- WITH CHECK, which reuses USING as the check against the NEW row, so a
+-- new row whose user_id no longer equals auth.uid() fails the check and
+-- the whole UPDATE is aborted with "new row violates row-level security
+-- policy"), or it silently affects zero rows. false means it must
+-- actually succeed and affect exactly one row.
+--
+-- Taking the expectation as a parameter, the same way t_assert_update_count
+-- does, is what lets 99_selftest_must_fail.sql reuse this helper with the
+-- expectation inverted instead of needing a second, bespoke self-test
+-- helper.
+CREATE OR REPLACE FUNCTION public.t_assert_reassign_outcome(
+  p_label          text,
+  p_as_user        uuid,
+  p_new_user_id    uuid,
+  p_expect_refused boolean
+)
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+DECLARE
+  v_count   int;
+  v_refused boolean;
+  v_how     text;
+BEGIN
+  PERFORM public.t_set_user(p_as_user);
+
+  BEGIN
+    UPDATE public.user_vault_meta
+       SET user_id = p_new_user_id
+     WHERE user_id = p_as_user;
+    GET DIAGNOSTICS v_count = ROW_COUNT;
+    v_refused := (v_count = 0);
+    v_how := format('%s row(s) affected, no error', v_count);
+  EXCEPTION WHEN OTHERS THEN
+    -- Any error counts as refused. The expected shape per the Postgres
+    -- manual is "new row violates row-level security policy", but this
+    -- assertion is about the observable outcome the acceptance criteria
+    -- asks for (refused: error or zero rows), not about pinning one exact
+    -- SQLSTATE -- user_id is the primary key, so a reassignment target
+    -- that already has a row would also trip a unique-constraint error,
+    -- which is a different mechanism refusing the same bad write.
+    v_refused := true;
+    v_how := 'statement raised: ' || SQLERRM;
+  END;
+
+  PERFORM public.t_reset_user();
+
+  IF v_refused <> p_expect_refused THEN
+    RAISE EXCEPTION 'ASSERTION FAILED [%]: expected refused=%, got refused=% (%)',
+      p_label, p_expect_refused, v_refused, v_how;
+  END IF;
+  RAISE NOTICE 'ok  %  ->  refused=% (%)', p_label, v_refused, v_how;
+
+EXCEPTION WHEN OTHERS THEN
+  PERFORM public.t_reset_user();
+  RAISE;
+END;
+$$;
