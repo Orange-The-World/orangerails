@@ -113,7 +113,7 @@ vi.mock("@/integrations/supabase/client", () => ({
 }));
 
 // Imported after the mocks above so app.tsx picks up the mocked modules.
-const { AppHome } = await import("./app");
+const { AppHome, ConnectionRow } = await import("./app");
 
 describe("AppHome (/app)", () => {
   beforeEach(() => {
@@ -152,5 +152,121 @@ describe("AppHome (/app)", () => {
     expect(
       screen.getByText(/permission denied for function list_coadmin_workspaces/i),
     ).toBeInTheDocument();
+  });
+
+  // OR-T0079 defect fixes
+  describe("no-data-imported / data-stale banners (OR-T0079)", () => {
+    const SYNCED_CONN = {
+      id: "conn-1",
+      provider_type: "blink",
+      status: "active" as const,
+      last_sync_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      encrypted_label: null,
+      encrypted_last_error: null,
+      created_at: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+
+    it("ConnectionRow hides no-data-imported banner when latestTxAt is null (loading / cap state)", () => {
+      // null is what the call site passes before txLoadComplete or at cap.
+      // The banner must not fire in either case.
+      render(
+        <ConnectionRow
+          conn={SYNCED_CONN as any}
+          syncing={false}
+          onSync={vi.fn()}
+          onDelete={vi.fn()}
+          latestTxAt={null}
+        />,
+      );
+      expect(screen.queryByTestId("no-data-imported-banner")).not.toBeInTheDocument();
+    });
+
+    it("no-data-imported banner is hidden after transactions fetch errors (OR-T0079 defect 1)", async () => {
+      tableResults.connections = { data: [SYNCED_CONN], error: null };
+      tableResults.encrypted_transactions = {
+        data: null,
+        error: { message: "transactions fetch failed" },
+      };
+
+      render(<AppHome />);
+      // Connection row must appear; banner must not.
+      await screen.findByText(/blink/i);
+      expect(screen.queryByTestId("no-data-imported-banner")).not.toBeInTheDocument();
+    });
+
+    it("no-data-imported banner is hidden when 1000-row cap reached and connection absent from window (OR-T0079 defect 2)", async () => {
+      tableResults.connections = { data: [SYNCED_CONN], error: null };
+      // 1000 rows for a different connection -- conn-1 absent from the map.
+      tableResults.encrypted_transactions = {
+        data: Array.from({ length: 1000 }, (_, i) => ({
+          id: `tx-${i}`,
+          connection_id: "conn-other",
+          external_id: `ext-${i}`,
+          encrypted_payload: "{}",
+          occurred_at: new Date(Date.now() - i * 1000).toISOString(),
+        })),
+        error: null,
+      };
+
+      render(<AppHome />);
+      await screen.findByText(/blink/i);
+      expect(screen.queryByTestId("no-data-imported-banner")).not.toBeInTheDocument();
+    });
+
+    it("no-data-imported banner is shown after successful load with no transactions for connection (OR-T0079)", async () => {
+      tableResults.connections = { data: [SYNCED_CONN], error: null };
+      tableResults.encrypted_transactions = { data: [], error: null };
+
+      render(<AppHome />);
+      expect(await screen.findByTestId("no-data-imported-banner")).toBeInTheDocument();
+    });
+
+    it("data-stale-banner fires at 15-day gap and is absent at 13-day gap (14-day threshold)", async () => {
+      const now = Date.now();
+      const lastSyncAt = new Date(now).toISOString();
+      const fifteenDaysAgo = new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString();
+
+      tableResults.connections = {
+        data: [{ ...SYNCED_CONN, last_sync_at: lastSyncAt }],
+        error: null,
+      };
+      tableResults.encrypted_transactions = {
+        data: [{
+          id: "tx-stale",
+          connection_id: "conn-1",
+          external_id: "ext-stale",
+          encrypted_payload: "{}",
+          occurred_at: fifteenDaysAgo,
+        }],
+        error: null,
+      };
+
+      render(<AppHome />);
+      expect(await screen.findByTestId("data-stale-banner")).toBeInTheDocument();
+      expect(screen.queryByTestId("no-data-imported-banner")).not.toBeInTheDocument();
+      cleanup();
+
+      // 13 days: below threshold, banner absent.
+      resetSupabaseFixtures();
+      const thirteenDaysAgo = new Date(now - 13 * 24 * 60 * 60 * 1000).toISOString();
+      tableResults.connections = {
+        data: [{ ...SYNCED_CONN, last_sync_at: lastSyncAt }],
+        error: null,
+      };
+      tableResults.encrypted_transactions = {
+        data: [{
+          id: "tx-ok",
+          connection_id: "conn-1",
+          external_id: "ext-ok",
+          encrypted_payload: "{}",
+          occurred_at: thirteenDaysAgo,
+        }],
+        error: null,
+      };
+
+      render(<AppHome />);
+      await screen.findByText(/blink/i);
+      expect(screen.queryByTestId("data-stale-banner")).not.toBeInTheDocument();
+    });
   });
 });
