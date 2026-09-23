@@ -105,7 +105,7 @@ jobs:
           # Read the list into a FILE first. `gh` inside a `while read` loop
           # consumes the loop's stdin and the loop silently stops after one
           # iteration: a 56-item backlog once scanned as 1.
-          gh pr list --repo "$R" --state open --base "$BASE" \
+          gh_retry gh pr list --repo "$R" --state open --base "$BASE" \
             --json number,title,url,isDraft,reviewDecision,mergeStateStatus \
             --limit 200 > /tmp/prs.json
           echo "Scanned $(jq 'length' /tmp/prs.json) open pull requests against ${BASE}."
