@@ -185,6 +185,14 @@ export function AppHome() {
   const [email, setEmail] = useState<string | null>(null);
   const [connections, setConnections] = useState<Connection[]>([]);
   const [transactions, setTransactions] = useState<DecryptedTxRow[]>([]);
+  // True once the transactions fetch completes successfully at least once.
+  // Prevents the "no data imported" banner from firing during the initial
+  // load window or after a failed fetch (OR-T0079 defect 1).
+  const [txLoadComplete, setTxLoadComplete] = useState(false);
+  // Raw row count from the DB fetch (before decrypt failures are dropped).
+  // Used for the cap check so undecryptable rows do not make the cap look
+  // unreached when it actually was (OR-T0079 defect 2, Auditor item C).
+  const [txFetchedCount, setTxFetchedCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
@@ -518,6 +526,7 @@ export function AppHome() {
   // their subkeys for decryption. When null, only load the current user's own.
   const refresh = useCallback(async () => {
     setLoading(true);
+    setTxLoadComplete(false);
     setErr(null);
     try {
       // Resolve which user's connections to show and which keys to use.
@@ -671,7 +680,7 @@ export function AppHome() {
         .from("encrypted_transactions")
         .select("id, connection_id, external_id, encrypted_payload, occurred_at")
         .order("occurred_at", { ascending: false })
-        .limit(1000);
+        .limit(TX_FETCH_LIMIT);
       const { data: txs, error: txErr } = connIds.length > 0
         ? await txQuery.in("connection_id", connIds)
         : await txQuery.in("connection_id", ["00000000-0000-0000-0000-000000000000"]);
@@ -691,7 +700,9 @@ export function AppHome() {
           }
         }),
       );
+      setTxFetchedCount(txs?.length ?? 0);
       setTransactions(decrypted.filter((t): t is DecryptedTxRow => t !== null));
+      setTxLoadComplete(true);
     } catch (e) {
       setErr(formatError(e));
     } finally {
@@ -1189,18 +1200,52 @@ export function AppHome() {
             </div>
           ) : (
             <div className="space-y-2">
-              {connections.map((c) => (
-                <ConnectionRow
-                  key={c.id}
-                  conn={c}
-                  syncing={syncingId === c.id}
-                  onSync={() => handleSync(c)}
-                  onDelete={() => handleDelete(c)}
-                />
-              ))}
+              {(() => {
+                // Build a map of connection_id -> latest occurred_at from the
+                // already-loaded transactions state. occurred_at is stored
+                // plaintext on encrypted_transactions so no extra decryption
+                // or query is needed (OR-T0079).
+                const latestTxAtByConn = new Map<string, string>();
+                for (const tx of transactions) {
+                  const existing = latestTxAtByConn.get(tx.connection_id);
+                  if (!existing || tx.occurred_at > existing) {
+                    latestTxAtByConn.set(tx.connection_id, tx.occurred_at);
+                  }
+                }
+                // If the 1000-row cap was reached, a connection absent from
+                // the map may have data outside the window. Pass null (unknown)
+                // rather than undefined (confirmed absent) so the banner stays
+                // hidden (OR-T0079 defect 2).
+                const capReached = txFetchedCount >= TX_FETCH_LIMIT;
+                return connections.map((c) => {
+                  let latestTxAt: string | null | undefined;
+                  if (!txLoadComplete) {
+                    latestTxAt = null; // still loading -- hide banner
+                  } else if (capReached && !latestTxAtByConn.has(c.id)) {
+                    latestTxAt = null; // cap reached, absence unconfirmed
+                  } else {
+                    latestTxAt = latestTxAtByConn.get(c.id);
+                  }
+                  return (
+                    <ConnectionRow
+                      key={c.id}
+                      conn={c}
+                      syncing={syncingId === c.id}
+                      onSync={() => handleSync(c)}
+                      onDelete={() => handleDelete(c)}
+                      latestTxAt={latestTxAt}
+                    />
+                  );
+                });
+              })()}
             </div>
           )}
         </section>
+
+        {/* Sentinel rendered only when txLoadComplete===true so tests can
+            wait for a meaningful signal rather than the connection row
+            appearing (which fires before transactions load). */}
+        {txLoadComplete && <span data-testid="tx-load-complete" className="sr-only" aria-hidden="true" />}
 
         <section className="space-y-3">
           <h2 className="text-lg font-semibold">Recent transactions</h2>
@@ -1560,6 +1605,9 @@ export function AppHome() {
 // Connection staleness helpers
 // ------------------------------------------------------------------
 
+// Shared between the DB query .limit() call and the cap-reached check so
+// both are always in sync (OR-T0079 Auditor item C).
+const TX_FETCH_LIMIT = 1000;
 const STALE_THRESHOLD_DAYS = 7;
 
 // 30-day nudge threshold (OR-T0066, DL-0382 Option A). Separate from the
@@ -1567,6 +1615,9 @@ const STALE_THRESHOLD_DAYS = 7;
 // connection, this one flags a connection nobody has synced in a month,
 // which is a different problem and gets its own, more urgent, treatment.
 const STALE_NUDGE_THRESHOLD_DAYS = 30;
+// Case B threshold (OR-T0079): gap between last_sync_at and latest imported
+// transaction date, in days. CTO confirmed 14 days on 2026-09-22.
+const DATA_STALE_THRESHOLD_DAYS = 14;
 
 function isStaleConnection(lastSyncAt: string, thresholdDays: number = STALE_THRESHOLD_DAYS): boolean {
   const ageMs = Date.now() - new Date(lastSyncAt).getTime();
@@ -1577,16 +1628,26 @@ function isStaleConnection(lastSyncAt: string, thresholdDays: number = STALE_THR
 // Sub-components
 // ------------------------------------------------------------------
 
-function ConnectionRow({
+export function ConnectionRow({
   conn,
   syncing,
   onSync,
   onDelete,
+  latestTxAt,
 }: {
   conn: Connection;
   syncing: boolean;
   onSync: () => void;
   onDelete: () => void;
+  /**
+   * State of the transaction import for this connection (OR-T0079).
+   * - string:    ISO date of the most recent imported transaction.
+   * - undefined: load complete, cap not reached; confirmed no data imported.
+   *              Show the "no data imported" banner.
+   * - null:      Still loading, or the 1000-row cap was reached so absence
+   *              cannot be distinguished from presence. Hide the banner.
+   */
+  latestTxAt?: string | null;
 }) {
   const statusColor =
     conn.status === "active"
@@ -1602,9 +1663,26 @@ function ConnectionRow({
   // Takes precedence over `stale` when both are true: 30+ days is always
   // also 7+ days, and the nudge is the more urgent, more specific case.
   const staleNudge = !neverSynced && isStaleConnection(conn.last_sync_at!, STALE_NUDGE_THRESHOLD_DAYS);
+  // Connection has synced at least once but zero transactions ever imported
+  // (OR-T0079). Distinct from neverSynced (no sync attempt yet) and stale
+  // (sync ran but is old): here the sync claims to have run recently but
+  // the accounts page is empty.
+  const noDataImported = !neverSynced && latestTxAt === undefined;
+  // Case B (OR-T0079): sync has run and there is data, but the most recent
+  // transaction is more than DATA_STALE_THRESHOLD_DAYS older than the last
+  // sync. The provider is syncing but delivering no new transactions.
+  const dataStale =
+    !neverSynced &&
+    latestTxAt !== undefined &&
+    latestTxAt !== null &&
+    new Date(conn.last_sync_at!).getTime() - new Date(latestTxAt).getTime() >
+      DATA_STALE_THRESHOLD_DAYS * 24 * 60 * 60 * 1000;
+  const dataStaleAgeDays = dataStale
+    ? Math.floor((Date.now() - new Date(latestTxAt!).getTime()) / (24 * 60 * 60 * 1000))
+    : 0;
 
   return (
-    <div className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
+    <div data-testid={`connection-row-${conn.id}`} className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
       {staleNudge ? (
         <span
           aria-hidden="true"
@@ -1646,6 +1724,22 @@ function ConnectionRow({
         {neverSynced && (
           <div className="text-xs text-muted-foreground">
             Not yet active
+          </div>
+        )}
+        {noDataImported && (
+          <div
+            data-testid="no-data-imported-banner"
+            className="text-xs text-amber-600 dark:text-amber-400"
+          >
+            Sync active but no data imported yet.
+          </div>
+        )}
+        {dataStale && (
+          <div
+            data-testid="data-stale-banner"
+            className="text-xs text-amber-600 dark:text-amber-400"
+          >
+            Sync running but last imported data is {dataStaleAgeDays} day{dataStaleAgeDays === 1 ? "" : "s"} old.
           </div>
         )}
         <div className="text-xs text-muted-foreground flex items-center gap-2">
