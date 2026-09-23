@@ -781,6 +781,153 @@ jobs:
             echo "Harness self-test was run first and correctly failed, so these results come from a suite proven able to go red."
           } >> "$GITHUB_STEP_SUMMARY"
 
+  vault-meta-rls-sql:
+    name: SQL tests (user_vault_meta RLS, OR-T0690)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Why this job exists (OR-T0690, split out of DEV-0186 because it could
+    # not be finished there): the UPDATE policy on public.user_vault_meta has
+    # a USING expression and no WITH CHECK. The CTO declined a separate
+    # ticket on DL-1958 on the grounds that Postgres applies USING to the new
+    # row too when no WITH CHECK is given. That is correct as documentation.
+    # Until this job nothing had ever observed it behaviourally on this
+    # database: a catalogue read (pg_policies) can show the policy text is
+    # what you expect, it cannot show what Postgres actually does with it.
+    #
+    # This runs against a throwaway Postgres service container inside the
+    # runner. It needs no credentials, reaches no network, and cannot touch
+    # dev or prod Supabase.
+    #
+    # The ONE migration that defines the table and the UPDATE policy under
+    # test is applied VERBATIM from supabase/migrations, discovered by
+    # grepping for the exact policy-creation line rather than hardcoded, so
+    # a future migration that redefines this policy is picked up
+    # automatically. Deliberately narrower than scan-range-sql's discovery
+    # grep: user_vault_meta is touched by ~30 other migrations (grants,
+    # triggers, unrelated columns) that this ticket's question does not
+    # reach, and pulling all of them in would make this suite depend on a
+    # dependency graph nobody asked it to test. If the discovery grep below
+    # ever matches more than one file, the job fails loudly rather than
+    # silently applying an unreviewed second file.
+    services:
+      postgres:
+        # Matches the real projects' major version (17.6, checked live
+        # 2026-09-15 on dev fzwmnzmtqidumdqjdddz, see scan-range-sql's own
+        # comment for the citation).
+        image: postgres:17-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: vaultmetarls
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d vaultmetarls"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: '5433'
+      PGUSER: postgres
+      PGDATABASE: vaultmetarls
+      # Number of assertions the suite is expected to report OK. Checked,
+      # not assumed, same reasoning as scan-range-sql's own baseline.
+      VAULT_META_ASSERTION_BASELINE: '4'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Prove psql is present and the database is reachable
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v psql >/dev/null 2>&1; then
+            echo "::notice::psql is not on this runner image; installing postgresql-client"
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq postgresql-client
+          fi
+          psql --version
+          psql -v ON_ERROR_STOP=1 -tAc 'select current_database(), version()'
+
+      - name: Bootstrap the Supabase surface the migration reaches for
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -f supabase/tests/vault_meta_rls/00_bootstrap.sql
+
+      - name: Load the user_vault_meta RLS migration from supabase/migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t MIGRATIONS < <(grep -lE 'ON public\.user_vault_meta FOR UPDATE' supabase/migrations/*.sql | sort)
+
+          if [ "${#MIGRATIONS[@]}" -eq 0 ]; then
+            echo "::error::No file under supabase/migrations defines the UPDATE policy on public.user_vault_meta. This job would then be testing nothing. Fix the path rather than let it report green."
+            exit 1
+          fi
+          if [ "${#MIGRATIONS[@]}" -gt 1 ]; then
+            echo "::error::More than one migration file defines the UPDATE policy on public.user_vault_meta. This job applies exactly one migration on purpose (see the job's own header comment) and refuses to guess which."
+            printf '%s\n' "${MIGRATIONS[@]}" | sed 's/^/  matched: /'
+            exit 1
+          fi
+
+          printf '%s\n' "${MIGRATIONS[@]}" | sed 's/^/  loading: /'
+          psql -v ON_ERROR_STOP=1 -q -f "${MIGRATIONS[0]}"
+          echo "Applied ${MIGRATIONS[0]}"
+
+      - name: Load the assertion helpers
+        shell: bash
+        run: |
+          set -euo pipefail
+          psql -v ON_ERROR_STOP=1 -f supabase/tests/vault_meta_rls/05_assert_helpers.sql
+
+      # Deliberately BEFORE the real assertions, and it fails the job if it
+      # PASSES. See scan-range-sql's identical step for why: every way of
+      # wiring this suite up wrong produces the same green tick as a
+      # passing run, so proving the harness can go red is what makes the
+      # green mean anything. This ALSO is the acceptance test's own
+      # criterion 3 (widen the policy locally, show red) run as a permanent
+      # automated check on every PR rather than a one-off manual proof.
+      - name: Self-test the harness (this file MUST fail)
+        shell: bash
+        run: |
+          set -uo pipefail
+          if psql -v ON_ERROR_STOP=1 -f supabase/tests/vault_meta_rls/99_selftest_must_fail.sql; then
+            echo "::error::The harness self-test PASSED. It asserts something known to be false, so a pass means the assertions cannot fail and every result below is worthless."
+            exit 1
+          fi
+          echo "Self-test failed as required: the assertion helper can go red."
+
+      - name: RLS behavioural assertions
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          psql -v ON_ERROR_STOP=1 -f supabase/tests/vault_meta_rls/10_rls_assertions.sql \
+            2>&1 | tee "$RUNNER_TEMP/vault-meta-rls-assertions.log"
+          RC=${PIPESTATUS[0]}
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::user_vault_meta RLS assertions failed. If the FIRST assertion (user cannot update another user's row) is the one that failed, this is DL-1958: file it to the CTO the same day, a cross-tenant vault-metadata write is possible."
+            exit "$RC"
+          fi
+
+          OK=$(grep -c 'ok  ' "$RUNNER_TEMP/vault-meta-rls-assertions.log" || true)
+          echo "Assertions reported OK: ${OK} (baseline: ${VAULT_META_ASSERTION_BASELINE})"
+
+          if [ "$OK" -lt "$VAULT_META_ASSERTION_BASELINE" ]; then
+            echo "::error::Only ${OK} assertion(s) reported OK, expected at least ${VAULT_META_ASSERTION_BASELINE}. The suite exited clean without running everything it should have."
+            exit 1
+          fi
+
+          {
+            echo "## user_vault_meta RLS suite (OR-T0690)"
+            echo
+            echo "**${OK} assertion(s) passed** (baseline: ${VAULT_META_ASSERTION_BASELINE})"
+            echo
+            echo "Harness self-test was run first and correctly failed, so these results come from a suite proven able to go red. A signed-in user cannot update another user's user_vault_meta row; the owner can update their own."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   vitest:
     name: Unit tests (vitest)
     runs-on: ubuntu-latest
