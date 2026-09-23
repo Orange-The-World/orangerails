@@ -189,6 +189,10 @@ export function AppHome() {
   // Prevents the "no data imported" banner from firing during the initial
   // load window or after a failed fetch (OR-T0079 defect 1).
   const [txLoadComplete, setTxLoadComplete] = useState(false);
+  // Raw row count from the DB fetch (before decrypt failures are dropped).
+  // Used for the cap check so undecryptable rows do not make the cap look
+  // unreached when it actually was (OR-T0079 defect 2, Auditor item C).
+  const [txFetchedCount, setTxFetchedCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
   const [syncingId, setSyncingId] = useState<string | null>(null);
@@ -652,7 +656,7 @@ export function AppHome() {
         .from("encrypted_transactions")
         .select("id, connection_id, external_id, encrypted_payload, occurred_at")
         .order("occurred_at", { ascending: false })
-        .limit(1000);
+        .limit(TX_FETCH_LIMIT);
       const { data: txs, error: txErr } = connIds.length > 0
         ? await txQuery.in("connection_id", connIds)
         : await txQuery.in("connection_id", ["00000000-0000-0000-0000-000000000000"]);
@@ -672,6 +676,7 @@ export function AppHome() {
           }
         }),
       );
+      setTxFetchedCount(txs?.length ?? 0);
       setTransactions(decrypted.filter((t): t is DecryptedTxRow => t !== null));
       setTxLoadComplete(true);
     } catch (e) {
@@ -1177,7 +1182,7 @@ export function AppHome() {
                 // the map may have data outside the window. Pass null (unknown)
                 // rather than undefined (confirmed absent) so the banner stays
                 // hidden (OR-T0079 defect 2).
-                const capReached = transactions.length >= 1000;
+                const capReached = txFetchedCount >= TX_FETCH_LIMIT;
                 return connections.map((c) => {
                   let latestTxAt: string | null | undefined;
                   if (!txLoadComplete) {
@@ -1202,6 +1207,11 @@ export function AppHome() {
             </div>
           )}
         </section>
+
+        {/* Sentinel rendered only when txLoadComplete===true so tests can
+            wait for a meaningful signal rather than the connection row
+            appearing (which fires before transactions load). */}
+        {txLoadComplete && <span data-testid="tx-load-complete" className="sr-only" aria-hidden="true" />}
 
         <section className="space-y-3">
           <h2 className="text-lg font-semibold">Recent transactions</h2>
@@ -1561,6 +1571,9 @@ export function AppHome() {
 // Connection staleness helpers
 // ------------------------------------------------------------------
 
+// Shared between the DB query .limit() call and the cap-reached check so
+// both are always in sync (OR-T0079 Auditor item C).
+const TX_FETCH_LIMIT = 1000;
 const STALE_THRESHOLD_DAYS = 7;
 
 // 30-day nudge threshold (OR-T0066, DL-0382 Option A). Separate from the
@@ -1635,7 +1648,7 @@ export function ConnectionRow({
     : 0;
 
   return (
-    <div className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
+    <div data-testid={`connection-row-${conn.id}`} className="rounded-md border px-4 py-3 flex items-center justify-between gap-3 min-h-[56px]">
       {staleNudge ? (
         <span
           aria-hidden="true"
