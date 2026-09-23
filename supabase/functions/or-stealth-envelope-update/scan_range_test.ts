@@ -260,7 +260,7 @@ Deno.test('records at the boundary: from_height 0 is a genesis-start scan, not a
   assertEquals(args?.p_app_user_id, CALLER);
 });
 
-// --- OR-T0645 / OR-C1710: index.ts wiring, ported from PR #1428 ---
+// --- OR-T0645 / OR-C1710: index.ts wiring ---
 //
 // reportScanRangeOutcome is the function index.ts calls to turn a 'failed'
 // outcome into both a Sentry report and the scan_range_failed response field.
