@@ -597,25 +597,29 @@ export function VaultProvider({ children }: VaultProviderProps) {
       //    pair on the next unlock instead of short-circuiting forever on a
       //    public key whose secret is gone.
       //
-      //    A stored secret that will NOT open is also carried as null rather
-      //    than aborting. Aborting there was permanent, not cautious: the state
-      //    is static, so the same ciphertext and the same discarded MEK fail
-      //    again on every retry, and the recovery code is the user's last way
-      //    in.
+      //    A stored secret that will NOT open is carried as null, but only when
+      //    the sibling secret re-wraps successfully: that success proves the old
+      //    wrap key is correct, so the tag failure is evidence the secret is
+      //    genuinely dead rather than the key being wrong. The dead secret gets
+      //    null in the return value; pqcKeysReplaced is set to true so the
+      //    caller can warn the user. The recovery itself still succeeds.
       //
-      //    Only an AES-GCM authentication tag failure counts as "will not
-      //    open". Every other failure throws out of here and aborts the
-      //    recovery, which is why this is awaited plainly and is deliberately
+      //    When BOTH secrets fail, or one fails with no sibling to corroborate,
+      //    carryPqcSecretsAcrossRotation throws and aborts the entire recovery
+      //    path including the password reset. Without a successful sibling,
+      //    "dead" and "wrong key" are the same AES-GCM tag failure and there is
+      //    no safe way to distinguish them.
+      //
+      //    Every other failure (non-AES-GCM) also throws out of here and aborts
+      //    the recovery, which is why this is awaited plainly and is deliberately
       //    NOT wrapped in a catch: a transient failure read as a dead key would
       //    discard a LIVE keypair, which is the destruction this whole path
       //    exists to prevent.
       //
-      //    oldMek and the authenticated salt go in alongside the wrap keys, and
-      //    they are not decoration. "Dead" and "wrong key" are the same AES-GCM
-      //    tag failure, so the carry proves the old wrap key really is the key
-      //    (oldMek, storedSalt) derives before it lets a tag failure mean dead.
-      //    Derive that key from any other salt and the carry throws here instead
-      //    of quietly reporting both secrets dead and clearing both public keys.
+      //    oldMek and the authenticated salt go in alongside the wrap keys and
+      //    are not decoration. Without them the carry cannot prove the old wrap
+      //    key is correct before letting a tag failure mean dead. Derive that
+      //    key from any other salt and the carry throws here instead.
       const oldPqcWrapKey = await derivePqcSecretWrapKey(oldMek, storedSalt);
       const newPqcWrapKey = await derivePqcSecretWrapKey(newMek, storedSalt);
       const { newKemSecretWrapped, newSigSecretWrapped, pqcKeysReplaced } =
