@@ -119,9 +119,23 @@ jobs:
             # number of files fetched is compared with the number the API itself
             # reports. A mismatch escalates. "I could not establish completeness"
             # must never read the same as "clean".
-            want=$(gh api "repos/$R/pulls/$number" -q '.changed_files' </dev/null)
-            files=$(gh api --paginate "repos/$R/pulls/$number/files" \
-                      -q '.[].path' </dev/null)
+            # A gh api call for ONE pull request must not take the whole
+            # sweep down. Before this guard, a PR closed or merged by
+            # someone else in the few seconds between the listing above
+            # and this call (a real race on a repo with this much
+            # traffic) made gh api exit non-zero, and under set -e that
+            # killed the run before any other PR was even looked at.
+            if ! want=$(gh api "repos/$R/pulls/$number" -q '.changed_files' </dev/null); then
+              echo "::warning::${url}: could not fetch PR details (closed/merged mid-run, or a transient error). Skipping, escalating."
+              escalated="${escalated}- [${title}](${url})"$'\n'"    - could not fetch PR details this run (closed/merged mid-run, or a transient error), so it was not evaluated."$'\n'
+              continue
+            fi
+            if ! files=$(gh api --paginate "repos/$R/pulls/$number/files" \
+                      -q '.[].path' </dev/null); then
+              echo "::warning::${url}: could not fetch the changed-file list. Skipping, escalating."
+              escalated="${escalated}- [${title}](${url})"$'\n'"    - could not fetch the changed-file list this run, so it was not evaluated."$'\n'
+              continue
+            fi
             got=$(printf '%s\n' "$files" | grep -c . || true)
             if [ "$got" != "$want" ]; then
               echo "::warning::${url}: fetched ${got} of ${want} changed files, not merging."
