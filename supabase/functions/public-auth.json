@@ -5,6 +5,8 @@
     "and that it does its own authentication. Adding one expands the public attack surface.",
     "Review a diff to this file as a security decision, not a config tweak.",
     "Modes: hmac = verifies a signature itself. platform-api-key = checks a platform key header.",
+    "Functions that call authenticateRequest also accept a Supabase JWT (direct mode) unless they explicitly reject a non-platform ctx.mode.",
+    "widget-token = checks a widget_token in the request body against a valid pending_widget_sessions row.",
     "orbi-api-key = checks against orbi_api_keys table (SHA-256 hash, revoked_at IS NULL).",
     "none = intentionally public, no auth at all.",
     "internal-worker-token = checks X-Internal-Worker-Token header against a vault secret (service-internal callers only, never exposed to integrators).",
