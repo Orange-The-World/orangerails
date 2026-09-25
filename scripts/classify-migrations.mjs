@@ -710,7 +710,19 @@ function executeIsUnreadable(flat) {
   let m = re.exec(flat);
   while (m !== null) {
     const rest = flat.slice(m.index + 'EXECUTE'.length);
-    if (!PRIVILEGE_LIST_PREFIX.test(flat.slice(0, m.index)) && !TRIGGER_EXECUTE_ROUTINE.test(rest)) {
+    // If the character immediately before EXECUTE is a single quote, the word is
+    // string DATA, not a command: x.privilege_type = 'EXECUTE' or
+    // has_function_privilege(..., 'EXECUTE'). scrubDoBody keeps string literals
+    // verbatim so EXECUTE can appear inside them; \b fires at the quote/letter
+    // boundary and the bare-word match treats data as a command. A real PL/pgSQL
+    // EXECUTE statement is always preceded by whitespace, a semicolon or the
+    // start of the statement text, never by a quote. Anchored to the immediately
+    // preceding character, consistent with PRIVILEGE_LIST_PREFIX and
+    // TRIGGER_EXECUTE_ROUTINE. (OR-T1696/step-9)
+    const prev = m.index > 0 ? flat[m.index - 1] : '';
+    if (prev !== "'" &&
+        !PRIVILEGE_LIST_PREFIX.test(flat.slice(0, m.index)) &&
+        !TRIGGER_EXECUTE_ROUTINE.test(rest)) {
       const arg = executeArgument(rest);
       if (!splitTop(arg, '||').every(readablePiece)) return true;
     }
@@ -1226,6 +1238,11 @@ const EXPECTED = {
   // back UNPARSEABLE for the whole file.
   '20990101000030_reversible_dollar_quoted_argument.sql': { verdict: REVERSIBLE, id: null },
   '20990101000031_irreversible_dollar_quoted_argument.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
+  // OR-T1696/step-9. EXECUTE as string data inside a DO block: the word appears
+  // as a privilege_type string value (= 'EXECUTE'), not a PL/pgSQL EXECUTE
+  // command. scrubDoBody keeps string literals verbatim so \bEXECUTE\b matched
+  // data. Fix: skip when the preceding character is a single quote.
+  '20990101000033_reversible_execute_as_string_data_in_do_block.sql': { verdict: REVERSIBLE, id: null },
 };
 
 function selftest() {
