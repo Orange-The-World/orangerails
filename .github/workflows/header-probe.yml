@@ -21,8 +21,9 @@ jobs:
     steps:
       - name: Validate host against allowlist
         shell: bash
+        env:
+          URL: ${{ inputs.url }}
         run: |
-          URL='${{ inputs.url }}'
           HOST=$(printf '%s' "$URL" | sed 's|^https\?://||' | sed 's|[/?#].*||')
 
           ALLOWED=false
@@ -43,9 +44,9 @@ jobs:
       - name: Fetch response headers
         id: fetch
         shell: bash
+        env:
+          URL: ${{ inputs.url }}
         run: |
-          URL='${{ inputs.url }}'
-
           # HEAD request only, no redirect-following, standard browser User-Agent.
           # Body is discarded (-I). Raw output is never echoed; only allowlisted
           # header names are extracted below.
@@ -93,10 +94,11 @@ jobs:
         uses: actions/github-script@v7
         env:
           PROBE_REPORT: ${{ steps.fetch.outputs.report }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
         with:
           script: |
             const report = process.env.PROBE_REPORT;
-            const issueNumber = parseInt('${{ inputs.issue_number }}');
+            const issueNumber = parseInt(process.env.ISSUE_NUMBER, 10);
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
