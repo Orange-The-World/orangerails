@@ -244,7 +244,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       // is about to stop existing. That orphan state is what lets a later
       // re-add fingerprint-match a dead row, take the reconnect path, update
       // a connection that no longer exists, and return success with nothing
-      // written and no error raised anywhere. DL-0389.
+      // written and no error raised anywhere. DL-0389, OR-T0477.
       console.error(await safeErrorLine('or-connection-delete', 'source-wallets-cleanup', swDelErr));
       await reportError(swDelErr, 'or-connection-delete', req);
     }
