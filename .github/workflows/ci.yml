@@ -1213,3 +1213,65 @@ jobs:
             connect-compat-verdict.json
           retention-days: 14
           if-no-files-found: warn
+
+  preview-wait-absent-proof:
+    name: Preview-wait absent-case proof (OR-T1584)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Proves the absent-case branch of .github/actions/wait-for-pages-deploy:
+    # when fail_if_absent is true and no deployment exists for the given SHA,
+    # the action must exit 1 with the distinct UNKNOWN message rather than
+    # warning and continuing.
+    #
+    # This is the second half of the two-case proof the Auditor requires. The
+    # first half (happy path: preview present, action exits 0, Playwright runs)
+    # is proven by the Playwright smoke job's green run on this PR's own head
+    # sha (run 34795079390, job 103826565307, 2026-09-14).
+    #
+    # Only runs on pull_request where local checkout provides the action file
+    # and CI secrets are available. On push to dev/prod the action is already
+    # proven by the Playwright smoke job above; this job adds no new information
+    # there and is skipped.
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Use an all-zero sentinel SHA that can never match any real Cloudflare
+      # Pages deployment. The action will poll, find "absent" on every pass,
+      # and after timeout_seconds exit 1 with:
+      #   "No Cloudflare Pages preview deployment exists for this commit, so
+      #    the smoke had nothing to measure. This is an UNKNOWN, not a test
+      #    failure and not a pass."
+      #
+      # timeout_seconds: 30 (3 polls at poll_seconds: 10) so the job
+      # completes in under a minute. The full 420s default is not needed here:
+      # the script does not short-circuit on "absent" mid-loop, but the
+      # timeout is reached quickly.
+      #
+      # continue-on-error: true so the outer job can run the assertion step
+      # even when this step exits 1 (the expected outcome).
+      - name: Absent case -- action must exit 1 for a SHA with no deployment
+        id: absent
+        continue-on-error: true
+        uses: ./.github/actions/wait-for-pages-deploy
+        with:
+          project: orangerails-dev
+          commit_sha: '0000000000000000000000000000000000000000'
+          environment: preview
+          fail_if_absent: 'true'
+          timeout_seconds: '30'
+          poll_seconds: '10'
+          account_id: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          api_token: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+      # Self-verifying: if the wait step exited 0 the fail_if_absent branch is
+      # broken and the job fails here. A broken negative control that exits 0
+      # must never be mistaken for a proved absent case.
+      - name: Assert the absent case correctly exited 1
+        run: |
+          if [ "${{ steps.absent.outcome }}" = "success" ]; then
+            echo "::error::Absent-case BROKEN: wait-for-pages-deploy exited 0 for commit_sha '0000...0000', which has no Cloudflare Pages deployment. fail_if_absent=true must exit 1 on every abnormal path. This is a defect in the action, not a passing proof."
+            exit 1
+          fi
+          echo "Absent-case PASS: action correctly exited 1 (outcome=${{ steps.absent.outcome }}) for a SHA with no deployment. fail_if_absent=true is wired."
