@@ -144,6 +144,39 @@ Deno.test('DL-0608: isValidAppUserId rejects empty string and non-strings', () =
   assert(!isValidAppUserId(42), 'number must fail');
 });
 
+// ── OR-T0999: block_hash_hex field on SealedTransactionInput ─────────────────
+//
+// The store function now includes block_hash: tx.block_hash_hex ?? null in
+// the inserted row.  isSealedTx does not require block_hash_hex (it is
+// optional: records uploaded before hash capture was added have no hash and
+// are stored with block_hash=NULL, treated as unverifiable by the detector).
+
+Deno.test('OR-T0999: isSealedTx accepts transaction WITH block_hash_hex', () => {
+  assert(isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'aWQ=',
+    ciphertext_b64: 'Y2lwaGVydGV4dA==',
+    occurred_at: '2026-09-22',
+    block_height: 900050,
+    txid_blind_index_hex: 'a'.repeat(64),
+    block_hash_hex: 'b'.repeat(64),
+  }), 'isSealedTx must accept a transaction with block_hash_hex');
+});
+
+Deno.test('OR-T0999: isSealedTx accepts transaction WITHOUT block_hash_hex (pre-hash record)', () => {
+  assert(isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'aWQ=',
+    ciphertext_b64: 'Y2lwaGVydGV4dA==',
+    occurred_at: '2026-09-22',
+    block_height: 900050,
+    txid_blind_index_hex: 'a'.repeat(64),
+    // no block_hash_hex -- pre-hash record; stored as block_hash=NULL
+  }), 'isSealedTx must accept a transaction without block_hash_hex (OR-T0407: NULL is unverifiable, not an error)');
+});
+
 Deno.test('DL-0608: or-stealth-transactions-store -- cuids pass isValidAppUserId', () => {
   // or-stealth-transactions-store/index.ts: validator extracted to isValidAppUserId.
   // Reimplementing the check inline instead would not catch a revert.
