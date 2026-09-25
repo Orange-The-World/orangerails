@@ -367,6 +367,9 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             widget_token: currentWidgetToken,
             sealed_transactions: result.sealedTransactions,
             last_block_scanned: result.lastBlockScanned,
+            // OR-T2457: the same fencing token step 5 below already sends to
+            // or-stealth-envelope-update, echoed unchanged from envJson.
+            scan_generation: envJson.scan_generation,
             ...(result.sealedUtxos !== null ? { sealed_utxos: result.sealedUtxos } : {}),
           };
           let uploadOk = false;
