@@ -68,6 +68,9 @@ verify_jwt = false
 [functions.or-stealth-transactions-list]
 verify_jwt = false
 
+[functions.or-stealth-reorg-check]
+verify_jwt = false
+
 [functions.or-stealth-transactions-store]
 verify_jwt = false
 
@@ -155,4 +158,20 @@ verify_jwt = false
 # guard makes the probe unreachable; removing the guard without this entry
 # leaves it open.
 [functions.or-queue-health]
+verify_jwt = false
+
+# or-quiltt-backlog-alert is invoked by pg_cron the same way (OR-T0267) and
+# validates the same header itself. They ship together for the same reason.
+[functions.or-quiltt-backlog-alert]
+verify_jwt = false
+
+# --- Raw invitation token in the request body -------------------------
+# or-agent-invite-redeem is called by an invitee who has no session yet, so there
+# is no JWT to present and the gateway has to pass the request through. The
+# function's own credential is the raw invitation token, checked inside
+# complete_agent_invitation against the stored hash. Leaving the gate on would
+# not make redemption private, it would only make it impossible: the anon key
+# ships in every browser bundle. This function is the only path that holds
+# service_role for this rpc, and it is where a rate limit will attach.
+[functions.or-agent-invite-redeem]
 verify_jwt = false

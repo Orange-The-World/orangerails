@@ -2,9 +2,10 @@
  * or-quiltt-sync — drain quiltt_webhook_inbox, pull data from Quiltt
  * GraphQL, seal under each user's OPK, persist as encrypted_transactions.
  *
- * Trigger: HTTP POST (callable manually for testing; wire to supabase_cron
- * on a schedule later). One call processes a bounded batch of pending
- * events and returns metrics.
+ * Trigger: HTTP POST. An empty/{} body processes a bounded pending batch.
+ * An authenticated operator can instead POST
+ * {"replay_event_id":"<event id>"} to claim and synchronously dispatch one
+ * recoverably-retired event after repairing its mapping/connection prerequisite.
  *
  * Phase 1 scope:
  *   - Only events for subaccounts with opk_public set are processed
@@ -29,6 +30,7 @@ import { OPK_SEAL_ALG, decodeOpkPublicKey, sealToOpk } from '../_shared/opk-seal
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
 import {
+  chooseFallbackConnection,
   chooseProfileId,
   chooseRouting,
   metadataSubaccountId,
@@ -46,6 +48,17 @@ const TX_PAGE_SIZE = 100;
 // preserved) in the same UPDATE as the final attempt counter, so it cannot
 // take another slot and the queue head always advances past it.
 const MAX_ATTEMPTS = 25;
+// A connection-row race (DL-1414-C: or-quiltt-link-complete has not yet
+// inserted the connections row when this event's sync fires) is bounded by
+// WALL-CLOCK AGE, never by MAX_ATTEMPTS. reDriveReadyDeferrals re-admits
+// deferred rows on sink platforms unconditionally (it cannot tell an
+// OPK-wait apart from a conn-race wait -- both use opk_deferred_at), so a
+// sink-platform event stuck in this state gets re-admitted and re-deferred
+// every tick. Routing that churn through bumpAttempts (commit 5418820c)
+// reaches MAX_ATTEMPTS within minutes and permanently retires an event that
+// only needed a connections row to show up (OR-T1902, a regression of the
+// earlier defer-instead-of-burn-attempts fix for this same race).
+const CONN_RACE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // 50 pages × 100 = 5,000 transactions per connection per webhook event.
 // Covers most banks' full available history (Quiltt typically caps at ~2y).
 // Still bounded so a hostile/buggy upstream can't burn unlimited time.
@@ -78,7 +91,37 @@ interface PendingEvent {
   platform_id:   string | null;
   subaccount_id: string | null;
   attempts:      number;
+  // Optional: only fetchPendingBatch populates it. Existing call sites and
+  // test fixtures that build a PendingEvent by hand (handleEvent tests etc.)
+  // do not need it, since only the deferred-conn-race age check reads it.
+  received_at?:  string;
 }
+
+interface QuilttTransactionsResponse {
+  errors?: Array<{ message?: unknown }>;
+  data?: {
+    transactions?: {
+      nodes?: Array<{
+        id: string;
+        amount: unknown;
+        currencyCode: unknown;
+        date: string;
+        description: unknown;
+        entryType: unknown;
+        status: unknown;
+        account?: { id?: string | null } | null;
+      }>;
+      pageInfo?: { hasNextPage?: boolean; endCursor?: string | null };
+    };
+  };
+}
+
+export type ReplayClaimResult =
+  | { status: 'claimed'; event: PendingEvent }
+  | { status: 'not-found'; event: null }
+  | { status: 'not-retired'; event: null }
+  | { status: 'not-replayable'; event: null }
+  | { status: 'error'; event: null; error: string };
 
 const _drainHandler = wrapSentryHandler(async (req: Request) => {
   if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
@@ -109,30 +152,78 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
   const quilttApiKey = Deno.env.get('QUILTT_API_KEY');
   if (!quilttApiKey) return new Response('QUILTT_API_KEY missing', { status: 503 });
 
+  // A normal cron invocation has no body. Ops can instead name one retired
+  // event to replay synchronously after repairing its mapping/connection
+  // prerequisite. Claiming the row below clears its terminal markers before
+  // this same invocation sends it through the ordinary dispatch path; merely
+  // changing processed_at is not reported as successful replay.
+  let replayEventId: string | null = null;
+  const rawBody = await req.text();
+  if (rawBody.length > 0) {
+    let body: unknown;
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      return jsonResponse({ error: 'invalid JSON body' }, 400);
+    }
+    const candidate = (body as { replay_event_id?: unknown } | null)?.replay_event_id;
+    if (candidate !== undefined) {
+      if (typeof candidate !== 'string' || candidate.trim().length === 0) {
+        return jsonResponse({ error: 'replay_event_id must be a non-empty string' }, 400);
+      }
+      replayEventId = candidate.trim();
+    }
+  }
+
   let processed = 0;
   let failed    = 0;
   let skipped   = 0;
+  let reDriven  = 0;
+  let reDriveErr: string | null = null;
+  let pending: PendingEvent[] | null = null;
 
-  // DL-0643: Re-admit OPK-deferred rows whose subaccounts have since
-  // registered a public key. Runs each tick so subaccounts that registered
-  // before or-sync-key-register's clearDeferredRows shipped are unblocked
-  // without waiting for a new registration event.
-  const { reDriven, error: reDriveErr } = await reDriveReadyDeferrals(client);
-  if (reDriveErr) {
-    console.error('[or-quiltt-sync] reDriveReadyDeferrals failed:', reDriveErr);
-  }
-  if (reDriven > 0) {
-    console.log(`[or-quiltt-sync] re-admitted ${reDriven} OPK-deferred rows`);
-  }
+  if (replayEventId) {
+    const claim = await claimRetiredEventForReplay(client, replayEventId);
+    if (claim.status === 'error') {
+      console.error(`[or-quiltt-sync] replay claim failed for event ${replayEventId}:`, claim.error);
+      return jsonResponse({ error: 'replay claim failed', event_id: replayEventId }, 500);
+    }
+    if (claim.status === 'not-found') {
+      return jsonResponse({ error: 'event not found', event_id: replayEventId }, 404);
+    }
+    if (claim.status === 'not-replayable') {
+      return jsonResponse({ error: 'event retirement is not replayable by this path', event_id: replayEventId }, 409);
+    }
+    if (claim.status === 'not-retired') {
+      // Includes a repeated request after a successful claim. Returning a
+      // no-op makes the operator command idempotent without redispatching.
+      return jsonResponse({ replay: 'not-retired', event_id: replayEventId, processed: 0, failed: 0, skipped: 0 }, 200);
+    }
+    pending = [claim.event];
+  } else {
+    // DL-0643: Re-admit OPK-deferred rows whose subaccounts have since
+    // registered a public key. Runs each tick so subaccounts that registered
+    // before or-sync-key-register's clearDeferredRows shipped are unblocked
+    // without waiting for a new registration event.
+    const reDrive = await reDriveReadyDeferrals(client);
+    reDriven = reDrive.reDriven;
+    reDriveErr = reDrive.error;
+    if (reDriveErr) {
+      console.error('[or-quiltt-sync] reDriveReadyDeferrals failed:', reDriveErr);
+    }
+    if (reDriven > 0) {
+      console.log(`[or-quiltt-sync] re-admitted ${reDriven} OPK-deferred rows`);
+    }
 
-  // Pull a batch of pending, non-deferred events.
-  // fetchPendingBatch filters both processed_at IS NULL and opk_deferred_at IS NULL
-  // so opk-deferred rows never pile up at the head and starve drainable events.
-  const { data: pending, error: pendErr } = await fetchPendingBatch(client, BATCH_SIZE);
-
-  if (pendErr) {
-    console.error('[or-quiltt-sync] inbox query failed:', pendErr.message);
-    return jsonResponse({ error: 'inbox query failed', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 500);
+    // Pull a batch of pending, non-deferred events.
+    // fetchPendingBatch filters both processed_at IS NULL and opk_deferred_at IS NULL
+    // so opk-deferred rows never pile up at the head and starve drainable events.
+    const fetched = await fetchPendingBatch(client, BATCH_SIZE);
+    if (fetched.error) {
+      console.error('[or-quiltt-sync] inbox query failed:', fetched.error.message);
+      return jsonResponse({ error: 'inbox query failed', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 500);
+    }
+    pending = fetched.data as PendingEvent[] | null;
   }
   if (!pending || pending.length === 0) {
     return jsonResponse({ processed: 0, failed: 0, skipped: 0, message: 'inbox empty', reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}) }, 200);
@@ -252,11 +343,13 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         skipped++;
       } else if (handled === 'deferred-conn-race') {
         // connections row missing (race with or-link-complete, DL-1414-C).
-        // Defer so the event sits out one tick, AND bump attempts so the
-        // loop is bounded: after MAX_ATTEMPTS ticks without the connections
-        // row appearing the event retires rather than cycling indefinitely.
-        await markDeferred(client, ev.event_id);
-        await bumpAttempts(client, ev, 'or-connection row not yet created (DL-1414-C)');
+        // Bounded by wall-clock age, not attempts -- see CONN_RACE_MAX_AGE_MS
+        // above for why an attempts-based bound reintroduces OR-T1902.
+        if (shouldRetireConnRace(ev.received_at)) {
+          await retireConnRace(client, ev.event_id);
+        } else {
+          await markDeferred(client, ev.event_id);
+        }
         skipped++;
       } else {
         await bumpAttempts(client, ev, handled);
@@ -269,7 +362,20 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
     }
   }
 
-  return jsonResponse({ processed, failed, skipped, reDriven, ...(reDriveErr ? { reDriveError: reDriveErr } : {}), batch: pending.length }, 200);
+  return jsonResponse({
+    processed,
+    failed,
+    skipped,
+    reDriven,
+    ...(reDriveErr ? { reDriveError: reDriveErr } : {}),
+    batch: pending.length,
+    ...(replayEventId
+      ? {
+          replay: processed > 0 ? 'dispatched' : failed > 0 ? 'failed' : 'not-delivered',
+          event_id: replayEventId,
+        }
+      : {}),
+  }, 200);
 }, 'or-quiltt-sync');
 if (import.meta.main) Deno.serve(_drainHandler);
 
@@ -423,10 +529,11 @@ export async function handleEvent(
   // is subaccount_id.
   // Route the event to the OR connection row whose quiltt_connection_id
   // matches the webhook's connectionId. Falls back to a legacy NULL-id
-  // row only if no exact match exists — keeps banks linked before the
-  // multi-connection migration working. If both fail, surface the
-  // mismatch instead of silently writing to the wrong bank's bucket
-  // (which was the pre-fix root cause of Mercury+TD collisions).
+  // row only if no exact match exists -- keeps banks linked before the
+  // multi-connection migration working, AND only when nothing suggests a
+  // second live connection is already using it (OR-T2475). If both fail,
+  // surface the mismatch instead of silently writing to the wrong bank's
+  // bucket (which was the pre-fix root cause of Mercury+TD collisions).
   let conn: { id: string } | null = null;
   const exactMatch = await client
     .from('connections')
@@ -451,15 +558,38 @@ export async function handleEvent(
     if (legacy.error) return `connection lookup failed: ${legacy.error.message}`;
     // DL-1414-C: Quiltt webhook arrived before or-link-complete created the
     // connections row (timing race on first connect or reconnect). Return
-    // 'deferred-conn-race' so the drain loop defers the row (markDeferred)
-    // AND increments its attempt counter (bumpAttempts). opk_public is already
-    // set here (we passed the gate above), so reDriveReadyDeferrals would
-    // re-admit the event on the very next tick with a plain 'deferred' return,
-    // creating an unbounded loop if the connections row never appears. With
-    // 'deferred-conn-race' the loop is bounded: after MAX_ATTEMPTS ticks the
-    // event retires normally rather than cycling forever.
+    // 'deferred-conn-race' so the drain loop treats this differently from a
+    // plain OPK-deferral (opk_public is already set here, since we passed
+    // that gate above): it is bounded by WALL-CLOCK AGE via
+    // shouldRetireConnRace, not by attempts. Attempts-based bounding
+    // (commit 5418820c, reverted by OR-T1902) reached MAX_ATTEMPTS within
+    // minutes on sink platforms, because reDriveReadyDeferrals's sink branch
+    // re-admits ANY deferred row for a sink subaccount every tick regardless
+    // of why it was deferred, so bumpAttempts fired once per tick.
     if (!legacy.data) return 'deferred-conn-race';
-    conn = legacy.data as { id: string };
+
+    // OR-T2475: a legacy row exists, but "oldest NULL row for this
+    // subaccount" is not the same claim as "the row this connectionId
+    // already owns". Two independently-scheduled Quiltt connections at one
+    // subaccount silently shared this exact row for three months in
+    // production because nothing here ever asked whether a DIFFERENT
+    // connectionId had already been using it. See hasOtherQuilttConnection
+    // for how that is checked; a lookup failure fails the event rather than
+    // guessing.
+    const ambiguity = await hasOtherQuilttConnection(client, subaccountId, connectionId);
+    if (ambiguity.error) return ambiguity.error;
+    if (chooseFallbackConnection(legacy.data, ambiguity.seen) === 'create-new') {
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: legacy row ${legacy.data.id} for ` +
+          `subaccount ${subaccountId} already has traffic from a different Quiltt ` +
+          `connection; creating a new connections row instead of merging`,
+      );
+      const created = await createConnectionForAmbiguousMatch(client, subaccountId, connectionId);
+      if (typeof created === 'string') return created;
+      conn = created;
+    } else {
+      conn = legacy.data as { id: string };
+    }
   }
 
   // DL-0442: load account selection for this connection once, before paging.
@@ -582,7 +712,7 @@ export async function handleEvent(
         }
       }
     `;
-    const resp = await fetch(QUILTT_GRAPHQL, {
+    const resp: Response = await fetch(QUILTT_GRAPHQL, {
       method: 'POST',
       headers: {
         'Authorization': `Basic ${basic}`,
@@ -598,7 +728,7 @@ export async function handleEvent(
       const errBody = await resp.text().catch(() => '');
       return `Quiltt GraphQL ${resp.status}: ${redactProviderError(errBody, 300)}`;
     }
-    const json = await resp.json();
+    const json = await resp.json() as QuilttTransactionsResponse;
 
     // GraphQL can return HTTP 200 with an `errors` array when a query
     // partially or fully fails (bad connectionId, expired profile,
@@ -619,7 +749,7 @@ export async function handleEvent(
     // conditional describes that conditional and nothing else.
     if (Array.isArray(json?.errors) && json.errors.length > 0) {
       const messages = json.errors
-        .map((e: any) => (typeof e?.message === 'string' ? e.message : ''))
+        .map((e) => (typeof e?.message === 'string' ? e.message : ''))
         .filter((m: string) => m.length > 0)
         .join('; ');
       const summary = redactProviderError(messages, 400);
@@ -628,7 +758,8 @@ export async function handleEvent(
     }
 
     const txs = json?.data?.transactions?.nodes ?? [];
-    const pageInfo = json?.data?.transactions?.pageInfo;
+    const pageInfo: { hasNextPage?: boolean; endCursor?: string | null } | undefined =
+      json?.data?.transactions?.pageInfo;
 
     for (const tx of txs) {
       // DL-0442: skip transactions for accounts the user has not selected.
@@ -870,6 +1001,16 @@ export async function handleEventSinkDelivery(
           provider:     'quiltt',
         }),
       });
+    } else {
+      // OR-T2729: this branch used to do nothing. No webhook_url on the
+      // platform means the integrator is never told a sync is ready, and
+      // nothing else records that, so a platform can sit at zero
+      // transactions for months with no signal anywhere. Log it so the
+      // gap is visible instead of hiding.
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: sink webhook enqueue skipped, ` +
+          `platform ${platformId} has no webhook_url configured`,
+      );
     }
   } catch (whErr) {
     console.error(
@@ -933,6 +1074,19 @@ export async function reconcileConnectionError(
       console.warn(
         `[or-quiltt-sync] event ${ev.event_id}: error event for Quiltt connection ` +
           `(type: ${ev.event_type}), no OR connection row found -- marking processed`,
+      );
+      return null;
+    }
+    // OR-T2475: same ambiguity risk as handleEvent's data-pull path -- do not
+    // flip a row's status to 'error' when it may belong to a different, still
+    // healthy Quiltt connection.
+    const ambiguity = await hasOtherQuilttConnection(client, subaccountId, connectionId);
+    if (ambiguity.error) return ambiguity.error;
+    if (chooseFallbackConnection(legacy.data, ambiguity.seen) === 'create-new') {
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: error event's legacy row ${legacy.data.id} ` +
+          `for subaccount ${subaccountId} is ambiguous with another Quiltt connection; ` +
+          `skipping status update rather than guessing which connection this belongs to`,
       );
       return null;
     }
@@ -1079,12 +1233,18 @@ export async function reconcileConnectionSuccess(
       .limit(1)
       .maybeSingle();
     if (legacyErr) return `connection lookup failed: ${legacyErr.message}`;
-    if (legacy) orConnId = legacy.id;
+    if (legacy) {
+      const ambiguity = await hasOtherQuilttConnection(client, subaccountId, connectionId);
+      if (ambiguity.error) return ambiguity.error;
+      if (chooseFallbackConnection(legacy, ambiguity.seen) === 'use-legacy') {
+        orConnId = legacy.id;
+      }
+    }
   }
   if (!orConnId) return null;
   const { error: statusErr } = await client
     .from('connections')
-    .update({ status: 'active', updated_at: new Date().toISOString() })
+    .update({ status: 'active', updated_at: new Date().toISOString(), encrypted_last_error: null })
     .eq('id', orConnId)
     // DL-1409: 'pending' is promotable here so rows stranded by the old sink
     // insert heal themselves on the next successful Quiltt sync, instead of
@@ -1107,6 +1267,85 @@ export async function reconcileConnectionSuccess(
     `[or-quiltt-sync] connection ${orConnId} reconciled to active`,
   );
   return null;
+}
+
+// ─── OR-T2475: ambiguous legacy-row detection ──────────────────────────
+
+// quiltt_webhook_inbox keeps event_id/type/timestamps forever but
+// cleanup_quiltt_inbox_payloads truncates `payload` to {_truncated_at} 30
+// days after processed_at, so only recent rows carry a readable
+// connectionId at all. Bounding the scan is therefore not a shortcut, it is
+// the honest limit of what this signal can answer: whether a SECOND LIVE
+// connection is already using the legacy row. A connection with no event in
+// the last 30 days / AMBIGUITY_SCAN_SIZE rows is not "live" in the sense
+// this fallback needs to worry about colliding with.
+const AMBIGUITY_SCAN_SIZE = 200;
+
+/**
+ * Has a Quiltt connection OTHER than connectionId already produced an event
+ * for this subaccount? quiltt_webhook_inbox has no dedicated connection-id
+ * column; connectionId lives at payload.record.id, the same place
+ * handleEvent reads it from for its own dispatch.
+ */
+async function hasOtherQuilttConnection(
+  client: SupabaseClient,
+  subaccountId: string,
+  connectionId: string,
+): Promise<{ seen: boolean; error: string | null }> {
+  const { data, error } = await client
+    .from('quiltt_webhook_inbox')
+    .select('payload')
+    .eq('subaccount_id', subaccountId)
+    .order('received_at', { ascending: false })
+    .limit(AMBIGUITY_SCAN_SIZE);
+  if (error) return { seen: false, error: `ambiguity check failed: ${error.message}` };
+  const seen = (data ?? []).some((row: { payload: any }) => {
+    const otherId = typeof row?.payload?.record?.id === 'string' ? row.payload.record.id : null;
+    return otherId !== null && otherId !== connectionId;
+  });
+  return { seen, error: null };
+}
+
+/**
+ * Create a fresh connections row for a Quiltt connectionId that turned out
+ * to be ambiguous against the legacy NULL-id row (OR-T2475). Same shape as
+ * or-quiltt-link-complete's own insert -- encrypted_credentials is NOT NULL
+ * and Quiltt holds the real bank credentials, never OR, so the sentinel is
+ * the correct value here too -- and the same insert-then-look-up pattern
+ * handleEventSinkDelivery already uses for the identical race: the partial
+ * unique index on (subaccount_id, quiltt_connection_id) can fire a
+ * concurrent 23505 if two events for the same new connection dispatch in
+ * the same tick, and that is success, not failure.
+ */
+async function createConnectionForAmbiguousMatch(
+  client: SupabaseClient,
+  subaccountId: string,
+  connectionId: string,
+): Promise<{ id: string } | string> {
+  const { error: insertErr } = await client
+    .from('connections')
+    .insert({
+      subaccount_id:           subaccountId,
+      provider_type:           'quiltt',
+      quiltt_connection_id:    connectionId,
+      encrypted_credentials:   'quiltt-managed',
+      credentials_key_version: 1,
+      status:                  'active',
+    });
+  if (insertErr && insertErr.code !== '23505') {
+    return `ambiguous-connection insert failed: ${insertErr.message}`;
+  }
+  const { data: row, error: lookupErr } = await client
+    .from('connections')
+    .select('id')
+    .eq('subaccount_id', subaccountId)
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', connectionId)
+    .maybeSingle();
+  if (lookupErr || !row) {
+    return `ambiguous-connection lookup failed after insert: ${lookupErr?.message ?? 'not found'}`;
+  }
+  return row as { id: string };
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────
@@ -1185,11 +1424,93 @@ async function bumpAttempts(client: SupabaseClient, ev: PendingEvent, rawErrMsg:
 export async function fetchPendingBatch(client: SupabaseClient, batchSize: number) {
   return client
     .from('quiltt_webhook_inbox')
-    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts')
+    .select('event_id, event_type, payload, platform_id, subaccount_id, attempts, received_at')
     .is('processed_at', null)
     .is('opk_deferred_at', null)
     .order('received_at', { ascending: true })
     .limit(batchSize);
+}
+
+/**
+ * Conditionally re-admit one retired event for an explicit operator replay.
+ *
+ * Only the two recoverable prerequisite failures tracked by OR-T0128 are
+ * eligible: a missing route, or an OR connections row that had not yet been
+ * created. The first read supplies a useful not-found/not-replayable result;
+ * the UPDATE repeats the exact retirement_reason predicate, so two concurrent
+ * replay requests cannot both claim the same event. A later request sees the
+ * now-NULL retirement_reason and becomes a no-op.
+ *
+ * attempts must return to zero before normal dispatch. Otherwise every
+ * max-attempts:mapping-missing row would immediately trip the pre-dispatch
+ * ceiling and retire again without trying the repaired prerequisite.
+ */
+export async function claimRetiredEventForReplay(
+  client: SupabaseClient,
+  eventId: string,
+): Promise<ReplayClaimResult> {
+  const columns =
+    'event_id, event_type, payload, platform_id, subaccount_id, attempts, received_at, retirement_reason, last_error';
+  const { data: retired, error: readErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select(columns)
+    .eq('event_id', eventId)
+    .maybeSingle();
+  if (readErr) {
+    return { status: 'error', event: null, error: `replay lookup failed: ${readErr.message}` };
+  }
+  if (!retired) return { status: 'not-found', event: null };
+
+  const reason = typeof retired.retirement_reason === 'string'
+    ? retired.retirement_reason
+    : null;
+  if (!reason) return { status: 'not-retired', event: null };
+
+  // Historical rows reached the same terminal state through more than one
+  // generation of wording. Match the stable failure names in either audit
+  // field, including the pre-dispatch cap whose reason itself did not retain
+  // the underlying mapping error.
+  const retirementEvidence = `${reason}\n${typeof retired.last_error === 'string' ? retired.last_error : ''}`
+    .toLowerCase();
+  const replayable =
+    retirementEvidence.includes('mapping-missing') ||
+    retirementEvidence.includes('connection-not-yet-created') ||
+    retirementEvidence.includes('connection not yet created') ||
+    retirementEvidence.includes('connection row not yet created') ||
+    retirementEvidence.includes('connection row never created') ||
+    retirementEvidence.includes('deferred-conn-race');
+  if (!replayable) return { status: 'not-replayable', event: null };
+
+  const { data: claimed, error: claimErr } = await client
+    .from('quiltt_webhook_inbox')
+    .update({
+      processed_at:      null,
+      retirement_reason: null,
+      attempts:          0,
+      last_error:        null,
+      opk_deferred_at:   null,
+    })
+    .eq('event_id', eventId)
+    .eq('retirement_reason', reason)
+    .select(columns)
+    .maybeSingle();
+  if (claimErr) {
+    return { status: 'error', event: null, error: `replay claim failed: ${claimErr.message}` };
+  }
+  if (!claimed) return { status: 'not-retired', event: null };
+
+  return {
+    status: 'claimed',
+    event: {
+      event_id:      claimed.event_id,
+      event_type:    claimed.event_type,
+      payload:       claimed.payload,
+      platform_id:   claimed.platform_id,
+      subaccount_id: claimed.subaccount_id,
+      attempts:      claimed.attempts,
+      received_at:   claimed.received_at,
+    },
+  };
 }
 
 export async function markDeferred(client: SupabaseClient, eventId: string) {
@@ -1197,6 +1518,47 @@ export async function markDeferred(client: SupabaseClient, eventId: string) {
     .from('quiltt_webhook_inbox')
     .update({ opk_deferred_at: new Date().toISOString() })
     .eq('event_id', eventId);
+}
+
+/**
+ * True once a 'deferred-conn-race' event has been waiting longer than
+ * CONN_RACE_MAX_AGE_MS for or-quiltt-link-complete to create its connections
+ * row. Pure function of receivedAt so it needs no client and no mock to test
+ * (OR-T1902): the connections row either appears within seconds/minutes of
+ * the webhook, or the browser callback never fired and it never will.
+ * Fail-safe: a missing or unparseable receivedAt returns false (keep
+ * deferring) rather than risk retiring an event we cannot actually age.
+ */
+export function shouldRetireConnRace(receivedAt: string | null | undefined, nowMs: number = Date.now()): boolean {
+  if (!receivedAt) return false;
+  const ageMs = nowMs - new Date(receivedAt).getTime();
+  return Number.isFinite(ageMs) && ageMs >= CONN_RACE_MAX_AGE_MS;
+}
+
+/**
+ * Retire a 'deferred-conn-race' event that aged out without the connections
+ * row ever appearing. Deliberately does NOT go through bumpAttempts: this is
+ * an age-based retirement, not an attempts-based one, and last_error is left
+ * untouched so it still shows the original dispatch failure if one was ever
+ * recorded, same reasoning as the pre-dispatch cap guard above.
+ */
+export async function retireConnRace(client: SupabaseClient, eventId: string) {
+  const { error } = await client
+    .from('quiltt_webhook_inbox')
+    .update({
+      processed_at:      new Date().toISOString(),
+      retirement_reason: 'or-connection row never created (DL-1414-C)',
+    })
+    .eq('event_id', eventId);
+  if (error) {
+    console.error(
+      `[or-quiltt-sync] event ${eventId}: conn-race retirement UPDATE failed: ${error.message}`,
+    );
+  } else {
+    console.warn(
+      `[or-quiltt-sync] event ${eventId}: retired after ${Math.round(CONN_RACE_MAX_AGE_MS / 3_600_000)}h+ with no connections row created`,
+    );
+  }
 }
 
 /**

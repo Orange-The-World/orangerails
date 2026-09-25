@@ -1,0 +1,45 @@
+name: Workflow files parse
+
+on:
+  # DELIBERATELY UNFILTERED, same reasoning as repo-hygiene.yml: a paths
+  # filter would silence this check on any pull request that does not touch
+  # .github/workflows, and a required check that never reports looks exactly
+  # like one that passed.
+  pull_request:
+  push:
+    branches: [dev, prod]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: the job only reads the tree.
+permissions:
+  contents: read
+
+jobs:
+  validate-workflow-files:
+    name: Workflow files parse
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PyYAML
+        # Pinned on purpose. A floating parser version would let a new
+        # release change what this check accepts without anyone deciding to.
+        run: python3 -m pip install --quiet --disable-pip-version-check pyyaml==6.0.2
+
+      - name: Validate every file in .github/workflows
+        # Fails the check when a workflow file does not parse, or when a job
+        # names a dependency in needs that is not a job in the same file.
+        # Both of those make GitHub refuse to run the workflow, which shows
+        # up as a run with zero jobs rather than as a red check.
+        run: python3 scripts/validate-workflows.py
