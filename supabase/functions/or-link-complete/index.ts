@@ -53,7 +53,14 @@
  *     subaccount_id, connection_id,
  *     source_wallets: [{ id, external_wallet_id, submitted_external_wallet_id }, ...],
  *     // Backward-compat: if exactly one wallet was created, also return source_wallet_id.
- *     source_wallet_id?: string
+ *     source_wallet_id?: string,
+ *     // OR-T0328: whether subaccounts.opk_public is set for this subaccount, and how
+ *     // many quiltt_webhook_inbox rows are currently parked for lack of one. Neither
+ *     // field refuses the connection; they let the integrator's own code notice a
+ *     // missing background-sync key at connect time instead of only when sync parks
+ *     // something and nobody is watching.
+ *     opk_registered: boolean,
+ *     parked_item_count: number
  *   }
  *
  * The two ids on a returned wallet are NOT interchangeable:
@@ -367,13 +374,17 @@ Deno.serve(
       let subaccountWasNewlyCreated = false;
       const { data: existingSub } = await serviceClient
         .from("subaccounts")
-        .select("id")
+        .select("id, opk_public")
         .eq("platform_id", platform.id)
         .eq("external_user_id", body.app_user_id)
         .maybeSingle();
 
+      // OR-T0328: a subaccount that already existed may already have an OPK
+      // registered; a subaccount minted below by this call never does yet.
+      let opkRegisteredAtConnect = false;
       if (existingSub) {
         subaccountId = existingSub.id as string;
+        opkRegisteredAtConnect = existingSub.opk_public != null;
       } else {
         // Common integrator footgun: passing OR's internal subaccount UUID
         // here instead of the platform's external user id. We can't tell
@@ -413,6 +424,18 @@ Deno.serve(
         subaccountId = createdSub.id as string;
         subaccountWasNewlyCreated = true;
       }
+
+      // DL-1268 / OR-T0328: count of quiltt_webhook_inbox rows currently
+      // parked for this subaccount (deferred for lack of an OPK, not yet
+      // processed), so the integrator can see the number at connection
+      // time and watch it rise rather than discover parking only when a
+      // customer complains. Same filter the re-drive block below uses.
+      const { count: parkedItemCount } = await serviceClient
+        .from("quiltt_webhook_inbox")
+        .select("id", { count: "exact", head: true })
+        .eq("subaccount_id", subaccountId)
+        .is("processed_at", null)
+        .not("opk_deferred_at", "is", null);
 
       // Atomic connect flow (audit 2026-05-21 finding N6): when
       // ATOMIC_CONFIRM_REQUIRED=true the consumer must call
@@ -587,6 +610,8 @@ Deno.serve(
             source_wallets: reconnected,
             source_wallet_id: reconnected.length === 1 ? reconnected[0].id : undefined,
             subaccount_was_newly_created: subaccountWasNewlyCreated,
+            opk_registered: opkRegisteredAtConnect,
+            parked_item_count: parkedItemCount ?? 0,
           },
           200,
           cors,
@@ -868,6 +893,12 @@ Deno.serve(
           // setup -- was this intentional?" instead of silently piling up
           // orphan subaccounts.
           subaccount_was_newly_created: subaccountWasNewlyCreated,
+          // OR-T0328: whether this subaccount has a background-sync seal key
+          // (OPK) registered, and how many inbox rows are parked for lack of
+          // one. False/nonzero does not mean anything is broken by itself,
+          // it means the integrator has not called or-sync-key-register yet.
+          opk_registered: opkRegisteredAtConnect,
+          parked_item_count: parkedItemCount ?? 0,
         },
         200,
         cors,

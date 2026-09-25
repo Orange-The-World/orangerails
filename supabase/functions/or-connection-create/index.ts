@@ -14,7 +14,14 @@
  *   encrypted_credentials: string  base64 AES-256-GCM (ORK-encrypted)
  *
  * Response:
- *   { connection_id: uuid }
+ *   {
+ *     connection_id: uuid,
+ *     // OR-T0328: same fields as or-link-complete. Not a refusal, just a
+ *     // flag: false / nonzero means the integrator has not called
+ *     // or-sync-key-register for this subaccount yet.
+ *     opk_registered: boolean,
+ *     parked_item_count: number,
+ *   }
  */
 
 import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
@@ -77,7 +84,30 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'DatabaseError', code: insErr?.code ?? 'unknown' }, 500, cors);
     }
 
-    return jsonResponse({ connection_id: created.id as string }, 200, cors);
+    // OR-T0328: flag, do not refuse, a subaccount with no background-sync
+    // seal key (OPK) registered, and report how many quiltt_webhook_inbox
+    // rows are parked for it right now. Read-only, no key material touched.
+    const { data: opkRow } = await ctx.serviceClient
+      .from('subaccounts')
+      .select('opk_public')
+      .eq('id', subaccountId)
+      .maybeSingle();
+    const { count: parkedItemCount } = await ctx.serviceClient
+      .from('quiltt_webhook_inbox')
+      .select('id', { count: 'exact', head: true })
+      .eq('subaccount_id', subaccountId)
+      .is('processed_at', null)
+      .not('opk_deferred_at', 'is', null);
+
+    return jsonResponse(
+      {
+        connection_id: created.id as string,
+        opk_registered: opkRow?.opk_public != null,
+        parked_item_count: parkedItemCount ?? 0,
+      },
+      200,
+      cors,
+    );
   } catch (err) {
     console.error('[or-connection-create] fatal:', err);
     await reportError(err, 'or-connection-create', req);
