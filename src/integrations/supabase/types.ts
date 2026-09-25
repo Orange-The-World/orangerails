@@ -1540,6 +1540,7 @@ export type Database = {
           last_sync_at: string | null
           last_sync_attempt_at: string | null
           platform_id: string
+          scan_generation: string
           sealed_envelope: Json
           status: string
           updated_at: string
@@ -1556,6 +1557,7 @@ export type Database = {
           last_sync_at?: string | null
           last_sync_attempt_at?: string | null
           platform_id: string
+          scan_generation?: string
           sealed_envelope: Json
           status?: string
           updated_at?: string
@@ -1572,6 +1574,7 @@ export type Database = {
           last_sync_at?: string | null
           last_sync_attempt_at?: string | null
           platform_id?: string
+          scan_generation?: string
           sealed_envelope?: Json
           status?: string
           updated_at?: string
