@@ -148,6 +148,7 @@ export type StagedImportPayload = {
     contacts?: V3StagedRow[];
     journalEntries?: V3StagedRow[];
     lightning?: LNSettledInvoice[];
+    trades?: StagedTrade[];
   };
 
   /**
@@ -167,6 +168,48 @@ export type StagedImportPayload = {
       }
     >;
   };
+};
+
+/**
+ * A trade that moved fiat and bitcoin in the same transaction.
+ *
+ * Staged raw rather than as journal-entry rows, for the same reason
+ * `lightning` is: a trade has two sides and one V3StagedRow carries a single
+ * debit/credit pair, so a connector that emitted one side of a purchase would
+ * silently misstate the entry. The connector stages the facts it can see and
+ * V3 finishes the mapping, where the counter-account is known.
+ *
+ * Every amount is a raw signed decimal string exactly as the provider wrote
+ * it. No rounding, no sign flipping, no currency conversion happens here.
+ */
+export type StagedTrade = {
+  /** ISO-style date, YYYY-MM-DD. */
+  date: string;
+  /** Provider's own label for the transaction, e.g. 'Purchase', 'Sale'. */
+  kind: string;
+  /** Signed bitcoin amount. Negative when bitcoin left the account. */
+  btcAmount: string;
+  /** Signed fiat amount. Negative when fiat left the account. */
+  fiatAmount: string;
+  /** ISO-4217 code of the fiat leg, e.g. 'EUR'. Varies per account. */
+  fiatCurrency: string;
+  /** Fiat price of one bitcoin at the time, if the provider reported one. */
+  btcPrice?: string;
+  /** Provider's reported cost basis, in the fiat currency. */
+  costBasis?: string;
+  btcFee?: string;
+  fiatFee?: string;
+  /** Provider's own reference. NOT assumed unique, see dedupKey. */
+  reference?: string;
+  /**
+   * Stable identity for this transaction, used to collapse the same row
+   * arriving from two overlapping exports. Not the provider's reference:
+   * providers reuse those across the lifecycle of one order.
+   */
+  dedupKey: string;
+  txHash?: string;
+  memo?: string;
+  note?: string;
 };
 
 /**
@@ -201,6 +244,10 @@ export function assertStagedImportPayload(value: unknown): asserts value is Stag
     if (arr !== undefined && !Array.isArray(arr)) {
       throw new Error(`Staged import: staged.${key} must be an array if present.`);
     }
+  }
+  const trades = staged.trades;
+  if (trades !== undefined && !Array.isArray(trades)) {
+    throw new Error('Staged import: staged.trades must be an array if present.');
   }
   const lightning = staged.lightning;
   if (lightning !== undefined) {
