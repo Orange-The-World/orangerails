@@ -177,6 +177,62 @@ Deno.test('OR-T0999: isSealedTx accepts transaction WITHOUT block_hash_hex (pre-
   }), 'isSealedTx must accept a transaction without block_hash_hex (OR-T0407: NULL is unverifiable, not an error)');
 });
 
+// ── OR-C2078: block_hash_hex must be validated server-side, not just by the
+// client (fetchFilterPair in sync.ts). Before this fix any string, including
+// an uppercase or otherwise malformed hash, passed isSealedTx and was stored
+// verbatim as block_hash. Because the canonical hash the reorg check compares
+// against is always lowercased, that permanently mismatches a well-formed but
+// wrong-case hash and orphans a real transaction with no self-heal path.
+
+Deno.test('OR-C2078: isSealedTx rejects UPPERCASE block_hash_hex', () => {
+  assert(!isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'aWQ=',
+    ciphertext_b64: 'Y2lwaGVydGV4dA==',
+    occurred_at: '2026-09-22',
+    block_height: 900050,
+    txid_blind_index_hex: 'a'.repeat(64),
+    block_hash_hex: 'B'.repeat(64),
+  }), 'uppercase block_hash_hex must fail isSealedTx, not be stored verbatim');
+});
+
+Deno.test('OR-C2078: isSealedTx rejects mixed-case block_hash_hex', () => {
+  assert(!isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'aWQ=',
+    ciphertext_b64: 'Y2lwaGVydGV4dA==',
+    occurred_at: '2026-09-22',
+    block_height: 900050,
+    txid_blind_index_hex: 'a'.repeat(64),
+    block_hash_hex: 'aB'.repeat(32),
+  }), 'mixed-case block_hash_hex must fail isSealedTx');
+});
+
+Deno.test('OR-C2078: isSealedTx rejects short or non-hex block_hash_hex', () => {
+  assert(!isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'aWQ=',
+    ciphertext_b64: 'Y2lwaGVydGV4dA==',
+    occurred_at: '2026-09-22',
+    block_height: 900050,
+    txid_blind_index_hex: 'a'.repeat(64),
+    block_hash_hex: 'not-a-hash',
+  }), 'malformed block_hash_hex must fail isSealedTx');
+  assert(!isSealedTx({
+    version: 1,
+    algorithm: 'AES-256-GCM',
+    iv_b64: 'aWQ=',
+    ciphertext_b64: 'Y2lwaGVydGV4dA==',
+    occurred_at: '2026-09-22',
+    block_height: 900050,
+    txid_blind_index_hex: 'a'.repeat(64),
+    block_hash_hex: 'a'.repeat(63),
+  }), 'short block_hash_hex (63 chars) must fail isSealedTx');
+});
+
 Deno.test('DL-0608: or-stealth-transactions-store -- cuids pass isValidAppUserId', () => {
   // or-stealth-transactions-store/index.ts: validator extracted to isValidAppUserId.
   // Reimplementing the check inline instead would not catch a revert.

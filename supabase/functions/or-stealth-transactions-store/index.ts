@@ -155,6 +155,15 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // value the dedup constraint would treat as a distinct transaction forever.
 const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
 
+// block_hash_hex, when present, must be exactly 64 lowercase hex chars, the
+// same shape a real block hash always has and the shape fetchCanonicalBlockHash
+// always lowercases to on the read side. Rejecting anything else here (not
+// just on the client) closes OR-C2078: an uppercase or malformed hash stored
+// verbatim would permanently fail a case-sensitive compare against the
+// always-lowercase canonical hash and orphan a real transaction with no
+// self-heal path, since the reorg check filters out already-orphaned rows.
+const BLOCK_HASH_HEX_RE = /^[0-9a-f]{64}$/;
+
 // Cap at 10k transactions per request and 16 KB per sealed record. A whole
 // 5-year wallet history with ~500 txs comes in well under that.
 const MAX_TX_PER_REQUEST = 10_000;
@@ -179,7 +188,13 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
     Number.isInteger(o.block_height) &&
     (o.block_height as number) >= 0 &&
     typeof o.txid_blind_index_hex === 'string' &&
-    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string)
+    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string) &&
+    // block_hash_hex is optional (pre-hash records, OR-T0407), but when the
+    // caller sends one it must be well-formed lowercase hex. Any other shape
+    // fails the whole record rather than being stored verbatim (OR-C2078).
+    (o.block_hash_hex === undefined ||
+      (typeof o.block_hash_hex === 'string' &&
+        BLOCK_HASH_HEX_RE.test(o.block_hash_hex as string)))
   );
 }
 
