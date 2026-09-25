@@ -129,6 +129,19 @@ interface TransactionsStoreRequestBody {
    * in-run matcher instead of starting from an empty UTXO map.
    */
   sealed_utxos?: SealedUtxosInput;
+  /**
+   * Raw chain tip height (before the CONFIRMATION_DEPTH=6 buffer) at the time
+   * of this sync. When present, triggers the server-side reorg detector:
+   * every stored transaction for this connection within REORG_LOOKBACK=100
+   * blocks of this tip that has block_hash set and orphaned_at null is
+   * re-checked against the canonical chain. On a hash mismatch, orphaned_at
+   * is stamped and the transaction stops appearing in balances and lists.
+   *
+   * Absent on calls from older widget bundles; the detector silently skips
+   * and the row will be re-checked on the next sync from a bundle that sends
+   * this field.
+   */
+  chain_tip?: number;
 }
 
 interface TransactionsStoreResponseBody {
@@ -145,6 +158,12 @@ interface TransactionsStoreResponseBody {
    * this failure.
    */
   utxo_persist_failed?: boolean;
+  /**
+   * Number of transactions the reorg detector marked orphaned in this call.
+   * Present only when chain_tip was supplied and the detector ran.
+   * Zero means the detector ran and found no hash mismatches.
+   */
+  orphaned_count?: number;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -238,6 +257,75 @@ export function deriveResponseCursor(
   const candidate = boundCursorAdvance(maxBlockInserted, clientContiguousScanned);
   const advanced = inserted > 0 && candidate > (storedCursor ?? -1);
   return advanced ? candidate : storedCursor;
+}
+
+/**
+ * How far back the server-side reorg detector looks from the raw chain tip.
+ * Must not be collapsed with CONFIRMATION_DEPTH=6 (the prevention half).
+ * This is the detection half, and the two values being an order of magnitude
+ * apart is what makes them independent lines of defence: the single event
+ * that defeats the buffer is not also the event that defeats the detector.
+ *
+ * Defined here with its callers below, never as a bare export.
+ */
+const REORG_LOOKBACK = 100;
+
+/**
+ * Sidecar shape returned by stealth.orangerails.com/HEIGHT.json.
+ * Only the field the detector needs; extra fields are ignored.
+ */
+interface FilterSidecar {
+  block_hash?: string;
+}
+
+/**
+ * Fetch the canonical block hash for the given height from the stealth filter
+ * producer. Returns lowercase 64-char hex, or null on any failure (network
+ * error, non-200, unexpected shape). Null causes the detector to skip the row
+ * and retry on the next sync rather than spuriously orphaning a real tx.
+ */
+export async function fetchCanonicalBlockHash(height: number): Promise<string | null> {
+  try {
+    const resp = await fetch(`https://stealth.orangerails.com/${height}.json`);
+    if (!resp.ok) return null;
+    const sidecar = (await resp.json()) as FilterSidecar;
+    const h = sidecar.block_hash;
+    if (typeof h !== 'string' || !/^[0-9a-f]{64}$/i.test(h)) return null;
+    return h.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Given stored transaction rows and a hash-fetch function, returns the IDs of
+ * rows whose stored block_hash does not match the canonical hash (reorg).
+ *
+ * Height 0 rows are excluded. Ruling per OR-T0407: height 0 is used as a
+ * sentinel for unknown height AND is the real genesis block; both cases are
+ * unverifiable and must not produce a false orphan. On mainnet, chain_tip minus
+ * REORG_LOOKBACK is always far above 0, so this exclusion is never hit in
+ * production, but it is written explicitly rather than left to fall out of the
+ * query by accident.
+ *
+ * Null from fetchHash means a transient fetch failure; the row is skipped and
+ * will be re-checked on the next sync.
+ */
+export async function runReorgCheck(
+  candidates: Array<{ id: string; block_height: number; block_hash: string }>,
+  fetchHash: (height: number) => Promise<string | null>,
+): Promise<string[]> {
+  const results = await Promise.all(
+    candidates
+      .filter((r) => r.block_height > 0)
+      .map(async (r) => {
+        const canonical = await fetchHash(r.block_height);
+        if (canonical === null) return null; // transient failure: skip, retry next sync
+        if (canonical !== r.block_hash.toLowerCase()) return r.id; // mismatch: reorg
+        return null; // match: still canonical
+      }),
+  );
+  return results.filter((id): id is string => id !== null);
 }
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -505,6 +593,58 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       maxBlockInserted,
       body.last_block_scanned,
     );
+    // ─── Reorg detector (OR-T0999 Part 3) ────────────────────────────────
+    //
+    // On every sync where chain_tip is supplied, re-check every stored
+    // transaction for this connection that has block_hash set, orphaned_at
+    // null, and block_height within REORG_LOOKBACK=100 blocks of the raw
+    // tip. A canonical-hash mismatch means the block was reorganised out;
+    // stamp orphaned_at so the tx stops appearing in balances and lists.
+    //
+    // Non-fatal: the sealed transactions are already committed. Log and
+    // continue; the row will be re-checked on the next sync.
+    let reorg_orphaned_count: number | undefined;
+    if (
+      body.chain_tip !== undefined &&
+      typeof body.chain_tip === 'number' &&
+      Number.isInteger(body.chain_tip) &&
+      body.chain_tip > 0
+    ) {
+      const lookbackFloor = Math.max(1, body.chain_tip - REORG_LOOKBACK);
+      const { data: reorgCandidates, error: reorgErr } = await ctx.serviceClient
+        .from('stealth_transactions')
+        .select('id, block_height, block_hash')
+        .eq('connection_id', body.connection_id)
+        .gte('block_height', lookbackFloor)
+        .lte('block_height', body.chain_tip)
+        .is('orphaned_at', null)
+        .not('block_hash', 'is', null);
+      if (reorgErr) {
+        console.error('[or-stealth-transactions-store] reorg candidate query failed:', reorgErr);
+      } else {
+        const candidateList = (reorgCandidates ?? []) as Array<{
+          id: string;
+          block_height: number;
+          block_hash: string;
+        }>;
+        const orphanIds = await runReorgCheck(candidateList, fetchCanonicalBlockHash);
+        if (orphanIds.length > 0) {
+          const { error: orphanMarkErr } = await ctx.serviceClient
+            .from('stealth_transactions')
+            .update({ orphaned_at: new Date().toISOString() })
+            .in('id', orphanIds)
+            .is('orphaned_at', null); // idempotent: never overwrite an existing stamp
+          if (orphanMarkErr) {
+            console.error('[or-stealth-transactions-store] orphan mark failed:', orphanMarkErr);
+          } else {
+            reorg_orphaned_count = orphanIds.length;
+          }
+        } else {
+          reorg_orphaned_count = 0;
+        }
+      }
+    }
+
     const resp: TransactionsStoreResponseBody = {
       connection_id: body.connection_id,
       inserted,
@@ -512,6 +652,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       skipped_duplicates,
       last_block_scanned: effectiveCursor,
       ...(utxo_persist_failed ? { utxo_persist_failed: true } : {}),
+      ...(reorg_orphaned_count !== undefined ? { orphaned_count: reorg_orphaned_count } : {}),
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {
