@@ -345,9 +345,22 @@ export interface AdminSubkeys {
  * so nothing here ever constructs it.
  */
 export class CoAdminGrantIncompleteError extends Error {
-  constructor(message: string) {
+  /**
+   * True when this was thrown because the recipient already has a stored,
+   * unverified-but-present key (the wrapped_data_keys 23505 case), false for
+   * a genuine incomplete write. The message text already differs between the
+   * two, but a caller should never have to parse prose to decide whether
+   * there is real access to protect. See app.tsx's onSubmit handler and
+   * OR-C2088: treating both cases the same let "Remove from list" clear an
+   * already-granted co-admin off the owner's visible list while their real,
+   * working key stayed untouched underneath.
+   */
+  readonly alreadyGranted: boolean;
+
+  constructor(message: string, alreadyGranted: boolean = false) {
     super(message);
     this.name = "CoAdminGrantIncompleteError";
+    this.alreadyGranted = alreadyGranted;
   }
 }
 
@@ -450,6 +463,7 @@ export async function persistCoAdminGrant(params: {
           "grant attempt whose confirmation was lost. Nothing was changed just now. If you are not " +
           "sure it is current, remove them and grant again: removing deletes the stored key before " +
           "anything is re-granted, so the replacement is never in doubt.",
+        true,
       );
     }
     throw new CoAdminGrantIncompleteError(
