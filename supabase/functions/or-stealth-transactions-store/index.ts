@@ -360,7 +360,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // below knows the stored cursor without a second round trip.
     const { data: ownerRow, error: ownerErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .select('id, app_user_id, last_block_scanned')
+      .select('id, app_user_id, last_block_scanned, scan_generation')
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id)
       .maybeSingle();
