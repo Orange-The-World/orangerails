@@ -59,7 +59,7 @@ import { wrapSentryHandler } from '../_shared/sentry.ts';
  * is prevention, this is detection, and they must not fail for the same reason.
  * See the module comment for the full rationale before changing this number.
  */
-export const REORG_LOOKBACK_BLOCKS = 100;
+export const REORG_LOOKBACK_BLOCKS: number = 100;
 
 // Value must be set in Supabase function config. If unset the function
 // degrades gracefully: fetchCanonicalBlockHash returns null and rows are
