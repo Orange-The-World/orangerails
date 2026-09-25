@@ -192,25 +192,26 @@ async function readHandoffKeysFromFragment(): Promise<HandoffKeys | null> {
  * vault password BEFORE the user fills the credential form), we
  * postMessage `or-need-cred-key` to window.opener after the user
  * clicks Save and wait for the parent to reply with `or-cred-key-ready`
- * carrying a base64 32-byte AES-256-GCM key.
+ * carrying a base64 32-byte AES-256-GCM key, plus an optional second
+ * distinct key for wallet metadata.
+ *
+ * The plaintext vault password never travels on this channel, in either
+ * direction. The parent app is responsible for prompting its own user
+ * and deriving the key on its own side (OR-T2704).
  */
-async function requestHandoffKeysFromParent(
-  /** When supplied, the vault password is forwarded to the parent so it
-   *  can derive the cred_key immediately without prompting a separate
-   *  modal. Omit to preserve the legacy two-step flow. */
-  password?: string,
-): Promise<HandoffKeys> {
+const CRED_KEY_HANDOFF_PURPOSE = "cred_key_handoff";
+
+async function requestHandoffKeysFromParent(): Promise<HandoffKeys> {
   const opener = window.opener as Window | null;
   if (!opener || opener.closed) {
     throw new Error("Lost connection to the host app , please close this window and try again.");
   }
 
   // The cred_key is the user's vault-unlock AES key. We refuse to send the
-  // "or-need-cred-key" handshake (which may carry the vault password) OR
-  // accept the "or-cred-key-ready" reply (which carries the key itself)
-  // unless we can pin a concrete opener origin. Falling back to "*" would
-  // let any window in the tab tree receive the password or supply a
-  // forged key.
+  // "or-need-cred-key" handshake OR accept the "or-cred-key-ready" reply
+  // (which carries the key itself) unless we can pin a concrete opener
+  // origin. Falling back to "*" would let any window in the tab tree
+  // receive the request or supply a forged key.
   const openerOrigin = (() => {
     if (!document.referrer) return null;
     try {
@@ -233,6 +234,12 @@ async function requestHandoffKeysFromParent(
       const data = event.data as unknown;
       if (!data || typeof data !== "object") return;
       if ((data as { type?: unknown }).type !== "or-cred-key-ready") return;
+      // purpose correlates this reply with the request we sent. Older
+      // parents that do not echo it back are still accepted (undefined),
+      // but a reply carrying a DIFFERENT purpose is not ours and must be
+      // ignored rather than misread as our key.
+      const purpose = (data as { purpose?: unknown }).purpose;
+      if (purpose !== undefined && purpose !== CRED_KEY_HANDOFF_PURPOSE) return;
       const credKeyB64 = (data as { credKey?: unknown }).credKey;
       if (typeof credKeyB64 !== "string" || credKeyB64.length === 0) {
         cleanup();
@@ -245,8 +252,27 @@ async function requestHandoffKeysFromParent(
           throw new Error("Host app returned a key of the wrong size (expected 32 bytes).");
         }
         const credKey = await importAesKey(bytes.buffer as ArrayBuffer);
+
+        // txn_key is optional here, same contract as the fragment handoff
+        // (readHandoffKeysFromFragment): when the parent supplies a
+        // distinct key for wallet metadata, import and use it. This must
+        // stay a real conditional import, not a hardcoded alias, or a
+        // parent that DOES send a separate txn_key silently loses the key
+        // separation it asked for.
+        const txnKeyB64 = (data as { txnKey?: unknown }).txnKey;
+        let txnKey: CryptoKey;
+        if (typeof txnKeyB64 === "string" && txnKeyB64.length > 0) {
+          const txnBytes = base64ToBytes(txnKeyB64);
+          if (txnBytes.length !== 32) {
+            throw new Error("Host app returned a txn_key of the wrong size (expected 32 bytes).");
+          }
+          txnKey = await importAesKey(txnBytes.buffer as ArrayBuffer);
+        } else {
+          txnKey = credKey;
+        }
+
         cleanup();
-        resolve({ credKey, txnKey: credKey, credKeyB64 });
+        resolve({ credKey, txnKey, credKeyB64 });
       } catch (err) {
         cleanup();
         reject(err);
@@ -261,11 +287,13 @@ async function requestHandoffKeysFromParent(
       window.removeEventListener("message", onMessage);
     }
     window.addEventListener("message", onMessage);
-    // Include the password when the inline vault-password field is used,
-    // so the parent can derive the key without showing its own modal.
-    const msg: Record<string, unknown> = { type: "or-need-cred-key" };
-    if (password) msg.password = password;
-    opener.postMessage(msg, openerOrigin);
+    // purpose tells the receiving side which key exchange this is. The
+    // plaintext vault password is never put on this message, in any code
+    // path: the parent must prompt its own user and derive the key itself.
+    opener.postMessage(
+      { type: "or-need-cred-key", purpose: CRED_KEY_HANDOFF_PURPOSE },
+      openerOrigin,
+    );
   });
 }
 
@@ -1340,9 +1368,7 @@ function ConnectPageInner() {
       });
       if (!handoff && deferActive) {
         try {
-          handoff = await requestHandoffKeysFromParent(
-            vaultPassword.length > 0 ? vaultPassword : undefined,
-          );
+          handoff = await requestHandoffKeysFromParent();
         } catch (err) {
           setError(
             err instanceof Error ? err.message : "Could not get the unlock key from the host app.",
@@ -1537,7 +1563,11 @@ function ConnectPageInner() {
           onValueChange={(name, value) => setFormValues((prev) => ({ ...prev, [name]: value }))}
           connectionLabel={connectionLabel}
           onConnectionLabelChange={setConnectionLabel}
-          showVaultPassword={initialDeferCredKey || search.defer_cred_key === "1"}
+          // Disabled: OR-T2704 removed password forwarding from the
+          // or-need-cred-key postMessage, so typing it here no longer does
+          // anything. The parent app must show its own unlock prompt in
+          // the deferred-cred-key flow.
+          showVaultPassword={false}
           vaultPassword={vaultPassword}
           onVaultPasswordChange={setVaultPassword}
           onContinue={handleContinueFromCredentials}
@@ -1706,9 +1736,11 @@ function EnterCredentialsStep({
   onValueChange: (name: string, value: string) => void;
   connectionLabel: string;
   onConnectionLabelChange: (value: string) => void;
-  /** When true, renders an inline vault password field so the parent app
-   *  can skip its own modal and derive the encryption key from the
-   *  password forwarded via postMessage. */
+  /** When true, renders an inline vault password field. As of OR-T2704 the
+   *  password is never forwarded to the parent app (it must show its own
+   *  unlock prompt), so this is currently always passed false. Left as a
+   *  prop rather than deleted so the deferred-cred-key rendering branch
+   *  does not need to change shape. */
   showVaultPassword?: boolean;
   vaultPassword?: string;
   onVaultPasswordChange?: (value: string) => void;
