@@ -273,3 +273,48 @@ describe("a duplicate key row is reported, never silently replaced (OR-E0015)", 
     expect((err as Error).message).toContain("row-level security");
   });
 });
+
+describe("alreadyGranted is the contract the caller branches on (OR-T1942 / OR-C2088)", () => {
+  // app.tsx's onSubmit handler cannot afford to parse error prose to decide
+  // whether there is a real, working grant underneath. It reads
+  // err.alreadyGranted and, only when it is false, offers the "Remove this
+  // incomplete co-admin?" dialog. Get this flag wrong in either direction and
+  // that dialog either reappears for an already-granted recipient (letting
+  // "Remove from list" orphan their real access, OR-C2088's finding) or stops
+  // appearing for a genuinely incomplete grant (leaving the owner with no way
+  // to clear a dead list entry).
+  it("is true only for the duplicate wrapped_data_keys row", async () => {
+    const { client } = makeFakeClient({
+      errors: { wrapped_data_keys: WRAPPED_KEY_UNIQUE_VIOLATION },
+    });
+
+    const err = (await rejection(persist(client))) as CoAdminGrantIncompleteError;
+
+    expect(err.alreadyGranted).toBe(true);
+  });
+
+  it("is false for a non-duplicate key failure", async () => {
+    const { client } = makeFakeClient({
+      errors: {
+        wrapped_data_keys: {
+          code: "42501",
+          message: "new row violates row-level security policy for table wrapped_data_keys",
+        },
+      },
+    });
+
+    const err = (await rejection(persist(client))) as CoAdminGrantIncompleteError;
+
+    expect(err.alreadyGranted).toBe(false);
+  });
+
+  it("is false for a lost-response / network-error incomplete write", async () => {
+    const { client } = makeFakeClient({
+      errors: { wrapped_data_keys: { message: "network error" } },
+    });
+
+    const err = (await rejection(persist(client))) as CoAdminGrantIncompleteError;
+
+    expect(err.alreadyGranted).toBe(false);
+  });
+});
