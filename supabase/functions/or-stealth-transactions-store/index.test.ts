@@ -16,6 +16,7 @@
 import {
   assertEquals,
   assert,
+  assertNotEquals,
   assertStrictEquals,
 } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import {
@@ -449,8 +450,10 @@ const FRESH_GEN   = '33333333-3333-3333-3333-333333333333';
 Deno.test('OR-T2457: scan_generation is required and must be a uuid (400 path)', () => {
   // These are the three shapes that trigger the 400 guard in the handler:
   //   if (!body.scan_generation || !UUID_RE.test(body.scan_generation))
-  assert(!undefined, 'absent scan_generation is falsy -> 400 guard fires');
-  assert(!(''), 'empty string is falsy -> 400 guard fires');
+  // undefined and '' are caught by the falsy branch (!body.scan_generation);
+  // non-uuid strings are caught by the regex branch. Asserting !undefined or
+  // !'' directly triggers TS2873 (always-falsy operand) -- test the regex
+  // branch instead, which exercises the only non-trivial path.
   assert(
     !UUID_RE_FOR_TEST.test('not-a-uuid'),
     'non-uuid string fails UUID_RE -> 400 guard fires',
@@ -472,9 +475,9 @@ Deno.test('OR-T2457: a stale scan_generation (stored != supplied) triggers 409, 
   const storedAfterReset  = FRESH_GEN;  // what the reset wrote
   const suppliedByStale   = VALID_GEN;  // what the pre-reset sync carries
 
-  assertEquals(
-    storedAfterReset !== suppliedByStale,
-    true,
+  assertNotEquals(
+    storedAfterReset,
+    suppliedByStale,
     'stored and supplied differ after a reset -> 409 condition is true',
   );
 
@@ -489,9 +492,9 @@ Deno.test('OR-T2457: a stale scan_generation (stored != supplied) triggers 409, 
 
   // A stale generation heading to the WRONG token (impossible in practice
   // but tests that the predicate is directional, not just "any mismatch").
-  assertEquals(
-    STALE_GEN !== VALID_GEN,
-    true,
+  assertNotEquals(
+    STALE_GEN,
+    VALID_GEN,
     'STALE_GEN and VALID_GEN differ -> fence fires for this case too',
   );
 });
