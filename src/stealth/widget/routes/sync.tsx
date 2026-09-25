@@ -590,12 +590,21 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             chain_tip: result.lastBlockScanned,
           };
           try {
-            const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-            if (init.access_token) headers['Authorization'] = `Bearer ${init.access_token}`;
-            await fetch(
-              resolveFunctionUrl('or-stealth-reorg-check', init.proxy_base_url),
-              { method: 'POST', headers, body: JSON.stringify(reorgBody) },
-            );
+            if (init.proxy_base_url && parent) {
+              await proxyFetch({
+                parent,
+                parentOrigin: init.return_callback_origin,
+                fn: 'or-stealth-reorg-check',
+                body: reorgBody,
+              });
+            } else {
+              const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+              if (init.access_token) headers['Authorization'] = `Bearer ${init.access_token}`;
+              await fetch(
+                resolveFunctionUrl('or-stealth-reorg-check', init.proxy_base_url),
+                { method: 'POST', headers, body: JSON.stringify(reorgBody) },
+              );
+            }
           } catch (reorgErr) {
             console.warn('[stealth/sync] reorg check failed (non-fatal):', reorgErr);
           }
