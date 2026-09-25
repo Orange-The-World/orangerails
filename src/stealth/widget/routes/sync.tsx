@@ -25,9 +25,10 @@
 import { useEffect, useState } from "react";
 
 import { parseDescriptor, type ParsedDescriptor } from "@/stealth/lib/derive";
-import { resumeHeightFromCoverage, type ScanRange } from "@/stealth/lib/ranges";
+import { resumeHeightFromCoverage, scanStartHeight, type ScanRange } from "@/stealth/lib/ranges";
 import {
   runSync,
+  shouldWriteScanCoverage,
   WindowExhaustedError,
   liveFetchBlock as libLiveFetchBlock,
   liveFetchFilter as libLiveFetchFilter,
@@ -418,43 +419,35 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    birthday-to-tip window. A failure here must surface loudly:
         //    a NULL cursor silently restarts every future sync from scratch.
         //
-        //    Guard: only write if the cursor actually advanced. runSync
-        //    returns the previous cursor unchanged when fromHeight > tip
-        //    (short-circuit path). Persisting that value would falsely mark
-        //    the wallet as synced to a height it never scanned.
+        //    Guard: only write when this run actually scanned. runSync
+        //    returns the stored cursor unchanged when fromHeight > tip
+        //    (short-circuit path). Persisting that value, or a coverage
+        //    range built from it, would mark heights this run never read
+        //    as covered (OR-T1117).
         //
         //    When useDeliveryAck is true, we only reach this block after the
         //    consuming app confirmed its save (step 4b). A timeout in step 4b
         //    throws before we ever get here, so the cursor stays at its stored
         //    value and the next sync re-scans from there.
         let cursorFailed = false;
-        // The scan actually began here, so this is the only honest lower bound
-        // for the interval we are about to record. Reading from the coverage
-        // map and then recording a different start would write a range we did
-        // not scan.
-        const scannedFrom = Math.max(
+        // The scan actually began at scanStartHeight -- the same rule
+        // runSync used. Reading a different start from the coverage map
+        // and then recording it would write a range we did not scan.
+        const scannedFrom = scanStartHeight({
           birthdayHeight,
-          resumeFromHeight ?? (envJson.last_block_scanned ?? -1) + 1,
-        );
-        // Two ways this sync produced new coverage: it reached higher than the
-        // stored cursor, or it started lower than the stored cursor and so
-        // filled in ground below it. The second arm is new. Without it, a
-        // gap-filling scan that stops before overtaking the old cursor throws
-        // away everything it just read and the gap never closes.
-        // OR-T1117: on the short-circuit path result.scanned is false and
-        // result.lastBlockScanned is an ECHO of the stored cursor, not a
-        // height this run actually read. Without gating on scanned, both
-        // conditions below can be satisfied by a run that read zero
-        // filters, which recorded a coverage range for heights nobody
-        // scanned. Gate on the explicit signal rather than re-deriving
-        // "did we scan" from a comparison that collapses to a tautology
-        // on that path.
-        const reachedHigher = result.scanned
-          && result.lastBlockScanned > (envJson.last_block_scanned ?? -1);
-        const filledBelow = result.scanned
-          && scannedFrom <= (envJson.last_block_scanned ?? -1)
-          && result.lastBlockScanned >= scannedFrom;
-        if ((!useMock || isForceCursor()) && (reachedHigher || filledBelow)) {
+          lastBlockScanned: envJson.last_block_scanned,
+          resumeFromHeight,
+        });
+        // shouldWriteScanCoverage is the widget's write gate. It refuses
+        // the short-circuit path (result.scanned === false) so a run that
+        // read zero filters cannot record coverage for the reorg-window
+        // heights the confirmation buffer just declined to trust (OR-T1117).
+        if ((!useMock || isForceCursor()) && shouldWriteScanCoverage({
+          scanned: result.scanned,
+          lastBlockScanned: result.lastBlockScanned,
+          storedCursor: envJson.last_block_scanned,
+          scannedFrom,
+        })) {
           try {
           // from_height is the inclusive start of the range just scanned. The
           // edge function uses both values to call record_stealth_scan_range()
