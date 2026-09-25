@@ -285,6 +285,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (!isValidAppUserId(body.app_user_id)) {
       return jsonResponse({ error: 'app_user_id required' }, 400, cors);
     }
+    // OR-T2457 step 7: required, checked early before the per-transaction
+    // validation loop below. This is only the shape check; the fence against
+    // the connection's stored value runs after the ownerRow read further down.
+    if (!body.scan_generation || !UUID_RE.test(body.scan_generation)) {
+      return jsonResponse({ error: 'scan_generation (uuid) required' }, 400, cors);
+    }
     if (!Array.isArray(body.sealed_transactions)) {
       return jsonResponse({ error: 'sealed_transactions must be an array' }, 400, cors);
     }
