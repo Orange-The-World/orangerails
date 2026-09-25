@@ -249,6 +249,54 @@ export function deriveResponseCursor(
   return advanced ? candidate : storedCursor;
 }
 
+export interface ScanGenerationFenceResult {
+  ok: boolean;
+  error?: string;
+  status?: number;
+}
+
+/**
+ * OR-T2457 step 7 (sibling of ../or-stealth-envelope-update/cursor.ts's
+ * advanceCursor): refuses a write whose scan_generation does not match the
+ * connection's current one. Both endpoints write the same
+ * stealth_connections.last_block_scanned column; only this one had no fence.
+ *
+ * A sync that was in flight when applyEnvelopeReplacement
+ * (../or-stealth-connection-create/envelope_replace.ts) reset the connection
+ * -- rotating scan_generation, clearing last_block_scanned and the
+ * stealth_scan_ranges coverage -- could otherwise still land here afterward.
+ * Unlike advanceCursor, this fence is checked at the call site BEFORE the
+ * transaction insert, not only before the cursor patch: a stale caller's
+ * sealed_transactions were read under the connection's OLD envelope, and
+ * letting them insert while only blocking the cursor advance would still
+ * permanently merge them into the connection's history under the new one.
+ * That corruption is not caught by the UNIQUE(connection_id,
+ * txid_blind_index_hex) constraint, because a different wallet's addresses
+ * blind-hash to different indexes. envelope_replace.ts does not clean up
+ * stealth_transactions on reset, so there is no self-heal path once it
+ * happens.
+ *
+ * No client, no I/O: the value is read once, a few lines above the call
+ * site, from the same ownerRow the existing ownership check already reads.
+ * This endpoint's write is a single UPDATE with no concurrent writer to race
+ * within one request, so that earlier read is still current at write time,
+ * and no separate atomic UPDATE guard (like advanceCursor's .eq(...).or(...))
+ * is needed the way it is on the sibling endpoint.
+ */
+export function checkScanGenerationFence(
+  storedGeneration: string | null | undefined,
+  suppliedGeneration: string,
+): ScanGenerationFenceResult {
+  if (storedGeneration !== suppliedGeneration) {
+    return {
+      ok: false,
+      error: 'Connection was reset since this sync began; stale write refused',
+      status: 409,
+    };
+  }
+  return { ok: true };
+}
+
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
