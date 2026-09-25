@@ -53,6 +53,15 @@ jobs:
         # asserts it does not go red without one, so both directions are exercised on every run.
         run: node scripts/check-migration-versions.mjs --selftest
 
+      - name: Dynamic policy drop lint self-test
+        # The pull-request diff check lives in dynamic-policy-drop-lint.yml and runs only when
+        # a migration changed. The parser and complete file-set decision still run on every
+        # pull request here, including changes to the guard itself. Its committed fixtures
+        # prove the unsafe enumeration reaches the red decision, a literal named DROP POLICY
+        # reaches the clean decision, the reasoned marker is per-line, and a zero-file input
+        # reaches the red decision.
+        run: node scripts/check-dynamic-policy-drops.mjs --selftest
+
       - name: Migration version uniqueness check
         # A real gate, no continue-on-error. Two files sharing a version prefix means the
         # ledger can only ever track one of them and the other is skipped in silence on every

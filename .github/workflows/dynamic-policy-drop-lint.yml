@@ -1,0 +1,46 @@
+name: Dynamic policy drop lint
+
+# This workflow is scoped to migration pull requests so an unrelated pull request does not
+# manufacture an empty input set. Once this workflow starts, however, zero selected migration
+# files is a hard failure in the script: a broken diff range must not look like a clean scan.
+# There is deliberately no base-branch filter, so stacked pull requests run the same gate.
+on:
+  pull_request:
+    paths:
+      - "supabase/migrations/*.sql"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  dynamic-policy-drop-lint:
+    name: Refuse dynamic DROP POLICY
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # The check compares the pull-request head with its exact base SHA. It refuses an
+          # unreachable base instead of silently scanning zero files.
+          fetch-depth: 0
+
+      - name: Dynamic policy drop lint self-test
+        run: node scripts/check-dynamic-policy-drops.mjs --selftest
+
+      - name: Check added and changed migrations
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # A/C/M/R/T includes added and modified files plus Git's other surviving-file
+          # classifications; deleted paths are excluded because there is no head artifact to
+          # lint. NUL delimiting keeps file selection unambiguous.
+          git diff --name-only -z --diff-filter=ACMRT \
+            "${BASE_SHA}...HEAD" -- 'supabase/migrations/*.sql' \
+            > "$RUNNER_TEMP/changed-migrations"
+          node scripts/check-dynamic-policy-drops.mjs \
+            --paths-from="$RUNNER_TEMP/changed-migrations"
