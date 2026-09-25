@@ -116,6 +116,15 @@ interface TransactionsStoreRequestBody {
   sealed_transactions?: SealedTransactionInput[];
   last_block_scanned?: number;
   /**
+   * The connection's fencing token (OR-T2457). Required: refused rather than
+   * defaulted, because a caller sending no token is indistinguishable from
+   * one carrying a stale one. Read from the same envJson the widget already
+   * echoes back to or-stealth-envelope-update's scan_generation field; must
+   * match the connection's CURRENT value, checked against the same ownerRow
+   * read the ownership check below already does.
+   */
+  scan_generation?: string;
+  /**
    * Widget-mode credential. Present when the caller is browser code inside a
    * host app's connect session and holds neither a platform API key nor an
    * OrangeRails JWT. Ignored when X-Platform-API-Key is present.
