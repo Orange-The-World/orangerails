@@ -43,6 +43,8 @@ import {
   type ParsedDescriptor,
   type ScriptType,
 } from './derive';
+import { scanStartHeight } from './ranges';
+import { sortByAscendingHeight } from "./sync-ordering";
 import { sealEnvelope, unsealEnvelope, blindIndex } from './seal';
 import { loadBip158Matcher, type Bip158Matcher } from './wasm/index';
 import {
@@ -95,6 +97,14 @@ export interface NormalizedTransaction {
   vout_count: number;
   /** Carries any forward-compat notes. Plaintext, sealed in the envelope. */
   memo: string | null;
+  /** Hex, RPC display order. The hash of the block that included this
+   *  transaction, taken from parseBlockHeader's own dsha256 of the raw
+   *  header bytes and checked by assertBlockContentMatchesHash against the
+   *  hash the block was requested by. Carried through sealing as
+   *  block_hash_hex so a later server-side reorg detector can compare it
+   *  to the canonical chain without ever seeing plaintext. Absent on
+   *  records sealed before this field existed. */
+  block_hash?: string;
 }
 
 export type WalletEnvelopePayload =
@@ -141,6 +151,56 @@ export class WindowExhaustedError extends Error {
   }
 }
 
+/**
+ * Thrown by runSync when a fetched block's actual bytes do not hash to the
+ * value it was requested by. fetchFilterPair (OR-T1167) already checks that
+ * the filter sidecar's (filter, hash) pair matches the HEIGHT asked; this is
+ * a separate, later check that the BYTES a block source hands back for that
+ * hash really do hash to it. A source or CDN returning the wrong bytes for a
+ * hash (truncated, corrupted, or simply someone else's block) would
+ * otherwise be parsed and recorded as if it were the block requested, with
+ * no error at all.
+ *
+ * The widget's catch (routes/sync.tsx) does not special-case this error: it
+ * falls into the generic branch and is reported retryable:true, same as any
+ * other block-parsing failure. That is deliberate, not an oversight: a
+ * wrong-bytes-for-a-hash response can plausibly come from one stale CDN
+ * edge or cache entry, and a retried sync may hit a different one and
+ * succeed, even though the exact response already in hand is provably
+ * wrong and re-parsing it would only reproduce the same mismatch.
+ */
+export class BlockContentMismatchError extends Error {
+  readonly code = 'BLOCK_CONTENT_MISMATCH' as const;
+  constructor(message: string) {
+    super(message);
+    this.name = 'BlockContentMismatchError';
+    Object.setPrototypeOf(this, BlockContentMismatchError.prototype);
+  }
+}
+
+/**
+ * How far below the chain tip a block must sit before we will record a
+ * transaction from it.
+ *
+ * Bitcoin occasionally rewrites its most recent block or two. That is normal.
+ * When it happens, a transaction we already recorded can stop existing, and
+ * nothing in this orchestrator ever looks back at a height it has covered, so
+ * the wrong balance is permanent rather than temporary. Six confirmations is
+ * the long-standing Bitcoin convention and covers every reorg observed on
+ * mainnet since 2013.
+ *
+ * The cost is visible to the customer and is accepted: an incoming payment
+ * does not appear for roughly an hour. Showing money that might vanish is
+ * worse than showing it late.
+ *
+ * This constant is only the PREVENTION. The DETECTION half re-checks the
+ * stored block hash of already-recorded transactions over a window an order
+ * of magnitude deeper than this, so that the single event which defeats this
+ * buffer is not also the event that defeats the detector. The two numbers are
+ * deliberately far apart and must not be collapsed into one.
+ */
+export const CONFIRMATION_DEPTH = 6;
+
 export interface RunSyncOptions {
   envelope: SealedEnvelope;
   orStealthKey: string;
@@ -183,11 +243,34 @@ export interface RunSyncOptions {
   /** Override the maximum number of rolling-window extension passes.
    *  Defaults to 10. Exposed for tests; production callers should omit it. */
   maxWindowPasses?: number;
+  /**
+   * The sealed UTXO set persisted by a prior run. When present and
+   * successfully unsealed, its entries seed the in-run UTXO map so spends
+   * of UTXOs funded in an earlier run are detected. On failure (corrupt or
+   * wrong key) the run starts with an empty map: a missed spend detection
+   * is a missing direction='out' record, not a security violation.
+   */
+  sealedUtxos?: SealedEnvelope | null;
 }
 
 export interface SyncResult {
   txCount: number;
   lastBlockScanned: number;
+  /**
+   * False on the short-circuit path (fromHeight > tip): this run read zero
+   * filters and lastBlockScanned above is the STORED cursor echoed back
+   * unchanged, not a height this run actually scanned. True on every path
+   * that walked the scan range, even when zero filters matched.
+   *
+   * Callers MUST NOT record coverage, advance a cursor, or write a scan
+   * range from this result unless scanned is true. Before this field
+   * existed, the caller inferred "did we scan" by comparing
+   * lastBlockScanned to the stored cursor -- but on the short-circuit path
+   * those are the SAME number, so the comparison was a tautology a
+   * zero-filter run could satisfy (OR-T1117). This field replaces that
+   * inference with a direct signal.
+   */
+  scanned: boolean;
   bytesDownloaded: number;
   sealedTransactions: SealedTransaction[];
   /** The decrypted normalized transactions. Returned to the caller for
@@ -213,6 +296,12 @@ export interface SyncResult {
    * failure are still in sealedTransactions and normalized.
    */
   filterFetchError?: { failedHeight: number; cause: string };
+  /**
+   * The sealed UTXO map after this run, ready to pass to
+   * or-stealth-transactions-store as sealed_utxos. Null on the
+   * short-circuit path (nothing scanned) or when the map is empty.
+   */
+  sealedUtxos: SealedEnvelope | null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -496,6 +585,26 @@ function parseBlockHeader(raw: Uint8Array): ParsedBlockHeader {
   };
 }
 
+/**
+ * Compare a parsed block header's own hash (dsha256 of the actual header
+ * bytes, computed by parseBlockHeader) against the hash the block was
+ * requested by. Both are RPC display order lowercase hex. A mismatch means
+ * the bytes handed back are not the block that was asked for, whatever
+ * height or hash the response CLAIMED to be: throws BlockContentMismatchError.
+ */
+function assertBlockContentMatchesHash(
+  header: ParsedBlockHeader,
+  requestedHashHex: string,
+  height: number,
+): void {
+  if (header.blockHashHex.toLowerCase() !== requestedHashHex.toLowerCase()) {
+    throw new BlockContentMismatchError(
+      `stealth/sync: block at height ${height} does not hash to the requested value` +
+      ` (requested ${requestedHashHex}, actual bytes hash to ${header.blockHashHex})`,
+    );
+  }
+}
+
 function isoDateFromUnix(ts: number): string {
   const d = new Date(ts * 1000);
   const yyyy = d.getUTCFullYear().toString().padStart(4, '0');
@@ -611,29 +720,58 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   emit(opts, progress('deriving', 100, `${derived.length} addresses ready`));
 
   // ── fetching_filters + matching (interleaved by height for fast-fail UX) ──
-  const tip = await opts.fetchTip();
+  const chainTip = await opts.fetchTip();
 
-  // Requirement 1 (issue #335): reject a birthday height outside [0, tip]
+  // Requirement 1 (issue #335): reject a birthday height outside [0, chainTip]
   // before any scan. Coercing a known-wrong start onto the chain tip would
   // silently claim a range was scanned that was not, and that is not
   // recoverable. Rejection is recoverable: fix wallet_birthday, retry.
-  if (opts.birthdayHeight < 0 || opts.birthdayHeight > tip) {
+  //
+  // This checks the RAW chain tip, not the buffered scan ceiling below. A
+  // birthday that lands inside the confirmation buffer is a legitimate date
+  // the user picked, not a mistake they could correct, so rejecting it would
+  // be wrong and unactionable. The already-up-to-date short-circuit below
+  // handles that case, and the blocks are picked up by a later sync once they
+  // are buried deep enough.
+  if (!Number.isInteger(opts.birthdayHeight) || opts.birthdayHeight < 0 || opts.birthdayHeight > chainTip) {
     throw new Error(
-      `stealth/sync: birthday height ${opts.birthdayHeight} is out of range [0, ${tip}] -- ` +
+      `stealth/sync: birthday height ${opts.birthdayHeight} is out of range [0, ${chainTip}] -- ` +
       `abort before scanning; fix wallet_birthday and retry`,
     );
   }
 
-  // Resume point. `resumeFromHeight` is already anchored at the birthday by
-  // resumeHeightFromRanges, so it is used as-is rather than incremented: the
-  // coverage rule deliberately re-reads the boundary block instead of risking
-  // an off-by-one gap. The legacy cursor is one BEHIND the next unread block,
-  // hence the +1 on that arm only. Math.max still guards both, so neither path
-  // can start before the wallet birthday.
-  const fromHeight = Math.max(
-    opts.birthdayHeight,
-    opts.resumeFromHeight ?? (opts.lastBlockScanned ?? -1) + 1,
-  );
+  // The scan ceiling, and the only thing this function treats as "the tip"
+  // from here down: the filter workers, the contiguous-cursor walk, and the
+  // rolling-window extension passes are all bounded by it.
+  //
+  // Deriving the ceiling once, here, is the point. lastBlockScanned is
+  // computed from this same bounded walk, so the coverage watermark cannot
+  // advance past the last block actually scanned. If the scan stopped at
+  // chainTip - CONFIRMATION_DEPTH while coverage was still recorded up to
+  // chainTip, those blocks would never be scanned by anyone, ever, and the
+  // money in them would never appear at all. That failure is worse than the
+  // one the buffer fixes: a delayed balance would become a permanently
+  // missing one. Keeping it to a single expression means there is no second
+  // place that has to remember to agree with this one.
+  //
+  // Goes negative on a chain shorter than CONFIRMATION_DEPTH blocks. That is
+  // handled rather than special-cased: birthdayHeight is >= 0, so fromHeight
+  // is > tip and the short-circuit below returns the stored cursor without
+  // scanning anything or advancing coverage.
+  const tip = chainTip - CONFIRMATION_DEPTH;
+
+  // Resume point. The rule itself lives in ./ranges.ts as scanStartHeight, in
+  // one place, so that a caller which must reason about where the next sync
+  // will start (the envelope replacement path, which promises the user a full
+  // rescan) can import it rather than restate it. Restating it is what went
+  // wrong before: a comment in an edge function quoted a two term version of
+  // this expression that had already grown a third term, and the recovery path
+  // written against that comment quietly stopped working.
+  const fromHeight = scanStartHeight({
+    birthdayHeight: opts.birthdayHeight,
+    lastBlockScanned: opts.lastBlockScanned,
+    resumeFromHeight: opts.resumeFromHeight,
+  });
   if (fromHeight > tip) {
     // Already current. Short-circuit with empty result.
     emit(opts, progress('fetching_filters', 100, 'Already up to date.'));
@@ -648,10 +786,15 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       // chain tip is never an accurate cursor value here. Return the stored
       // cursor so the caller does not persist tip as a range never read.
       lastBlockScanned: opts.lastBlockScanned ?? -1,
+      // OR-T1117: this run read zero filters. lastBlockScanned above is an
+      // echo of the stored cursor, not a scanned height, so callers must not
+      // treat this result as new coverage.
+      scanned: false,
       bytesDownloaded: 0,
       sealedTransactions: [],
       normalized: [],
       windowExhausted: false,
+      sealedUtxos: opts.sealedUtxos ?? null,
     };
   }
 
@@ -805,7 +948,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // not chain order. The UTXO tracker below is order-sensitive: a spend
   // processed before the receive that funded it is silently missed.
   // Process blocks strictly by ascending height.
-  hits.sort((a, b) => a.height - b.height);
+  sortByAscendingHeight(hits);
 
   // ── fetching_blocks + building_txs ───────────────────────────────────
   emit(opts, progress('fetching_blocks', 0, `${hits.length} blocks to fetch.`));
@@ -824,11 +967,51 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     string,
     { value: bigint; address: string }
   >();
+  // Seed the map from the prior run's sealed UTXO set, if supplied.
+  if (opts.sealedUtxos) {
+    try {
+      const prior = await unsealEnvelope<Array<[string, { value: string; address: string }]>>(
+        opts.sealedUtxos,
+        opts.orStealthKey,
+      );
+      if (Array.isArray(prior)) {
+        for (const [k, v] of prior) {
+          if (typeof k === 'string' && v && typeof v.value === 'string' && typeof v.address === 'string') {
+            utxoMap.set(k, { value: BigInt(v.value), address: v.address });
+          }
+        }
+      }
+    } catch {
+      // Corrupt or wrong-key envelope: start fresh.
+    }
+  }
   function utxoKey(txid: string, voutIdx: number): string {
     return `${txid}:${voutIdx}`;
   }
 
   const normalized: NormalizedTransaction[] = [];
+
+  // ── cross-window amount accumulator (OR-T2724) ──────────────────────
+  // A tx whose inputs or outputs span BOTH the address window known when
+  // its block is first scanned AND an address discovered only by a LATER
+  // rolling-window extension pass (see the extension loop below) must not
+  // have its amount finalized until every pass that could touch it has
+  // run. Each pass ADDS whatever it independently detects for a txid into
+  // this accumulator; direction and amount_sats are computed once, after
+  // the extension loop completes, from the fully-accumulated totals --
+  // never from a single pass's partial view of the address window.
+  const txAcc = new Map<string, {
+    block_height: number;
+    block_hash: string;
+    occurred_at: string;
+    timestamp: string;
+    vin_count: number;
+    vout_count: number;
+    spentInputs: bigint;
+    receivedAmount: bigint;
+    receivedAddress: string;
+    recipientAddress: string;
+  }>();
 
   // Track the highest address index matched on each chain (receive=0,
   // change=1). -1 means no match yet. Updated in the receive detection
@@ -878,6 +1061,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     // block record height can silently arrive as 0.
     const blockHeight = hits[i].height;
     const header = parseBlockHeader(block.raw);
+    assertBlockContentMatchesHash(header, hits[i].blockHashHex, blockHeight);
     const occurredAt = isoDateFromUnix(header.timestamp);
     // Full instant, not just the date. Rides inside the sealed envelope so
     // the server learns nothing new; consumers use it for transaction-time
@@ -922,62 +1106,46 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
         }
       }
 
-      // ─── Emit normalized records ───────────────────────────────────
-      if (spentInputs > 0n) {
-        // SPEND. amount_sats = what left our wallet net of change.
-        //   spentInputs    , total value of UTXOs we destroyed
-        //   receivedAmount , total value of new outputs paying us back (change)
-        // The difference is "what we paid out" (and includes the network fee).
-        // Pure self-transfer (consolidation) → amount = fee only.
-        const netOut = spentInputs - receivedAmount;
-        // Best-effort recipient address: first output that does NOT pay
-        // us. Empty if every output pays us (pure consolidation).
+      // ─── Emit into the accumulator (OR-T2724) ─────────────────────
+      // Do not finalize here: a later extension pass may still add
+      // spentInputs or receivedAmount for this exact txid once it derives
+      // an address this initial pass cannot yet see. Direction and
+      // amount_sats are computed once, after ALL extension passes, from
+      // the fully accumulated totals (see the finalize step below).
+      if (spentInputs > 0n || anyReceive) {
+        // Best-effort recipient address: first output that does NOT pay a
+        // KNOWN address at this point in the scan. Empty if every output
+        // pays us (pure consolidation). Computed only the first time this
+        // txid is classified as a spend, matching the pre-existing
+        // best-effort behaviour.
         let recipientAddress = '';
-        for (const out of tx.outputs) {
-          let isOurs = false;
-          for (const d of derived) {
-            if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
-          }
-          if (!isOurs) {
-            recipientAddress = scriptToAddressBestEffort(out.script);
-            if (recipientAddress) break;
+        if (spentInputs > 0n) {
+          for (const out of tx.outputs) {
+            let isOurs = false;
+            for (const d of derived) {
+              if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+            }
+            if (!isOurs) {
+              recipientAddress = scriptToAddressBestEffort(out.script);
+              if (recipientAddress) break;
+            }
           }
         }
-        normalized.push({
-          txid: tx.txid,
+        txAcc.set(tx.txid, {
           block_height: blockHeight,
+          block_hash: hits[i].blockHashHex,
           occurred_at: occurredAt,
           timestamp: occurredAtInstant,
-          direction: 'out',
-          amount_sats: Number(netOut),
-          address: recipientAddress,
           vin_count: tx.vinCount,
           vout_count: tx.voutCount,
-          memo: null,
+          spentInputs,
+          receivedAmount,
+          receivedAddress,
+          recipientAddress,
         });
         // Add change outputs to UTXO map so future spends can reference
         // them. (A receive that is also a change-back from our own spend
         // still counts as a UTXO we own.)
-        for (const u of newUtxos) {
-          utxoMap.set(utxoKey(tx.txid, u.idx), {
-            value: u.value,
-            address: u.address,
-          });
-        }
-      } else if (anyReceive) {
-        // RECEIVE only , pure incoming, no inputs of ours were spent.
-        normalized.push({
-          txid: tx.txid,
-          block_height: blockHeight,
-          occurred_at: occurredAt,
-          timestamp: occurredAtInstant,
-          direction: 'in',
-          amount_sats: Number(receivedAmount),
-          address: receivedAddress,
-          vin_count: tx.vinCount,
-          vout_count: tx.voutCount,
-          memo: null,
-        });
         for (const u of newUtxos) {
           utxoMap.set(utxoKey(tx.txid, u.idx), {
             value: u.value,
@@ -991,7 +1159,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     emit(opts, progress('fetching_blocks', pct, `${i + 1} of ${hits.length} blocks.`));
   }
   emit(opts, progress('fetching_blocks', 100));
-  emit(opts, progress('building_txs', 100, `${normalized.length} transactions.`));
+  emit(opts, progress('building_txs', 100, `${txAcc.size} transactions so far (before rolling-window extension).`));
 
   // ── rolling-window extension (issue #353) ───────────────────────────
   // After the initial filter scan, check whether any chain has a match within
@@ -1006,7 +1174,8 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // a block that matched addr0 but not addr5 is not a hit for the extension
   // pass (addr5-only scan). If a block has BOTH addr0 and addr5 outputs it
   // WILL appear in both the initial hits and the extension hits; the
-  // processedTxids set below prevents double-counting in normalized.
+  // txAcc accumulator below merges both sightings into one record
+  // instead of double-counting or dropping either one (OR-T2724).
   //
   // req 4: filter bytes from the initial scan are cached in filterCache.
   // Extension passes re-match locally; CDN re-downloads only occur on a cache
@@ -1014,9 +1183,6 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   // the full [fromHeight, tip] range.
   let windowPass = 0;
   let windowExhausted = false;
-  // Txids recorded in normalized so far. Used to prevent double-counting when
-  // extension scans hit blocks already processed in an earlier pass.
-  const processedTxids = new Set<string>(normalized.map((tx) => tx.txid));
 
   extensionLoop: while (windowPass < MAX_WINDOW_PASSES) {
     const chain0Near = maxMatchedIndexPerChain[0] >= chainWindowEnd[0] - gapLimit;
@@ -1097,7 +1263,25 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       }
     };
     await Promise.all(Array.from({ length: FETCH_CONCURRENCY }, extWorker));
-    extHits.sort((a, b) => a.height - b.height);
+    sortByAscendingHeight(extHits);
+
+    // Same reason as the trim on `hits` after the initial scan, and it has to
+    // be repeated here because this is a SEPARATE array that the earlier trim
+    // never touched. On an aborted filter fetch, heights above
+    // lastContiguousScanned were never contiguously scanned, and this pass can
+    // still produce a hit up there: its cache-miss branch `continue`s past a
+    // broken height instead of stopping, and concurrent workers may have raced
+    // past the failure point before the abort landed. A transaction recorded
+    // above the gap is sealed and uploaded, and the server then advances the
+    // stored cursor to the height it landed at, so the next sync resumes ABOVE
+    // heights nobody ever read. Those heights are never scanned again and any
+    // payment in them is missing from the balance permanently, with no error
+    // and no retry path. Trim in place so everything below sees only the safe,
+    // contiguous range.
+    if (fetchAborted && extHits.length > 0) {
+      const extSafe = extHits.filter((hit) => hit.height <= lastContiguousScanned);
+      extHits.splice(0, extHits.length, ...extSafe);
+    }
 
     // Process extension hits. Only new-address outputs are checked for receives
     // (passNewDerived), but inputs are checked against the full UTXO map so a
@@ -1120,6 +1304,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       bytesDownloaded += block.raw.length;
       const blockHeight = extHits[ei].height;
       const header = parseBlockHeader(block.raw);
+      assertBlockContentMatchesHash(header, extHits[ei].blockHashHex, blockHeight);
       const occurredAt = isoDateFromUnix(header.timestamp);
       const occurredAtInstant = new Date(header.timestamp * 1000).toISOString();
 
@@ -1157,45 +1342,76 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
           }
         }
 
-        // Only add to normalized if this txid has not been recorded in a
-        // prior pass. Double-adding the same txid would corrupt the balance.
-        const alreadySeen = processedTxids.has(tx.txid);
-
-        if (spentInputs > 0n && !alreadySeen) {
-          const netOut = spentInputs - receivedAmount;
-          let recipientAddress = '';
-          for (const out of tx.outputs) {
-            let isOurs = false;
-            for (const d of derived) {
-              if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+        // Merge into the accumulator (OR-T2724) rather than skip-or-push.
+        // A tx already recorded by the initial pass, or by an earlier
+        // extension pass, can still gain spentInputs or receivedAmount here
+        // once THIS pass derives the address that touches it -- e.g.
+        // ordinary coin selection consolidating an old-window UTXO with one
+        // from just beyond the previous gap-limit window, or a tx paying
+        // both an old and a newly-active address. Dropping that extra
+        // amount (the pre-fix behaviour) silently mis-stated amount_sats.
+        // Adding it in unconditionally cannot double-count: each pass
+        // contributes its own independently detected spentInputs /
+        // receivedAmount for a given txid exactly once, since a pass
+        // processes each block, and each tx within it, exactly once, an
+        // input is consumed (utxoMap.delete) the first time any pass
+        // spends it, and each pass's receive-side match only ever checks
+        // that pass's own newly-derived addresses, disjoint from every
+        // other pass's.
+        const existing = txAcc.get(tx.txid);
+        if (spentInputs > 0n || anyReceive) {
+          if (existing) {
+            existing.spentInputs += spentInputs;
+            existing.receivedAmount += receivedAmount;
+            if (!existing.receivedAddress && receivedAddress) {
+              existing.receivedAddress = receivedAddress;
             }
-            if (!isOurs) {
-              recipientAddress = scriptToAddressBestEffort(out.script);
-              if (recipientAddress) break;
+            if (!existing.recipientAddress && spentInputs > 0n) {
+              let recipientAddress = '';
+              for (const out of tx.outputs) {
+                let isOurs = false;
+                for (const d of derived) {
+                  if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+                }
+                if (!isOurs) {
+                  recipientAddress = scriptToAddressBestEffort(out.script);
+                  if (recipientAddress) break;
+                }
+              }
+              existing.recipientAddress = recipientAddress;
             }
+          } else {
+            let recipientAddress = '';
+            if (spentInputs > 0n) {
+              for (const out of tx.outputs) {
+                let isOurs = false;
+                for (const d of derived) {
+                  if (bytesEqual(out.script, d.script)) { isOurs = true; break; }
+                }
+                if (!isOurs) {
+                  recipientAddress = scriptToAddressBestEffort(out.script);
+                  if (recipientAddress) break;
+                }
+              }
+            }
+            txAcc.set(tx.txid, {
+              block_height: blockHeight,
+              block_hash: extHits[ei].blockHashHex,
+              occurred_at: occurredAt,
+              timestamp: occurredAtInstant,
+              vin_count: tx.vinCount,
+              vout_count: tx.voutCount,
+              spentInputs,
+              receivedAmount,
+              receivedAddress,
+              recipientAddress,
+            });
           }
-          normalized.push({
-            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
-            timestamp: occurredAtInstant, direction: 'out',
-            amount_sats: Number(netOut), address: recipientAddress,
-            vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
-          });
-          processedTxids.add(tx.txid);
-          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
-        } else if (anyReceive && !alreadySeen) {
-          normalized.push({
-            txid: tx.txid, block_height: blockHeight, occurred_at: occurredAt,
-            timestamp: occurredAtInstant, direction: 'in',
-            amount_sats: Number(receivedAmount), address: receivedAddress,
-            vin_count: tx.vinCount, vout_count: tx.voutCount, memo: null,
-          });
-          processedTxids.add(tx.txid);
-          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
-        } else if (anyReceive || spentInputs > 0n) {
-          // txid was already processed in an earlier pass. Still update utxoMap
-          // for new-address UTXOs so future spends in later blocks can find them.
-          for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
         }
+        // Always update utxoMap for new-address UTXOs, whether this is the
+        // first or a later pass to see them, so future spends in later
+        // blocks (this pass or a subsequent one) can find them.
+        for (const u of newUtxos) utxoMap.set(utxoKey(tx.txid, u.idx), { value: u.value, address: u.address });
       }
     }
     windowPass++;
@@ -1217,6 +1433,44 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     }
   }
 
+  // ── finalize (OR-T2724): compute direction and amount_sats once ────
+  // Every pass that could touch a txid -- the initial scan and every
+  // rolling-window extension pass -- has now run and merged into txAcc.
+  // Decide direction and amount_sats exactly once per txid, from the
+  // fully accumulated totals, never from a single pass's partial view of
+  // the address window.
+  for (const [txid, acc] of txAcc) {
+    if (acc.spentInputs > 0n) {
+      normalized.push({
+        txid,
+        block_height: acc.block_height,
+        block_hash: acc.block_hash,
+        occurred_at: acc.occurred_at,
+        timestamp: acc.timestamp,
+        direction: 'out',
+        amount_sats: Number(acc.spentInputs - acc.receivedAmount),
+        address: acc.recipientAddress,
+        vin_count: acc.vin_count,
+        vout_count: acc.vout_count,
+        memo: null,
+      });
+    } else if (acc.receivedAmount > 0n) {
+      normalized.push({
+        txid,
+        block_height: acc.block_height,
+        block_hash: acc.block_hash,
+        occurred_at: acc.occurred_at,
+        timestamp: acc.timestamp,
+        direction: 'in',
+        amount_sats: Number(acc.receivedAmount),
+        address: acc.receivedAddress,
+        vin_count: acc.vin_count,
+        vout_count: acc.vout_count,
+        memo: null,
+      });
+    }
+  }
+
   // ── sealing (runs after extension so all extension transactions are sealed) ──
   emit(opts, progress('sealing', 0));
   const sealedTransactions: SealedTransaction[] = [];
@@ -1231,6 +1485,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       ciphertext_b64: env.ciphertext_b64,
       occurred_at: tx.occurred_at,
       block_height: tx.block_height,
+      block_hash_hex: tx.block_hash,
       txid_blind_index_hex: blind,
     });
     if (i % 8 === 0 || i === normalized.length - 1) {
@@ -1240,6 +1495,16 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
   emit(opts, progress('sealing', 100));
 
+  // ── seal the final UTXO map for persistence across runs ────────────────
+  let sealedUtxos: SealedEnvelope | null = null;
+  if (utxoMap.size > 0) {
+    const entries = Array.from(utxoMap.entries()).map(
+      ([k, v]): [string, { value: string; address: string }] =>
+        [k, { value: v.value.toString(), address: v.address }],
+    );
+    sealedUtxos = await sealEnvelope(entries, opts.orStealthKey);
+  }
+
   // ── uploading (the orchestrator emits the stage; the actual POST is the
   // caller's job so the same orchestrator works for tests with no network) ──
   emit(opts, progress('uploading', 0));
@@ -1248,10 +1513,12 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   return {
     txCount: normalized.length,
     lastBlockScanned: lastContiguousScanned,
+    scanned: true,
     bytesDownloaded,
     sealedTransactions,
     normalized,
     windowExhausted,
+    sealedUtxos,
     ...(fetchFailure !== undefined
       ? {
           filterFetchError: {
@@ -1379,12 +1646,60 @@ async function fetchFilterPair(height: number, baseUrl: string): Promise<FilterR
   }
 
   const sidecar = (await jsonResp.json()) as FilterSidecar;
+  // OR-T1167: the SipHash match below proves the filter and the hash came
+  // from the same block; it proves nothing about which HEIGHT that block is
+  // at. A producer or CDN serving one height's pair under another height's
+  // URL passes that match cleanly. Catch it here, before the mismatch is
+  // carried into a stored transaction and read by nobody. Durable, not
+  // retried: a producer serving the wrong sidecar under this height will
+  // serve it again.
+  if (sidecar.block_height !== height) {
+    throw new DurableFilterError(
+      `liveFetchFilter: sidecar at height ${height} reports block_height ` +
+      `${sidecar.block_height} -- the .gcs.gz and .json pair does not match ` +
+      `the height requested. This is a producer/CDN misfile, not a transient ` +
+      `error; retrying would only fetch the same mismatched pair again.`,
+    );
+  }
+  // OR-T1167, second half. The hash has to be well formed and single-cased
+  // HERE, at the one point it enters FilterRecord, or "no hash" stops meaning
+  // one thing.
+  //
+  // Downstream a stored transaction with no block_hash means "recorded before
+  // we captured hashes": permanently unverifiable, not wrong, and the reorg
+  // detector must skip it in silence. If a malformed sidecar could also
+  // produce a record with no hash, the detector cannot tell those apart.
+  //
+  // Case is not cosmetic either. The detector compares this stored hash
+  // against the canonical hash at that height, the column is text with no
+  // CHECK constraint, and the comparison is case sensitive. A producer that
+  // ever emitted uppercase hex would make every affected transaction compare
+  // unequal and be marked orphaned with no reorg having happened: a false
+  // positive on customer money, produced by the check that exists to protect
+  // it. So accept either case at the door and store exactly one.
+  //
+  // Read as unknown on purpose. The declared type says string; this value
+  // came out of JSON.parse and the declaration is a claim, not a check.
+  //
+  // Durable rather than retried, for the same reason as the height mismatch
+  // above: a producer serving a malformed sidecar will serve it again.
+  const rawHash = sidecar.block_hash as unknown;
+  if (typeof rawHash !== 'string' || !/^[0-9a-fA-F]{64}$/.test(rawHash)) {
+    throw new DurableFilterError(
+      `liveFetchFilter: sidecar at height ${height} carries no usable ` +
+      `block_hash (expected 64 hex characters, got ${JSON.stringify(rawHash)}). ` +
+      `A record built from this would carry no hash at all, which downstream ` +
+      `means "recorded before hashes were captured" and is treated as ` +
+      `unverifiable rather than as a failure.`,
+    );
+  }
+
   const gzBuf = new Uint8Array(await gzResp.arrayBuffer());
   const filter = await gunzip(gzBuf);
 
   return {
     height: sidecar.block_height,
-    blockHashHex: sidecar.block_hash,
+    blockHashHex: rawHash.toLowerCase(),
     filter,
   };
 }
@@ -1439,8 +1754,10 @@ export async function liveFetchFilter(
 
 /**
  * Fetch raw block bytes for the given block hash. The block source attaches
- * X-Block-Hash and X-Block-Height response headers; we trust those for the
- * height field but verify the hash matches what we asked for.
+ * X-Block-Hash and X-Block-Height response headers. The height is taken from
+ * X-Block-Height (defaulting to 0 if absent). The blockHashHex in the returned
+ * record is X-Block-Hash when present, or the requested hash as a fallback;
+ * neither is verified against what was asked for.
  */
 export async function liveFetchBlock(
   blockHashHex: string,
