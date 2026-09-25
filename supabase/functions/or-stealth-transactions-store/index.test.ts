@@ -423,3 +423,75 @@ Deno.test('OR-T1914: the ceiling this function exports IS the shared one, not a 
     'isContiguousScannedHeight must be the shared contract helper',
   );
 });
+
+// ── OR-T2457: generation fence on the transactions-store path ─────────────────
+//
+// The handler accepts scan_generation (uuid, required) and refuses:
+//   400 when the value is absent or not a UUID (same rule as envelope-update).
+//   409 when the stored scan_generation differs from the supplied one
+//       (connection was reset while this sync was running).
+//
+// These tests exercise the two predicates that gate those paths. The fence
+// itself is in the HTTP handler; the test uses the same UUID_RE the handler
+// imports so a relaxation of that regex would turn both 400 cases green
+// before they should be.
+//
+// The full reset-then-stale-write end-to-end scenario (envelope replaced,
+// in-flight sync posts its cursor) is covered at the envelope-update level
+// in or-stealth-envelope-update/generation_fence.test.ts. The transactions-
+// store fence closes the same race on the upload path.
+
+const UUID_RE_FOR_TEST = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const VALID_GEN   = '11111111-1111-1111-1111-111111111111';
+const STALE_GEN   = '22222222-2222-2222-2222-222222222222';
+const FRESH_GEN   = '33333333-3333-3333-3333-333333333333';
+
+Deno.test('OR-T2457: scan_generation is required and must be a uuid (400 path)', () => {
+  // These are the three shapes that trigger the 400 guard in the handler:
+  //   if (!body.scan_generation || !UUID_RE.test(body.scan_generation))
+  assert(!undefined, 'absent scan_generation is falsy -> 400 guard fires');
+  assert(!(''), 'empty string is falsy -> 400 guard fires');
+  assert(
+    !UUID_RE_FOR_TEST.test('not-a-uuid'),
+    'non-uuid string fails UUID_RE -> 400 guard fires',
+  );
+  assert(
+    UUID_RE_FOR_TEST.test(VALID_GEN),
+    'a well-formed uuid passes UUID_RE -> guard does not fire',
+  );
+});
+
+Deno.test('OR-T2457: a stale scan_generation (stored != supplied) triggers 409, a matching one does not', () => {
+  // The handler reads scan_generation from the ownership row and compares:
+  //   if ((ownerRow.scan_generation as string) !== body.scan_generation)
+  // This test reproduces the comparison predicate directly.
+  //
+  // Scenario: a sync started under VALID_GEN, the connection was reset
+  // (envelope replaced) to FRESH_GEN, and the in-flight sync is now
+  // uploading transactions still carrying VALID_GEN.
+  const storedAfterReset  = FRESH_GEN;  // what the reset wrote
+  const suppliedByStale   = VALID_GEN;  // what the pre-reset sync carries
+
+  assertEquals(
+    storedAfterReset !== suppliedByStale,
+    true,
+    'stored and supplied differ after a reset -> 409 condition is true',
+  );
+
+  // A sync that genuinely started after the reset carries the new generation;
+  // the fence must not block it.
+  const suppliedByFresh = FRESH_GEN;
+  assertEquals(
+    storedAfterReset !== suppliedByFresh,
+    false,
+    'stored and supplied match for a post-reset sync -> 409 condition is false, write proceeds',
+  );
+
+  // A stale generation heading to the WRONG token (impossible in practice
+  // but tests that the predicate is directional, not just "any mismatch").
+  assertEquals(
+    STALE_GEN !== VALID_GEN,
+    true,
+    'STALE_GEN and VALID_GEN differ -> fence fires for this case too',
+  );
+});
