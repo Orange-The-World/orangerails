@@ -222,6 +222,24 @@ jobs:
     name: Test edge functions (Deno)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # OR-T1721: a real postgres service container so a test can execute a
+    # SQL statement against a real schema, not just match its shape as a
+    # string. No tool-only seat here holds a Supabase write credential (the
+    # sb_query grant is read-only SELECT and refuses even an EXPLAIN of an
+    # INSERT), so this ephemeral, disposable database is how that gap
+    # closes without needing one. It never touches Supabase dev or prod.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     # Why this job exists: the repo has carried edge-function tests since long
     # before this job, and not one of them has ever run. `deno check` above
     # typechecks supabase/functions but never executes it, vitest's include is
@@ -247,6 +265,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Full history needed so the next step can compute a merge-base
+          # with origin/prod (see below). This job's tree is small, so the
+          # extra clone cost is negligible.
+          fetch-depth: 0
 
       - name: Setup Deno
         uses: denoland/setup-deno@v2
@@ -255,35 +278,63 @@ jobs:
           # edge runtime is deno 2.1.4, so tests run on the runtime that ships.
           deno-version: v2.1.4
 
+      - name: Apply channel_state schema for the OR-T1721 pg execution test
+        # A minimal auth.users table and an auth.uid() stub are enough for
+        # the real migration file's own RLS policy to CREATE (Postgres
+        # resolves the function name at CREATE POLICY time). Nothing in
+        # this job reads through RLS, so the stub only ever needs to exist,
+        # never to return a real caller.
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -c 'create schema if not exists auth;' \
+            -c 'create table if not exists auth.users (id uuid primary key);' \
+            -c 'create or replace function auth.uid() returns uuid language sql stable as $$ select null::uuid $$;' \
+            -c "do \$\$ begin if not exists (select from pg_catalog.pg_roles where rolname = 'authenticated') then create role authenticated; end if; end \$\$;"
+          psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 \
+            -f supabase/migrations/20260711120000_channel_state.sql
+
       - name: deno test supabase/functions
         shell: bash
         env:
-          # The baseline is the number of test files actually present on the
-          # branch this job is running against, and it is PER BRANCH because
-          # the two branches genuinely differ.
-          #
-          # MEASURED 2026-08-03 with this job's own find pattern, dev raised to
-          # 18 on 2026-08-27 for the new or-sync/_probe.test.ts (DEV-0126):
-          #   dev  18 files
-          #   prod  9 files
-          #
-          # The value shipped when this guard landed was 3, which was the count
-          # of test-file DIRECTORIES someone eyeballed rather than the count of
-          # files the pattern collects. A baseline of 3 against a real 15 means
-          # twelve test files can disappear and this job still reports green,
-          # which is the exact failure DL-0459 was opened to stop. The guard was
-          # correct; only its number was wrong.
-          #
-          # Why this is an expression and not one number: prod's tree has 9,
-          # so a single hardcoded 15 promoted from dev to prod turns this job
-          # red on prod the moment it lands, on a count that is correct for
-          # prod. Selecting on the branch lets the same file be true on both.
-          #
-          # When you add or remove a test file, change the number for that
-          # branch in the same PR, and say why in the message if it goes down.
-          DENO_TEST_FILE_BASELINE: ${{ (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '17' }}
+          # OR-T1721: gives index.pg.test.ts a real database to execute
+          # UPSERT_CHANNEL_STATE_SQL against. Unset in any environment
+          # without the postgres service above, in which case that file's
+          # own tests report ignored (a real, honest skip), never a
+          # silent pass.
+          TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
         run: |
           set -euo pipefail
+
+          # The baseline is the number of edge-function test files that
+          # existed in the TREE this branch actually forked from, not a
+          # number keyed on the base branch's NAME.
+          #
+          # OR-T1064: the previous expression was
+          #   (github.base_ref == 'prod' || github.ref_name == 'prod') && '9' || '21'
+          # It only recognised prod when the base branch was literally named
+          # "prod". A stacked hotfix branch cut from prod (base "hotfix-1",
+          # not "prod") fell through to the dev number and failed on a tree
+          # where the lower count was correct.
+          #
+          # Fix: find the merge-base with origin/prod and count the test
+          # files present IN THAT TREE.
+          #   - PR against dev: the merge-base is wherever dev and prod last
+          #     diverged, so the count there is a safe floor (dev's own
+          #     count today is always >= that historical count).
+          #   - PR whose branch, however many hops removed, forked from
+          #     prod: the merge-base IS that fork point, so the count there
+          #     is prod's real, current count.
+          # No branch name is read anywhere in this step, so no per-PR
+          # manual bump of a constant is needed here again: the number
+          # comes from the tree.
+          git fetch origin prod
+          MERGE_BASE=$(git merge-base HEAD origin/prod)
+          DENO_TEST_FILE_BASELINE=$(git ls-tree -r "$MERGE_BASE" --name-only -- supabase/functions \
+            | grep -cE '(_test\.ts|\.test\.ts)$' || true)
+          echo "Baseline ${DENO_TEST_FILE_BASELINE} test file(s), from merge-base ${MERGE_BASE} with origin/prod"
 
           # Guard: find must not fail silently. A non-zero exit (missing dir,
           # permission error) must not collapse to count=0 and must not read
