@@ -14,6 +14,100 @@
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import { claimRetiredEventForReplay, fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
+// ── OR-T0256: chainable mock builder ──────────────────────────────────
+//
+// The hand-rolled Supabase mocks in this file only implement the query-builder
+// methods each test happens to call today. If production code adds a call the
+// mock did not implement (a new .in(), .not(), or any other chain method), the
+// failure surfaces as a TypeError in an UNRELATED already-passing test rather
+// than near the real change.
+//
+// chainable() wraps a mock in a Proxy so any METHOD not explicitly defined
+// returns the same live chain instead of throwing. Every method a test DOES
+// define still behaves exactly as written.
+//
+// TERMINAL PROPS (error, data, count, status, statusText) must never be
+// synthesised as functions. A function stand-in is truthy, so
+//   const { error } = await chain
+// followed by `if (error)` would fire on a clean result. They return null
+// instead, matching the PostgREST zero-row / no-error shape.
+// deno-lint-ignore no-explicit-any
+function chainable<T extends object>(target: T): T {
+  // PostgREST result-shape properties. Synthesising these as functions makes
+  // `if (error)` truthy on a chain that returned no error.
+  const RESULT_PROPS = new Set<string>(['error', 'data', 'count', 'status', 'statusText']);
+  // deno-lint-ignore no-explicit-any
+  let proxy: any;
+  // deno-lint-ignore no-explicit-any
+  const handler: ProxyHandler<any> = {
+    get(obj, prop, receiver) {
+      if (typeof prop === 'symbol') return Reflect.get(obj, prop, receiver);
+      if (!(prop in obj)) {
+        // Never synthesize .then -- an accidental thenable chain never settles.
+        if (prop === 'then') return undefined;
+        // Result-data properties must be null (falsy) not a function (truthy).
+        if (RESULT_PROPS.has(prop as string)) return null;
+        // Unknown builder method (.in(), .not(), etc.): swallow and stay chainable.
+        return (..._args: unknown[]) => proxy;
+      }
+      const value = obj[prop];
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        const result = value.apply(receiver, args);
+        // Never wrap a live Promise -- terminal calls must resolve untouched.
+        if (result && typeof result === 'object' && !(result instanceof Promise)) {
+          return chainable(result);
+        }
+        return result;
+      };
+    },
+  };
+  proxy = new Proxy(target as Record<string, unknown>, handler);
+  return proxy as T;
+}
+
+// ── chainable() unit tests (OR-T0256) ─────────────────────────────────
+//
+// These guard the helper so a refactor cannot break the two properties that
+// motivated OR-T0256: unknown builder methods do not throw, and terminal
+// result props (error, data) are null rather than a truthy function.
+
+Deno.test('chainable: unknown builder methods stay chainable and do not throw', () => {
+  // deno-lint-ignore no-explicit-any
+  const mock: any = chainable({ select(_c: string) { return {}; } });
+  // .in() and .not() are not on the target object; they must not throw.
+  const chain = mock.select('id').in('status', ['active']).not('updated_at', 'is', null);
+  assertEquals(typeof chain, 'object', 'chained proxy must remain an object rather than throwing');
+});
+
+Deno.test('chainable: result-shape properties return null, not a function, when unimplemented', () => {
+  // deno-lint-ignore no-explicit-any
+  const mock: any = chainable({ update(_p: unknown) { return {}; } });
+  // If .error were synthesised as a function (truthy), `if (error)` would fire
+  // on a connection update that returned no actual error (the OR-T0256 regression).
+  assertEquals(mock.error, null, '.error must be null so `if (error)` does not fire falsely');
+  assertEquals(mock.data,  null, '.data must be null when no resolution is provided');
+  assertEquals(mock.count, null, '.count must be null when not defined');
+});
+
+Deno.test('chainable: update().eq() chain resolves error to null on await', async () => {
+  // Exact shape from reconcileConnectionError:
+  //   const { error } = await client.from('connections').update(patch).eq('id', id)
+  // When the mock has no explicit terminal for this call, error must be null (falsy).
+  // A function would be truthy and make `if (error) return ...` fire on a clean result,
+  // which was the regression introduced on PR #1480 branch fix/or-t0256-chainable-mocks-v2.
+  // deno-lint-ignore no-explicit-any
+  const mock: any = chainable({
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const ch: any = { update(_p: unknown) { return ch; }, eq(_c: string, _v: unknown) { return ch; } };
+      return ch;
+    },
+  });
+  const { error } = await mock.from('connections').update({ status: 'error' }).eq('id', 'conn-1');
+  assertEquals(error, null, 'awaiting a bare update chain must yield error:null, not a truthy function');
+});
+
 // ── explicit retired-event replay (OR-T0128) ────────────────────────
 
 function replayClaimClient(initialRow: Record<string, unknown>) {
