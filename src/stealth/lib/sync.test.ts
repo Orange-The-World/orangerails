@@ -2843,3 +2843,83 @@ describe('runSync , block content integrity (OR-T0999 part 3)', () => {
     expect(decrypted).toEqual(tx);
   });
 });
+
+describe('runSync , cross-window transaction accumulation (OR-T2724)', () => {
+  it('accumulates amount_sats across every pass that touches a txid, instead of only the pass that first saw it', async () => {
+    // Scenario: gap_limit=2, so the initial chainWindowEnd is [4,4]
+    // (indices 0..3 derived per chain). A single transaction pays TWO
+    // outputs in the SAME block: one to chain-0 index 3 (inside the
+    // initial window, right at the near-edge threshold) and one to
+    // chain-0 index 4 (only derivable once the resulting extension pass
+    // runs). Because both outputs belong to the same txid, the initial
+    // pass sees the index-3 output (4,000 sats) and finalizes an
+    // accumulator entry, then the near-edge match on index 3 triggers an
+    // extension pass that derives index 4 and finds the remaining 9,000
+    // sats on that SAME txid.
+    //
+    // Before the fix, the extension pass's contribution was silently
+    // dropped once a txid had already been pushed to `normalized` (the
+    // processedTxids/alreadySeen guard on dev): amount_sats stayed stuck
+    // at the partial 4,000 instead of the full 13,000, with no error and
+    // no duplicate record to hint anything was wrong.
+    const orStealthKey = randomKeyB64();
+    const payload: WalletEnvelopePayload = {
+      kind: 'xpub_stealth',
+      xpub: BIP84_XPUB,
+      label: 'cross-window-amount',
+      wallet_birthday: '2024-01-01',
+      gap_limit: 2,
+      script_type: 'p2wpkh',
+    };
+    const envelope = await sealEnvelope(payload, orStealthKey);
+
+    const scriptIdx3 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 3, 'p2wpkh');
+    const scriptIdx4 = deriveScriptPubkeyBytes(BIP84_XPUB, 0, 4, 'p2wpkh');
+
+    const ts = Math.floor(new Date('2024-09-01T00:00:00Z').getTime() / 1000);
+    const block = buildFixtureBlock({
+      timestamp: ts,
+      txs: [
+        {
+          outputs: [
+            { script: scriptIdx3, amountSats: 4_000n },
+            { script: scriptIdx4, amountSats: 9_000n },
+          ],
+        },
+      ],
+    });
+    const txid = await fixtureTxid(block.txs[0]);
+    const blockHashHex = bytesToHex(reverseBytes(await dsha256Async(block.raw.subarray(0, 80))));
+
+    const result = await runSync({
+      envelope,
+      orStealthKey,
+      birthdayHeight: 820_000,
+      lastBlockScanned: 820_000,
+      fetchTip: async () => 820_001 + CONFIRMATION_DEPTH,
+      fetchFilter: async (h) =>
+        h === 820_001 ? { height: h, blockHashHex, filter: new Uint8Array([0xc1]) } : null,
+      fetchBlock: async () => ({ height: 820_001, blockHashHex, raw: block.raw }),
+      // The block genuinely pays both an old-window and an extension-only
+      // address, so a real BIP158 filter matches it on every pass
+      // regardless of which address set that pass is checking.
+      matcher: { matchAny: () => true },
+    });
+
+    // Exactly one normalized record for this txid: the fix merges every
+    // pass into a single accumulator instead of ever pushing a second
+    // entry for a txid an extension pass revisits.
+    expect(result.normalized).toHaveLength(1);
+
+    const tx = result.normalized[0];
+    expect(tx.txid).toBe(txid);
+    expect(tx.direction).toBe('in');
+    // The full amount from BOTH outputs, not just the 4,000 sats the
+    // initial pass could see before index 4 was ever derived.
+    expect(tx.amount_sats).toBe(13_000);
+
+    // The near-edge match at index 3 is what must have triggered the
+    // extension pass that derived index 4 in the first place.
+    expect(result.windowExhausted).toBe(true);
+  });
+});
