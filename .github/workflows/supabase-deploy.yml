@@ -1779,6 +1779,31 @@ jobs:
             halt "the classifier examined ${EXAMINED} file(s) but ${PENDING} would be applied. A verdict that does not cover every file this run would run is not a verdict."
           fi
 
+          # OR-T1537 ruling, option C, the missing half named on OR-T1518's own
+          # step 6. UNBOUNDED_WRITE is a WARNING, not a verdict: it never
+          # changes RC and it is printed here, before the branch below, so it
+          # is visible whether this run proceeds (all REVERSIBLE) or is
+          # refused (IRREVERSIBLE present). Emitted in BOTH the job log and
+          # GITHUB_STEP_SUMMARY, because the step summary is the harder of the
+          # two to prove reachable: it renders in the UI and there is no plain
+          # API for it, whereas the job log is fetchable.
+          WARNING_COUNT=$(jq -r '.warnings // 0' "$CLASS_JSON" 2>/dev/null || echo 0)
+          if [ -n "${WARNING_COUNT}" ] && [ "${WARNING_COUNT}" != "0" ]; then
+            WARNING_TOKENS=$(jq -r '[.files[].warnings[]?.token] | .[]' "$CLASS_JSON" 2>/dev/null || true)
+            echo "${WARNING_COUNT} UNBOUNDED_WRITE warning(s) in this set (does not affect the verdict or the exit code):"
+            printf '%s\n' "${WARNING_TOKENS}"
+            {
+              echo ""
+              echo "### :warning: ${WARNING_COUNT} unbounded write warning(s) on \`${SUPABASE_REF}\`"
+              echo ""
+              echo "An UPDATE with no WHERE clause. Warned, not refused (OR-T1537 ruling, option C):"
+              echo "the row still exists afterward, unlike a DROP or an unqualified DELETE."
+              echo '```'
+              printf '%s\n' "${WARNING_TOKENS}"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
           if [ "$RC" -eq 0 ]; then
             echo "VERDICT: every pending migration is REVERSIBLE (${EXAMINED} of ${PENDING} examined). Proceeding exactly as before."
             {
