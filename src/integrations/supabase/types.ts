@@ -1465,8 +1465,8 @@ export type Database = {
           connection_id: string
           created_at: string
           discovery_source: string | null
-          encrypted_metadata: string
-          encrypted_metadata_key_version: number
+          encrypted_metadata: string | null
+          encrypted_metadata_key_version: number | null
           external_wallet_id: string
           id: string
           is_synced: boolean
@@ -1477,8 +1477,8 @@ export type Database = {
           connection_id: string
           created_at?: string
           discovery_source?: string | null
-          encrypted_metadata: string
-          encrypted_metadata_key_version?: number
+          encrypted_metadata?: string | null
+          encrypted_metadata_key_version?: number | null
           external_wallet_id: string
           id?: string
           is_synced?: boolean
@@ -1489,8 +1489,8 @@ export type Database = {
           connection_id?: string
           created_at?: string
           discovery_source?: string | null
-          encrypted_metadata?: string
-          encrypted_metadata_key_version?: number
+          encrypted_metadata?: string | null
+          encrypted_metadata_key_version?: number | null
           external_wallet_id?: string
           id?: string
           is_synced?: boolean
