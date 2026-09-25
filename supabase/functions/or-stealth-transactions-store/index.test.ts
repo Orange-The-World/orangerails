@@ -485,8 +485,8 @@ Deno.test('OR-T2457: a stale scan_generation (stored != supplied) triggers 409, 
   // the fence must not block it.
   const suppliedByFresh = FRESH_GEN;
   assertEquals(
-    storedAfterReset !== suppliedByFresh,
-    false,
+    storedAfterReset,
+    suppliedByFresh,
     'stored and supplied match for a post-reset sync -> 409 condition is false, write proceeds',
   );
 
