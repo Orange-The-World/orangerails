@@ -982,6 +982,16 @@ export async function handleEventSinkDelivery(
           provider:     'quiltt',
         }),
       });
+    } else {
+      // OR-T2729: this branch used to do nothing. No webhook_url on the
+      // platform means the integrator is never told a sync is ready, and
+      // nothing else records that, so a platform can sit at zero
+      // transactions for months with no signal anywhere. Log it so the
+      // gap is visible instead of hiding.
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: sink webhook enqueue skipped, ` +
+          `platform ${platformId} has no webhook_url configured`,
+      );
     }
   } catch (whErr) {
     console.error(
