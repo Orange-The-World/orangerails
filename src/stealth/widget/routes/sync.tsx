@@ -246,7 +246,45 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           descriptor = parseDescriptor(envelopePayload.descriptor);
         }
 
-        // 2. Run the orchestrator.
+        // 2. Fetch the persisted UTXO set so runSync can seed its in-run map.
+        //    A first sync returns { sealed_utxos: null }; any fetch failure is
+        //    logged and treated as absent -- the run starts with an empty map,
+        //    preserving existing behavior.
+        let priorSealedUtxos: SealedEnvelope | null = null;
+        if (!init.skip_transaction_upload) {
+          try {
+            const utxoBody = {
+              connection_id: init.connection_id,
+              app_user_id: init.app_user_id,
+              widget_token: init.widget_token,
+            };
+            type UtxoResp = { sealed_utxos: SealedEnvelope | null };
+            let utxoJson: UtxoResp | null = null;
+            if (init.proxy_base_url && parent) {
+              const r = await proxyFetch({
+                parent,
+                parentOrigin: init.return_callback_origin,
+                fn: "or-stealth-utxos-fetch",
+                body: utxoBody,
+                timeoutMs: 15000,
+              });
+              if (r.ok && r.parsed !== null) utxoJson = r.parsed as UtxoResp;
+            } else {
+              const hdrs: Record<string, string> = { "Content-Type": "application/json" };
+              if (init.access_token) hdrs["Authorization"] = "Bearer " + init.access_token;
+              const r = await fetch(
+                resolveFunctionUrl("or-stealth-utxos-fetch", init.proxy_base_url),
+                { method: "POST", headers: hdrs, body: JSON.stringify(utxoBody) },
+              );
+              if (r.ok) utxoJson = (await r.json()) as UtxoResp;
+            }
+            if (utxoJson?.sealed_utxos) priorSealedUtxos = utxoJson.sealed_utxos;
+          } catch (e) {
+            console.warn("[stealth/sync] UTXO set fetch failed; starting with empty map:", e);
+          }
+        }
+
+        // 3. Run the orchestrator.
         const result = await runSync({
           envelope: envJson.sealed_envelope,
           orStealthKey: init.or_stealth_key_b64,
@@ -257,6 +295,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           fetchTip: useMock ? mockFetchTip : liveFetchTip,
           fetchFilter: useMock ? mockFetchFilter : liveFetchFilter,
           fetchBlock: useMock ? mockFetchBlock : liveFetchBlock,
+          sealedUtxos: priorSealedUtxos,
           matcher: useMock ? mockNeverMatcher : undefined,
           onProgress: (ev) => {
             if (cancelled) return;
@@ -313,13 +352,14 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    not needed). Cuts the slow upload step entirely for those
         //    apps. SYNC_COMPLETE still fires below so the consumer
         //    persists locally.
-        if (!init.skip_transaction_upload && result.sealedTransactions.length > 0) {
+        if (!init.skip_transaction_upload && (result.sealedTransactions.length > 0 || result.sealedUtxos !== null)) {
           const uploadBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
             widget_token: currentWidgetToken,
             sealed_transactions: result.sealedTransactions,
             last_block_scanned: result.lastBlockScanned,
+            ...(result.sealedUtxos !== null ? { sealed_utxos: result.sealedUtxos } : {}),
           };
           let uploadOk = false;
           let uploadStatus = 0;
