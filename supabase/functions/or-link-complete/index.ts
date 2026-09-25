@@ -72,6 +72,10 @@
  *   link_state:    "rolled_back" | "incomplete"
  *   retryable:     boolean (true means the same widget token was released)
  *   connection_id: string only when cleanup failed and the row remains pending
+ *   next_step:     string only when connection_id is present. Tells the
+ *                  integrator to call or-connection-cancel(connection_id) to
+ *                  remove the stranded pending row immediately, rather than
+ *                  wait on the 10-minute cleanup_pending_connections sweep.
  *
  * Callers must not interpret either failure state as an account selection.
  */
@@ -752,13 +756,20 @@ Deno.serve(
           console.error("[or-link-complete] incomplete link recovery failed:", recovery.error);
           await reportError(new Error(recovery.error), "or-link-complete", req);
         }
+        const connectionRemains = !recovery.connectionRemoved;
         return jsonResponse(
           {
             error,
             code,
-            link_state: recovery.connectionRemoved ? "rolled_back" : "incomplete",
+            link_state: connectionRemains ? "incomplete" : "rolled_back",
             retryable: recovery.tokenReleased,
-            connection_id: recovery.connectionRemoved ? undefined : connectionId,
+            connection_id: connectionRemains ? connectionId : undefined,
+            // OR-C2094: nothing previously told the integrator how to clear a
+            // pending row that the compensating delete itself failed to remove.
+            // or-connection-cancel accepts this exact connection_id.
+            next_step: connectionRemains
+              ? "Call or-connection-cancel with this connection_id to clean up before retrying."
+              : undefined,
           },
           500,
           cors,
@@ -1066,6 +1077,9 @@ Deno.serve(
             link_state: recovery.connectionRemoved ? "rolled_back" : "incomplete",
             retryable: recovery.tokenReleased,
             connection_id: recovery.connectionRemoved ? undefined : connectionId,
+            next_step: recovery.connectionRemoved
+              ? undefined
+              : "Call or-connection-cancel with this connection_id to clean up before retrying.",
           },
           500,
           cors,
