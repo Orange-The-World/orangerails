@@ -424,6 +424,34 @@ export async function persistCoAdminGrant(params: {
     grant_sig: grantSig,
   });
   if (wdkErr) {
+    if (isUniqueViolation(wdkErr)) {
+      // A row already exists at this exact (workspaceKeyId, targetUserId)
+      // pair -- the UNIQUE constraint added for DL-2261 is the only way this
+      // insert fails this way. The workspace_admins write just above either
+      // just succeeded or was already there, so the list entry is correct
+      // either way; only the key row is in question.
+      //
+      // WHY THIS DOES NOT DELETE THE STALE ROW AND RETRY THE WAY revokeCoAdmin
+      // DELETES wrapped_data_keys. That would assume the existing row is
+      // debris from a failed attempt, but a duplicate here just as plausibly
+      // means an EARLIER call in this same flow already wrote a fully valid
+      // key and only ITS RESPONSE was lost -- an error is not proof a write
+      // did not land, the exact fact this function's own docstring argues
+      // from for the list row above. Silently overwriting a key that may
+      // already be working, on a guess this function has no way to verify,
+      // is not obviously safer than leaving it. So this says only what is
+      // actually known -- a key is already stored for this recipient -- and
+      // points at the one path in this codebase that replaces a key on
+      // purpose: revoke, which deletes the wrapped_data_keys row and proves
+      // the delete happened (see revokeCoAdmin) before anything is
+      // re-granted, so a follow-up grant is never in doubt.
+      throw new CoAdminGrantIncompleteError(
+        "This recipient already has a stored key for this workspace, most likely from an earlier " +
+          "grant attempt whose confirmation was lost. Nothing was changed just now. If you are not " +
+          "sure it is current, remove them and grant again: removing deletes the stored key before " +
+          "anything is re-granted, so the replacement is never in doubt.",
+      );
+    }
     throw new CoAdminGrantIncompleteError(
       "This co-admin was added to your list, but the key that gives them access was not stored, " +
         "so they cannot open any of your data. They are shown in your list on purpose, so the " +

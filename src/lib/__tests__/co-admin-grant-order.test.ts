@@ -108,6 +108,13 @@ const UNIQUE_VIOLATION = {
     'duplicate key value violates unique constraint "workspace_admins_owner_user_id_admin_user_id_key"',
 };
 
+/** The same shape, for the OTHER unique constraint: (data_key_id, recipient_user_id). */
+const WRAPPED_KEY_UNIQUE_VIOLATION = {
+  code: "23505",
+  message:
+    'duplicate key value violates unique constraint "wrapped_data_keys_key_recipient_uniq"',
+};
+
 describe("a co-admin grant writes the evidence before the access", () => {
   it("writes workspace_admins BEFORE wrapped_data_keys", async () => {
     const { client, inserts } = makeFakeClient();
@@ -224,5 +231,45 @@ describe("granting again after a stop is the remedy, not a second dead end", () 
     // something entirely different from a row that is already there.
     expect((err as Error).message).toContain("permission denied");
     expect(insertedTables(inserts)).toEqual(["workspace_admins"]);
+  });
+});
+
+describe("a duplicate key row is reported, never silently replaced (OR-E0015)", () => {
+  it("tells the owner a key is already stored, without deleting anything", async () => {
+    const { client, inserts } = makeFakeClient({
+      errors: { wrapped_data_keys: WRAPPED_KEY_UNIQUE_VIOLATION },
+    });
+
+    const err = await rejection(persist(client));
+
+    expect(err).toBeInstanceOf(CoAdminGrantIncompleteError);
+    const message = (err as Error).message;
+    expect(message).toContain("already has a stored key");
+    expect(message).toContain("remove them and grant again");
+    // The fake throws on delete(), so reaching it fails this test loudly:
+    // this path must never delete a row on the strength of an unconfirmed
+    // failure. See the "does not delete the list row back out" case above
+    // for the same rule applied to the other row.
+    expect(insertedTables(inserts)).toEqual(["workspace_admins", "wrapped_data_keys"]);
+  });
+
+  it("still uses the generic incomplete-grant message for a non-duplicate key failure", async () => {
+    const { client } = makeFakeClient({
+      errors: {
+        wrapped_data_keys: {
+          code: "42501",
+          message: "new row violates row-level security policy for table wrapped_data_keys",
+        },
+      },
+    });
+
+    const err = await rejection(persist(client));
+
+    expect(err).toBeInstanceOf(CoAdminGrantIncompleteError);
+    // A blanket "duplicate" message on every key-row failure would tell an
+    // owner blocked by an RLS refusal that someone already has a key, which
+    // is simply false and points them at the wrong remedy.
+    expect((err as Error).message).not.toContain("already has a stored key");
+    expect((err as Error).message).toContain("row-level security");
   });
 });
