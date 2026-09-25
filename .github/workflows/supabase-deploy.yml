@@ -2896,7 +2896,15 @@ jobs:
           node scripts/check-types-drift.mjs
 
   notify:
-    needs: [target, apply-migrations, check-pending-migrations, check-rls-policy-baseline, deploy, account-deletion-cascade, check-types-drift]
+    # OR-T2109. needs: is the single source of truth for what this job can
+    # see. Add a gate here and the REASONS derivation below names it
+    # automatically -- there is deliberately no second hand-maintained list
+    # of job names left to drift out of sync with this one. That drift is
+    # exactly how check-rls-policy-baseline and check-duplicate-migrations
+    # went unreported for over a week after they were added to the deploy
+    # chain, and how check-types-drift's own addition to this job required a
+    # second hand edit here as well.
+    needs: [target, apply-migrations, check-pending-migrations, check-rls-policy-baseline, check-duplicate-migrations, deploy, account-deletion-cascade, check-types-drift]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -2910,13 +2918,8 @@ jobs:
           BRANCH: ${{ github.ref_name }}
           SHA: ${{ github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          R_TARGET: ${{ needs.target.result }}
-          R_APPLY: ${{ needs['apply-migrations'].result }}
-          R_GATE: ${{ needs['check-pending-migrations'].result }}
-          R_RLS: ${{ needs['check-rls-policy-baseline'].result }}
           R_DEPLOY: ${{ needs.deploy.result }}
-          R_CASCADE: ${{ needs['account-deletion-cascade'].result }}
-          R_TYPES_DRIFT: ${{ needs['check-types-drift'].result }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
           set -uo pipefail
 
@@ -2928,14 +2931,21 @@ jobs:
           #                                      gate refused it.
           # A deploy that ran and found no changed functions is a SUCCESS and is
           # deliberately not reported.
+          # DERIVED from this job's own needs: list (OR-T2109), not restated
+          # by hand. jq walks every entry toJSON(needs) produced above, in the
+          # same order the needs: array declares them, so a job added to
+          # needs: above is classified with no second edit anywhere else in
+          # this file. KNOWN LIMIT: a gate that stops the deploy but was never
+          # added to needs: at all still cannot be seen from in here -- that
+          # is a different problem (this job's .result read requires needs:)
+          # and is not what this derivation fixes.
           REASONS=""
-          for PAIR in "target:${R_TARGET}" "apply-migrations:${R_APPLY}" "check-pending-migrations:${R_GATE}" "check-rls-policy-baseline:${R_RLS}" "check-types-drift:${R_TYPES_DRIFT}" "deploy:${R_DEPLOY}" "account-deletion-cascade:${R_CASCADE}"; do
-            JOB="${PAIR%%:*}"
-            RES="${PAIR##*:}"
+          while IFS=$'\t' read -r JOB RES; do
+            [ -n "$JOB" ] || continue
             case "$RES" in
               failure|cancelled) REASONS="${REASONS}- \`${JOB}\` ended **${RES}**"$'\n' ;;
             esac
-          done
+          done < <(printf '%s' "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key)\t\(.value.result)"')
           if [ "${R_DEPLOY}" = "skipped" ]; then
             REASONS="${REASONS}- \`deploy\` was **skipped**, so no edge function shipped to this branch's Supabase project."$'\n'
           fi
