@@ -11,6 +11,15 @@
  * height the caller reports having scanned, which is why the widget calls it on
  * every sync and not only on syncs that stored something.
  *
+ * CALLERS (OR-T2457 open question resolved): the only confirmed caller of this
+ * endpoint is the widget sync flow. Platform-mode callers (API-key auth) are
+ * accepted by the auth layer but this endpoint is not part of the documented
+ * platform REST API and no platform integration is known to call it directly.
+ * A platform caller that does must supply scan_generation; a request without
+ * it receives 400 explicitly. There is no safe permissive fallback: a caller
+ * with no generation is indistinguishable from one carrying a stale one, and
+ * silently accepting that write is exactly the defect this fence closes.
+ *
  * WHAT THE REPORTED HEIGHT MEANS, and where that is decided. Not here: the
  * contract for this column is defined once, in ../_shared/scan-cursor.ts, and
  * both endpoints that write it import from there. In short, last_block_scanned
@@ -32,6 +41,15 @@
  *                             contiguous height gains nothing by repeating it.
  *                             The value is a ceiling only, so it can hold the
  *                             cursor back and can never push it forward.
+ *   scan_generation:          string (uuid), REQUIRED. The connection's
+ *                             scan_generation as read at the START of this
+ *                             sync (OR-T2457). Refused with 400 if absent or
+ *                             malformed, and with 409 if it no longer matches
+ *                             the connection's current value: that means the
+ *                             connection was reset (envelope replaced) while
+ *                             this sync was running, and last_block_scanned /
+ *                             the scan range this call would otherwise write
+ *                             both predate that reset.
  *
  * Response:
  *   { connection_id, last_block_scanned }
@@ -57,6 +75,8 @@ interface EnvelopeUpdateRequestBody {
   connection_id?: string;
   app_user_id?: string;
   last_block_scanned?: number;
+  /** See scan_generation in the module doc above. Required, uuid-shaped. */
+  scan_generation?: string;
   /**
    * Optional contiguity ceiling (OR-T1914). The last height the caller read
    * WITHOUT a gap. When present, the cursor advances to at most
@@ -140,6 +160,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (!body.app_user_id || typeof body.app_user_id !== 'string') {
       return jsonResponse({ error: 'app_user_id required' }, 400, cors);
     }
+    // OR-T2457: refused rather than defaulted. A caller with no fresh
+    // generation is indistinguishable from one carrying a stale one, so
+    // there is no safe permissive fallback the way there is for the
+    // contiguous_block_scanned ceiling below.
+    if (!body.scan_generation || !UUID_RE.test(body.scan_generation)) {
+      return jsonResponse({ error: 'scan_generation (uuid) required' }, 400, cors);
+    }
     if (
       body.last_block_scanned === undefined ||
       typeof body.last_block_scanned !== 'number' ||
@@ -218,6 +245,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       callerPlatformId,
       body.connection_id,
       body.last_block_scanned,
+      body.scan_generation,
       body.contiguous_block_scanned,
     );
     if (isAdvanceCursorError(cursorResult)) {
@@ -249,6 +277,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       // exists to prevent, written into a different table.
       last_block_scanned: boundedHeight,
       from_height:        body.from_height,
+      // OR-T2457: same token advanceCursor above just checked. The database
+      // function checks it again independently; it does not trust that the
+      // cursor write having succeeded means this one may proceed.
+      scan_generation:    body.scan_generation,
     });
 
     const resp: EnvelopeUpdateResponseBody = {

@@ -65,12 +65,14 @@ Deno.test(
   },
 );
 
-Deno.test('payload shape matches the 4-arg record_stealth_scan_range signature', () => {
+Deno.test('payload shape matches the 5-arg record_stealth_scan_range signature (OR-T2457 added p_scan_generation)', () => {
+  const GEN = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
   const args = buildScanRangeArgs({
     connection_id: CONN_ID,
     app_user_id: CALLER,
     last_block_scanned: 900_100,
     from_height: 900_000,
+    scan_generation: GEN,
   });
 
   assertEquals(args, {
@@ -78,6 +80,7 @@ Deno.test('payload shape matches the 4-arg record_stealth_scan_range signature',
     p_from_height: 900_000,
     p_to_height: 900_100,
     p_app_user_id: CALLER,
+    p_scan_generation: GEN,
   });
 });
 
