@@ -11,6 +11,15 @@
  * height the caller reports having scanned, which is why the widget calls it on
  * every sync and not only on syncs that stored something.
  *
+ * CALLERS (OR-T2457 open question resolved): the only confirmed caller of this
+ * endpoint is the widget sync flow. Platform-mode callers (API-key auth) are
+ * accepted by the auth layer but this endpoint is not part of the documented
+ * platform REST API and no platform integration is known to call it directly.
+ * A platform caller that does must supply scan_generation; a request without
+ * it receives 400 explicitly. There is no safe permissive fallback: a caller
+ * with no generation is indistinguishable from one carrying a stale one, and
+ * silently accepting that write is exactly the defect this fence closes.
+ *
  * WHAT THE REPORTED HEIGHT MEANS, and where that is decided. Not here: the
  * contract for this column is defined once, in ../_shared/scan-cursor.ts, and
  * both endpoints that write it import from there. In short, last_block_scanned
