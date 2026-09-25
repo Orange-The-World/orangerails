@@ -1653,6 +1653,17 @@ export function AppHome() {
               // instead of leaving the owner with only the raw error text.
               if (e instanceof CoAdminGrantIncompleteError) {
                 setErr(e.message);
+                await loadCoAdminList();
+                if (e.alreadyGranted) {
+                  // A stored key already exists for this recipient and this
+                  // attempt changed nothing (see persistCoAdminGrant). There
+                  // is no incomplete state to clean up, and offering
+                  // "Remove from list" here would only clear the list entry
+                  // (confirmClearCoAdminListEntry never touches
+                  // wrapped_data_keys) while their real access stayed live
+                  // underneath, invisible on the owner's list (OR-C2088).
+                  return;
+                }
                 const freshRows = await loadCoAdminList();
                 const addedRow = freshRows.find((r) => r.adminEmail === targetEmail);
                 if (addedRow) setPendingGrantIncomplete(addedRow);
