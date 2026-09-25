@@ -46,11 +46,12 @@ $$;
 -- the merge cases: a guard that has only ever been observed permitting is not
 -- a guard anyone has tested.
 CREATE OR REPLACE FUNCTION public.t_assert_refused(
-  p_label       text,
-  p_conn        uuid,
-  p_from        int,
-  p_to          int,
-  p_app_user_id text
+  p_label           text,
+  p_conn            uuid,
+  p_from            int,
+  p_to              int,
+  p_app_user_id     text,
+  p_scan_generation uuid
 )
 RETURNS void
 LANGUAGE plpgsql
@@ -60,7 +61,7 @@ DECLARE
   v_message text;
 BEGIN
   BEGIN
-    PERFORM public.record_stealth_scan_range(p_conn, p_from, p_to, p_app_user_id);
+    PERFORM public.record_stealth_scan_range(p_conn, p_from, p_to, p_app_user_id, p_scan_generation);
   EXCEPTION WHEN OTHERS THEN
     v_raised  := true;
     v_message := SQLERRM;
