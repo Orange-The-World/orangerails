@@ -126,6 +126,18 @@ function makeFakeClient(options: FakeOptions = {}) {
   // The backing store. It is a copy, because reorderAfterSelect rewrites it and
   // a test's fixture must not be mutated underneath it.
   const store: Record<string, unknown[]> = {};
+  // Every real rotation call requires an existing user_vault_meta row (see
+  // OR-T2371's zero-row guard in vault-persist.ts). Most tests here are not
+  // about that guard at all, so seed a default non-empty row here rather than
+  // making every unrelated fixture carry one. A test that DOES care provides
+  // its own user_vault_meta key in rows, including an explicit empty array
+  // for the zero-row guard itself, and that key always wins because the loop
+  // below runs after this and overwrites the table.
+  if (!("user_vault_meta" in (options.rows ?? {}))) {
+    store.user_vault_meta = [
+      { user_id: "user-1", kem_secret_wrapped: null, sig_secret_wrapped: null, workspace_key_id: null },
+    ];
+  }
   for (const [table, rows] of Object.entries(options.rows ?? {})) store[table] = rows.slice();
 
   // Counts UPDATE calls per table, so failUpdateFromCall can fail a specific
@@ -748,6 +760,27 @@ describe("vault recovery: the rotated meta write", () => {
     await expect(
       migrateAndPersistRotatedVault(rotateArgs(client, vi.fn())),
     ).resolves.toBeUndefined();
+  });
+
+  it("refuses to rotate, before touching any row, if the pre-write meta read returns zero rows", async () => {
+    // No error and no row: a .eq() select answers this way on a dropped
+    // session, an RLS predicate that stopped matching, or a deleted row.
+    // It must never be read the same as "vault has no stored PQC secrets".
+    const clearMigrationKeys = vi.fn();
+    const { client, calls } = makeFakeClient({
+      ...oneConnection,
+      rows: {
+        ...oneConnection.rows,
+        user_vault_meta: [],
+      },
+    });
+
+    await expect(
+      migrateAndPersistRotatedVault(rotateArgs(client, clearMigrationKeys)),
+    ).rejects.toThrow(/Could not confirm your vault's stored keys/);
+
+    expect(calls.some((c) => c.op === "update")).toBe(false);
+    expect(clearMigrationKeys).not.toHaveBeenCalled();
   });
 
   it("migrates every row BEFORE the meta write, never after", async () => {
