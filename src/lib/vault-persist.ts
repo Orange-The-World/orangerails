@@ -480,6 +480,15 @@ export interface VaultMetaForRecovery {
   recovery_ciphertext: string | null;
   kem_secret_wrapped: string | null;
   sig_secret_wrapped: string | null;
+  /**
+   * Keys every co-admin (emergency access) grant this owner has made. Read
+   * here, alongside everything else recovery needs before it begins, because
+   * after the rotation completes it is what lets the caller find and
+   * invalidate every grant that now holds dead HKDF subkeys. Null when the
+   * owner has never had a workspace key, in which case there is nothing to
+   * invalidate.
+   */
+  workspace_key_id: string | null;
 }
 
 /**
@@ -505,7 +514,7 @@ export async function loadVaultMetaForRecovery(
   const { data: meta, error } = await supabase
     .from("user_vault_meta")
     .select(
-      "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped",
+      "vault_salt, vault_verifier_ciphertext, recovery_ciphertext, kem_secret_wrapped, sig_secret_wrapped, workspace_key_id",
     )
     .eq("user_id", userId)
     .single();
