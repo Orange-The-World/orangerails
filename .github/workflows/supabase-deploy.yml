@@ -2171,6 +2171,86 @@ jobs:
           echo
 
           # -------------------------------------------------------------------
+          # OR-T1252 (challenge OR-C1886). CONTENT-HASH LEDGER, read before the
+          # shadow scan below so its own scan can use it.
+          #
+          # The shadow scan compares a FILE NAME to the name the ledger
+          # recorded. It cannot see a file edited IN PLACE: same name,
+          # changed SQL, reads as a match either way. That is the other half
+          # of the exact defect OR-T1252 was opened for, just separated by an
+          # edit instead of a rename, and it is why the Auditor sent this
+          # ticket back to working after the first fix merged.
+          #
+          # This does NOT touch supabase_migrations.schema_migrations, which
+          # the Supabase CLI also writes and reads (OR-T1252's own "blast
+          # radius" note about that table): it is a second, small table this
+          # workflow owns start to finish. Bootstrap is CREATE TABLE IF NOT
+          # EXISTS, safe to run on every dispatch. A hash is written ONCE, at
+          # the moment a file first applies (later in this job), and never
+          # afterwards: it is evidence of what the SQL was when it ran, not a
+          # rolling fingerprint of whatever the file says today.
+          #
+          # A version applied before this scan existed has no row here and
+          # is UNVERIFIABLE for content, the same accepted, disclosed shape
+          # as a NULL name in the shadow scan above (OR-T1271 tracks
+          # backfilling the name column separately; not this run's job, and
+          # backfilling a hash for SQL nobody kept a copy of is not possible
+          # at all).
+          # -------------------------------------------------------------------
+          HASH_BOOTSTRAP=$(mktemp); chmod 600 "$HASH_BOOTSTRAP"
+          jq -n '{query:"CREATE TABLE IF NOT EXISTS public._or_migration_hashes (version text PRIMARY KEY, sha256 text NOT NULL, recorded_at timestamptz NOT NULL DEFAULT now());"}' > "$HASH_BOOTSTRAP"
+          HASH_BOOT_OK=0
+          for attempt in 1 2 3; do
+            if curl -sS --fail-with-body -o /dev/null \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$HASH_BOOTSTRAP"; then
+              HASH_BOOT_OK=1
+              break
+            fi
+            echo "content-hash table bootstrap attempt ${attempt}/3 did not return a success status"
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          rm -f "$HASH_BOOTSTRAP"
+          if [ "$HASH_BOOT_OK" -ne 1 ]; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: could not create or confirm public._or_migration_hashes, the table the content scan needs, after 3 attempts. NOTHING was applied. I-could-not-check must never read as clean."
+            exit 1
+          fi
+
+          HASH_PAYLOAD=$(mktemp); chmod 600 "$HASH_PAYLOAD"
+          jq -n '{query:"SELECT version, sha256 FROM public._or_migration_hashes ORDER BY version;"}' > "$HASH_PAYLOAD"
+          HASH_RESPONSE=""; HASH_OK=0
+          for attempt in 1 2 3; do
+            if HASH_RESPONSE=$(curl -sS --fail-with-body \
+              -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary "@$HASH_PAYLOAD"); then
+              HASH_OK=1
+              break
+            fi
+            echo "content-hash ledger query attempt ${attempt}/3 did not return a success status"
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          rm -f "$HASH_PAYLOAD"
+          # Reuses ledger_shape_ok, already self-tested above: an array of
+          # versioned rows is required, or empty; anything else is UNKNOWN,
+          # not zero.
+          if [ "$HASH_OK" -ne 1 ] || ! ledger_shape_ok "$HASH_RESPONSE"; then
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: the content-hash table query did not return a usable array of rows. NOTHING was applied."
+            exit 1
+          fi
+          HASH_MAP=$(mktemp); chmod 600 "$HASH_MAP"
+          echo "$HASH_RESPONSE" | jq -r '.[] | "\(.version)=\(.sha256 // "")"' | sort -u > "$HASH_MAP"
+          echo "-- ${SUPABASE_REF} content-hash table has $(wc -l < "$HASH_MAP" | tr -d ' ') recorded version(s) --"
+          echo
+
+          # -------------------------------------------------------------------
           # OR-T1252. SHADOW SCAN, before anything is applied.
           #
           # "Applied" in this loop means "a row with that version number exists",
@@ -2286,6 +2366,82 @@ jobs:
             exit 1
           fi
           rm -f "$LEDGER_MAP"
+          echo
+
+          # -------------------------------------------------------------------
+          # OR-T1252 (challenge OR-C1886). CONTENT SCAN, after the shadow scan.
+          #
+          # The shadow scan above proves a version's FILE NAME still matches
+          # what the ledger recorded. It says nothing about the SQL inside
+          # that file: an edit in place, same name, changed statements, is
+          # invisible to it, because a name match reads as fine either way.
+          # This compares the file's sha256 today against the hash recorded
+          # in public._or_migration_hashes at the moment it first applied
+          # (fetched into HASH_MAP earlier in this job). A version with no
+          # recorded hash (applied before this scan existed) is
+          # UNVERIFIABLE for content and is never folded into the pass
+          # count, same discipline as the shadow scan's own NULL-name
+          # handling.
+          # -------------------------------------------------------------------
+          content_scan() {
+            local map="$1" files="$2" dir="$3"
+            local base version ledger_line ledger_hash file_hash
+            local checked=0 matched=0 unverifiable=0 mismatched=0
+            while IFS= read -r base; do
+              [ -n "$base" ] || continue
+              version="${base%%_*}"
+              ledger_line=$(grep -m1 "^${version}=" "$map" || true)
+              if [ -z "$ledger_line" ]; then
+                unverifiable=$((unverifiable + 1))
+                continue
+              fi
+              checked=$((checked + 1))
+              ledger_hash="${ledger_line#*=}"
+              file_hash=$(sha256sum "${dir}/${base}" | cut -d' ' -f1)
+              if [ "$file_hash" = "$ledger_hash" ]; then
+                matched=$((matched + 1))
+              else
+                mismatched=$((mismatched + 1))
+                echo "  x CONTENT CHANGED: ${base} -- version ${version} applied to ${SUPABASE_REF} with sha256 ${ledger_hash}, the tree file now hashes to ${file_hash}. This SQL already ran under its original content and will never run again: the apply loop below skips any version already in the ledger, whatever the file now says."
+              fi
+            done <<< "$files"
+            echo "CONTENT SCAN: ${checked} already-applied file(s) with a recorded hash compared, ${matched} unchanged, ${mismatched} changed since they applied. ${unverifiable} file(s) predate this scan and have no recorded hash to check against."
+            [ "$mismatched" -eq 0 ]
+          }
+
+          # The scan must be able to go RED, same discipline as the shadow
+          # scan's own self-test: a comparison that silently checks nothing
+          # would read exactly like a clean tree.
+          CT_DIR=$(mktemp -d)
+          printf -- '-- changed\n' > "${CT_DIR}/20990101000002_changed.sql"
+          printf -- '-- unchanged\n' > "${CT_DIR}/20990101000003_unchanged.sql"
+          CT_UNCHANGED_HASH=$(sha256sum "${CT_DIR}/20990101000003_unchanged.sql" | cut -d' ' -f1)
+          CT_MAP=$(mktemp)
+          printf '%s\n' \
+            "20990101000002=0000000000000000000000000000000000000000000000000000000000000000" \
+            "20990101000003=${CT_UNCHANGED_HASH}" > "$CT_MAP"
+          if content_scan "$CT_MAP" '20990101000002_changed.sql' "$CT_DIR" >/dev/null 2>&1; then
+            rm -rf "$CT_DIR" "$CT_MAP"
+            echo "::error::content-scan self-test FAILED: the detector did not fire on a file whose sha256 no longer matches its recorded hash. Refusing to apply, because a check that cannot go red proves nothing."
+            exit 1
+          fi
+          if ! content_scan "$CT_MAP" '20990101000003_unchanged.sql' "$CT_DIR" >/dev/null 2>&1; then
+            rm -rf "$CT_DIR" "$CT_MAP"
+            echo "::error::content-scan self-test FAILED: the detector fired on a file whose sha256 matches its recorded hash. Refusing to apply."
+            exit 1
+          fi
+          rm -rf "$CT_DIR" "$CT_MAP"
+          echo "content-scan self-test ok: fires on a changed hash, silent on a match."
+
+          if [ -z "$TREE_FILES" ]; then
+            echo "CONTENT SCAN: no .sql files in $MIG_DIR to compare."
+          elif ! content_scan "$HASH_MAP" "$TREE_FILES" "$MIG_DIR"; then
+            rm -f "$HASH_MAP"
+            echo
+            echo "::error::APPLY ABORTED on ${SUPABASE_REF}: one or more migration files that already applied have been edited in place since; their content no longer matches the hash recorded when they ran. NOTHING was applied. The fix is a NEW migration file carrying the additional change: never edit a file that has already shipped, because the version stays in the ledger and this file will never be reconsidered."
+            exit 1
+          fi
+          rm -f "$HASH_MAP"
           echo
 
           # -------------------------------------------------------------------
@@ -2771,6 +2927,38 @@ jobs:
             fi
             rm -f /tmp/mig.resp
             echo "  v migration recorded in ledger and read back (version ${VERSION}, name ${NAME})"
+
+            # OR-T1252 (challenge OR-C1886). Record the content hash this
+            # file had at the moment it ran, so a future dispatch's content
+            # scan (above) can tell a rename from an in-place edit. See the
+            # commit message on this block for why a failure here warns
+            # rather than aborts.
+            FILE_HASH=$(sha256sum "$FILE" | cut -d' ' -f1)
+            HASH_REC=$(mktemp); chmod 600 "$HASH_REC"
+            HASH_REC_SQL="INSERT INTO public._or_migration_hashes (version, sha256) VALUES ('${V_SQL}', '${FILE_HASH}') ON CONFLICT (version) DO NOTHING;"
+            jq -n --arg q "$HASH_REC_SQL" '{query:$q}' > "$HASH_REC"
+            HASH_REC_OK=0
+            HASH_REC_CODE=""
+            for attempt in 1 2 3; do
+              HASH_REC_CODE=$(curl -sS -o /tmp/hash.resp -w "%{http_code}" \
+                -X POST "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/query" \
+                -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                --data-binary "@$HASH_REC")
+              if [[ "$HASH_REC_CODE" =~ ^2 ]]; then
+                HASH_REC_OK=1
+                break
+              fi
+              echo "  ! content-hash record attempt ${attempt}/3 returned HTTP ${HASH_REC_CODE}"
+              if [ "$attempt" -lt 3 ]; then
+                sleep 10
+              fi
+            done
+            rm -f "$HASH_REC" /tmp/hash.resp
+            if [ "$HASH_REC_OK" -ne 1 ]; then
+              echo "  ! WARNING: could not record the content hash for ${BASENAME} after 3 attempts (last HTTP ${HASH_REC_CODE}). Not blocking: ${BASENAME} is already correctly applied and recorded above. To restore in-place-edit detection for this one file, run by hand: INSERT INTO public._or_migration_hashes (version, sha256) VALUES ('${V_SQL}', '${FILE_HASH}') ON CONFLICT (version) DO NOTHING;"
+            fi
+
             APPLIED_COUNT=$((APPLIED_COUNT + 1))
           done
 
