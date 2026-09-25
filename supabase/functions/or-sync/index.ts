@@ -46,7 +46,7 @@
  * registry; see _shared/providers/dispatch.ts for the source adapter registry.
  */
 
-import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { buildCorsHeaders, buildPublicCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
@@ -207,8 +207,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   // Anonymous, unauthenticated probe (DEV-0126): proves the deployed bundle,
   // not just the source, carries the connection-result wiring. No DB access,
   // no auth, no customer data, no secrets. Safe to call repeatedly.
+  // Public no-auth endpoint convention (see or-providers): this arm answers
+  // with Access-Control-Allow-Origin: * instead of the origin allow-list
+  // `cors` carries for the authenticated POST path below, so any caller can
+  // read the response, not just callers on an allow-listed origin.
   if (req.method === 'GET') {
-    return jsonResponse(buildProbeBody(Deno.env.get('OR_BUILD_SHA') ?? null), 200, cors);
+    return jsonResponse(buildProbeBody(Deno.env.get('OR_BUILD_SHA') ?? null), 200, buildPublicCorsHeaders());
   }
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
 
