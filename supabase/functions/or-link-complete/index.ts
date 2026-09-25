@@ -1077,6 +1077,9 @@ Deno.serve(
             link_state: recovery.connectionRemoved ? "rolled_back" : "incomplete",
             retryable: recovery.tokenReleased,
             connection_id: recovery.connectionRemoved ? undefined : connectionId,
+            next_step: recovery.connectionRemoved
+              ? undefined
+              : "Call or-connection-cancel with this connection_id to clean up before retrying.",
           },
           500,
           cors,
