@@ -11,7 +11,9 @@
 #         means someone was actually told; every other failure is 2.
 #
 # Required env:
-#   ORBI_PROBE_DSN       postgres DSN (postgres://user:pass@host:port/db)
+#   ORBI_PROBE_DSN       postgres URI (postgres://user@host:port/db). Prefer a
+#                        passwordless URI with PGPASSWORD supplied separately
+#                        by the same protected environment file.
 #   -or- DATABASE_URL    fallback if ORBI_PROBE_DSN is unset
 #
 #   ORBI_ALERT_SCRIPT    absolute path to the host's Zulip alert script, called
@@ -22,6 +24,8 @@
 #
 # Optional env:
 #   STALE_THRESHOLD_MINUTES   integer, default 90
+#   PGPASSWORD                libpq password; preferred over embedding a
+#                             password in ORBI_PROBE_DSN
 
 set -uo pipefail
 
@@ -65,11 +69,12 @@ fi
 
 # ---- sanitize DSN -----------------------------------------------------------
 # psql "$DSN" puts the whole connection string, password included, into this
-# process's argv, which any user on a shared box can read with `ps`. Pull the
-# password into PGPASSWORD (an environment variable, not visible to ps) and
-# add a connect_timeout so a blackholed connection cannot hang the oneshot
-# unit forever. (systemd's own TimeoutStartSec is the other half of that fix,
-# set on the unit file, not here.)
+# process's argv, which other users on a shared box can read. Pull a URI
+# userinfo password into PGPASSWORD and pass only the password-free URI to
+# psql. Reject shapes we cannot sanitize instead of falling back to the
+# credential-bearing DSN. Also add a connect_timeout so a blackholed
+# connection cannot hang the oneshot unit forever. (systemd's own
+# TimeoutStartSec is the other half of that fix, set on the unit file.)
 #
 # The password segment of a postgres:// URI is percent-encoded (RFC 3986): a
 # literal @ in the password is written %40 so it does not end the userinfo
@@ -90,10 +95,14 @@ if [[ "$DSN" =~ ^postgres(ql)?://([^:/@]+)(:([^@/]*))?@([^/:@]+)(:([0-9]+))?/([^
   DSN_PORT="${BASH_REMATCH[7]}"
   DSN_DB="${BASH_REMATCH[8]}"
   DSN_QS="${BASH_REMATCH[10]}"
+  if [[ "$DSN_QS" =~ (^|&)password= ]]; then
+    alarm ERROR "ORBI_PROBE_DSN must not carry a password query parameter; use PGPASSWORD"
+    exit 2
+  fi
   if [[ -n "$DSN_PASS" ]]; then
     export PGPASSWORD="$(urldecode "$DSN_PASS")"
   fi
-  if [[ "$DSN_QS" == *connect_timeout=* ]]; then
+  if [[ "$DSN_QS" =~ (^|&)connect_timeout= ]]; then
     NEW_QS="$DSN_QS"
   elif [[ -n "$DSN_QS" ]]; then
     NEW_QS="${DSN_QS}&connect_timeout=10"
@@ -103,11 +112,10 @@ if [[ "$DSN" =~ ^postgres(ql)?://([^:/@]+)(:([^@/]*))?@([^/:@]+)(:([0-9]+))?/([^
   SAFE_DSN="postgres://${DSN_USER}@${DSN_HOST}${DSN_PORT:+:${DSN_PORT}}/${DSN_DB}?${NEW_QS}"
 else
   # A password containing a literal (non-percent-encoded) @, an IPv6 host
-  # literal, or any other shape this regex does not anticipate falls through
-  # here. SAFE_DSN stays equal to DSN, so say so: a silent fallback looks
-  # identical to a working sanitizer in the log while leaving the credential
-  # in psql's argv exactly as before this fix existed.
-  echo "[$PROBE] WARNING: DSN does not match the expected postgres://user[:pass]@host[:port]/db[?qs] shape; passing it to psql unsanitized (the connection string, including any password, will appear in this process's argv)" >&2
+  # literal, keyword/value conninfo, or any other unanticipated shape cannot
+  # be proved credential-free. Fail closed rather than put it in psql's argv.
+  alarm ERROR "ORBI_PROBE_DSN must use postgres://user[:pass]@host[:port]/db[?qs]; refusing to pass an unsanitized DSN to psql"
+  exit 2
 fi
 
 # ---- query ------------------------------------------------------------------
