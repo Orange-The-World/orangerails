@@ -122,6 +122,17 @@ interface TransactionsStoreRequestBody {
    */
   widget_token?: string;
   /**
+   * OR-T2457: the connection's scan_generation as read at the START of this
+   * sync (from or-stealth-envelope-fetch). Required, uuid-shaped.
+   *
+   * Refused with 400 if absent or malformed, and with 409 if it no longer
+   * matches the connection's current value: that means the connection was
+   * reset (envelope replaced) while this sync was running, and
+   * last_block_scanned / the cursor this call would otherwise write both
+   * predate that reset. Identical rule to or-stealth-envelope-update.
+   */
+  scan_generation?: string;
+  /**
    * The sealed UTXO set as of this sync run (OR-T0049 PR 2), optional.
    * When present and well-formed, persisted via upsert_stealth_utxos keyed
    * to the same bounded cursor height this call would otherwise return, so
@@ -314,6 +325,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (body.sealed_utxos !== undefined && !isSealedUtxosInput(body.sealed_utxos)) {
       return jsonResponse({ error: 'sealed_utxos is malformed' }, 400, cors);
     }
+    // OR-T2457: refused rather than defaulted. A caller with no fresh generation
+    // is indistinguishable from one carrying a stale one, so there is no safe
+    // permissive fallback -- same rule as or-stealth-envelope-update.
+    if (!body.scan_generation || !UUID_RE.test(body.scan_generation)) {
+      return jsonResponse({ error: 'scan_generation (uuid) required' }, 400, cors);
+    }
 
     if (ctx.mode === 'direct' && body.app_user_id !== ctx.userId) {
       return jsonResponse(
@@ -345,7 +362,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // below knows the stored cursor without a second round trip.
     const { data: ownerRow, error: ownerErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .select('id, app_user_id, last_block_scanned')
+      .select('id, app_user_id, last_block_scanned, scan_generation')
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id)
       .maybeSingle();
@@ -358,6 +375,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     if ((ownerRow.app_user_id as string) !== body.app_user_id) {
       return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
+    }
+    // OR-T2457: refuse if the connection was reset (envelope replaced) since
+    // this sync began. last_block_scanned is cleared to NULL on every reset,
+    // so the forward-only guard alone treats a just-reset connection like a
+    // brand new one: "anything may write". A stale height from a pre-reset
+    // sync would then land and defeat the rescan the reset opened.
+    if ((ownerRow.scan_generation as string) !== body.scan_generation) {
+      return jsonResponse(
+        { error: 'Connection was reset since this sync began; stale write refused' },
+        409, cors,
+      );
     }
 
     // Stamp last_sync_attempt_at on entry so every sync attempt is recorded,
@@ -465,14 +493,29 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       cursorPatch.last_block_scanned = cursorAdvanceTo;
     }
 
-    const { error: updErr } = await ctx.serviceClient
+    // OR-T2457 atomic fence on the write path: include scan_generation in the
+    // WHERE clause so that a connection reset between the ownership-check SELECT
+    // and this UPDATE (TOCTOU window) causes zero rows to be affected. We detect
+    // that with .select('id') and treat an empty result as 409 -- same status as
+    // the pre-write guard above, matching the sibling endpoint's behavior.
+    const { data: cursorUpdated, error: updErr } = await ctx.serviceClient
       .from('stealth_connections')
       .update(cursorPatch)
       .eq('platform_id', callerPlatformId)
-      .eq('id', body.connection_id);
+      .eq('id', body.connection_id)
+      .eq('scan_generation', body.scan_generation as string)
+      .select('id');
     if (updErr) {
       console.error('[or-stealth-transactions-store] connection update failed:', updErr);
       return jsonResponse({ error: 'Failed to update connection sync metadata' }, 500, cors);
+    }
+    if (!cursorUpdated || cursorUpdated.length === 0) {
+      // Zero rows updated: the generation changed between our SELECT and this
+      // UPDATE -- the connection was reset while transactions were in flight.
+      return jsonResponse(
+        { error: 'Connection was reset since this sync began; stale write refused' },
+        409, cors,
+      );
     }
 
     // Optional UTXO-set persist (OR-T0049 PR 2a). Non-fatal: the sealed

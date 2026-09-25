@@ -367,6 +367,11 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             widget_token: currentWidgetToken,
             sealed_transactions: result.sealedTransactions,
             last_block_scanned: result.lastBlockScanned,
+            // OR-T2457: echo the token read at step 1 from or-stealth-envelope-fetch.
+            // or-stealth-transactions-store refuses the write (409) if the connection
+            // was reset (envelope replaced) while this sync was running, preventing a
+            // pre-reset cursor height from landing and defeating the triggered rescan.
+            scan_generation: envJson.scan_generation,
             ...(result.sealedUtxos !== null ? { sealed_utxos: result.sealedUtxos } : {}),
           };
           let uploadOk = false;
