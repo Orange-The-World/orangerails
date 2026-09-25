@@ -200,16 +200,18 @@ jobs:
               stale=$((stale+1)); continue
             fi
 
-            # Classify EACH FILE. A file matched by any low rule is exempt from
-            # every high rule, otherwise a docs-only change goes high because the
-            # word "wallet" appears in a path. The change is high only if a file
-            # is still high after that.
+            # Classify EACH FILE. HIGH RULES ARE CHECKED FIRST AND ALWAYS WIN.
+            # A file that matches a high rule is sensitive regardless of whether
+            # it also happens to match a low rule (OR-T2731: requirements.txt
+            # matched the low .txt rule, and that low match used to exempt it
+            # from the high lockfile rule that explicitly names it, because the
+            # low check ran first and short-circuited with `continue` before the
+            # high check ever ran). Low rules no longer have veto power over a
+            # high match, so a low rule added in the future can never again
+            # silently swallow a high one.
             reasons=""
             while IFS= read -r f; do
               [ -z "$f" ] && continue
-              if grep -qEi -f <(jq -r '.rules[]|select(.risk=="low")|.pattern' "$RULES") <<<"$f"; then
-                continue
-              fi
               hits=$(jq -r '.rules[]|select(.risk=="high")|.pattern' "$RULES" \
                      | while IFS= read -r p; do
                          if printf '%s' "$f" | grep -qEi -- "$p"; then printf '%s\n' "$p"; fi
