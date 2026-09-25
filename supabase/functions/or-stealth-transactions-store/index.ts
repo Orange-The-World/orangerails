@@ -493,14 +493,29 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       cursorPatch.last_block_scanned = cursorAdvanceTo;
     }
 
-    const { error: updErr } = await ctx.serviceClient
+    // OR-T2457 atomic fence on the write path: include scan_generation in the
+    // WHERE clause so that a connection reset between the ownership-check SELECT
+    // and this UPDATE (TOCTOU window) causes zero rows to be affected. We detect
+    // that with .select('id') and treat an empty result as 409 -- same status as
+    // the pre-write guard above, matching the sibling endpoint's behavior.
+    const { data: cursorUpdated, error: updErr } = await ctx.serviceClient
       .from('stealth_connections')
       .update(cursorPatch)
       .eq('platform_id', callerPlatformId)
-      .eq('id', body.connection_id);
+      .eq('id', body.connection_id)
+      .eq('scan_generation', body.scan_generation as string)
+      .select('id');
     if (updErr) {
       console.error('[or-stealth-transactions-store] connection update failed:', updErr);
       return jsonResponse({ error: 'Failed to update connection sync metadata' }, 500, cors);
+    }
+    if (!cursorUpdated || cursorUpdated.length === 0) {
+      // Zero rows updated: the generation changed between our SELECT and this
+      // UPDATE -- the connection was reset while transactions were in flight.
+      return jsonResponse(
+        { error: 'Connection was reset since this sync began; stale write refused' },
+        409, cors,
+      );
     }
 
     // Optional UTXO-set persist (OR-T0049 PR 2a). Non-fatal: the sealed
