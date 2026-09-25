@@ -1,0 +1,108 @@
+name: Header Probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL to probe (must be on allowed hosts)'
+        required: true
+        type: string
+      issue_number:
+        description: 'Issue number to post results on'
+        required: true
+        type: string
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+
+    steps:
+      - name: Validate host against allowlist
+        shell: bash
+        env:
+          URL: ${{ inputs.url }}
+        run: |
+          HOST=$(printf '%s' "$URL" | sed 's|^https\?://||' | sed 's|[/?#].*||')
+
+          ALLOWED=false
+          case "$HOST" in
+            connect.orangerails.com|app.orangerails.com|docs.orangerails.com|orangerails.com|www.orangerails.com|dev.orangerails.com)
+              ALLOWED=true ;;
+            *.pages.dev)
+              ALLOWED=true ;;
+          esac
+
+          if [ "$ALLOWED" = "false" ]; then
+            echo "::error::REFUSED: host '$HOST' is not in the probe allowlist"
+            exit 1
+          fi
+
+          echo "Accepted: $HOST"
+
+      - name: Fetch response headers
+        id: fetch
+        shell: bash
+        env:
+          URL: ${{ inputs.url }}
+        run: |
+          # HEAD request only, no redirect-following, standard browser User-Agent.
+          # Body is discarded (-I). Raw output is never echoed; only allowlisted
+          # header names are extracted below.
+          RAW=$(curl -sSI \
+            --user-agent 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+            --max-redirs 0 \
+            "$URL" 2>/dev/null || true)
+
+          STATUS_LINE=$(printf '%s\n' "$RAW" | head -1 | tr -d '\r')
+
+          # Allowlisted security header names. Only these are ever printed.
+          SECURITY_HEADERS=(
+            content-security-policy
+            content-security-policy-report-only
+            x-frame-options
+            x-content-type-options
+            referrer-policy
+            strict-transport-security
+            permissions-policy
+            cross-origin-opener-policy
+          )
+
+          REPORT="### Header Probe: \`${URL}\`"$'\n\n'
+          REPORT+="**Status:** \`${STATUS_LINE}\`"$'\n\n'
+          REPORT+="**Security headers:**"$'\n\n'
+
+          for H in "${SECURITY_HEADERS[@]}"; do
+            VAL=$(printf '%s\n' "$RAW" | grep -i "^${H}:" | head -1 | sed 's/^[^:]*: *//' | tr -d '\r')
+            if [ -n "$VAL" ]; then
+              REPORT+="- \`${H}\`: \`${VAL}\`"$'\n'
+            else
+              REPORT+="- \`${H}\`: ABSENT"$'\n'
+            fi
+          done
+
+          printf '%s' "$REPORT"
+
+          {
+            echo 'report<<PROBE_EOF'
+            printf '%s' "$REPORT"
+            echo 'PROBE_EOF'
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Post results to tracking issue
+        uses: actions/github-script@v7
+        env:
+          PROBE_REPORT: ${{ steps.fetch.outputs.report }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        with:
+          script: |
+            const report = process.env.PROBE_REPORT;
+            const issueNumber = parseInt(process.env.ISSUE_NUMBER, 10);
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: report,
+            });
+            core.info(`Posted probe results to issue #${issueNumber}`);

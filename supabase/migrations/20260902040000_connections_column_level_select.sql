@@ -131,6 +131,14 @@ GRANT SELECT (
 -- inheriting a grant. has_column_privilege is used rather than reading
 -- attacl, because an empty attacl means "inherits the table grant", which is
 -- exactly the state being removed and would read as safe.
+--
+-- The anon leg uses has_any_column_privilege for the same reason, one level
+-- along: has_table_privilege reports TABLE level privilege only, so a column
+-- level grant to anon is invisible to it and would leave this check passing.
+-- Measured on dev with GRANT SELECT (id) ON public.connections TO anon in
+-- place: has_table_privilege returned false, has_any_column_privilege
+-- returned true. See 20260902150000, which re-runs this assertion for
+-- databases where this file had already run.
 DO $$
 DECLARE
   granted CONSTANT text[] := ARRAY[
@@ -146,6 +154,7 @@ DECLARE
   ];
   still_readable text;
   missing text;
+  anon_readable text;
 BEGIN
   SELECT string_agg(a.attname, ', ' ORDER BY a.attname)
     INTO still_readable
@@ -171,8 +180,17 @@ BEGIN
       'connections: authenticated lost SELECT on column(s) the client needs: %', missing;
   END IF;
 
-  IF has_table_privilege('anon', 'public.connections', 'SELECT') THEN
-    RAISE EXCEPTION 'connections: anon can still SELECT';
+  IF has_any_column_privilege('anon', 'public.connections', 'SELECT') THEN
+    SELECT string_agg(a.attname, ', ' ORDER BY a.attname)
+      INTO anon_readable
+      FROM pg_attribute a
+     WHERE a.attrelid = 'public.connections'::regclass
+       AND a.attnum > 0
+       AND NOT a.attisdropped
+       AND has_column_privilege('anon', 'public.connections', a.attname, 'SELECT');
+
+    RAISE EXCEPTION
+      'connections: anon can still SELECT column(s): %', anon_readable;
   END IF;
 END $$;
 

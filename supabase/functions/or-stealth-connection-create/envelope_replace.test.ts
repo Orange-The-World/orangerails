@@ -47,6 +47,7 @@ interface FakeConnection {
   sealed_envelope: unknown;
   wallet_birthday_plaintext: string | null;
   last_block_scanned: number | null;
+  scan_generation: string;
 }
 
 interface FakeRange extends ScanRange {
@@ -69,7 +70,23 @@ interface FailurePoint {
   op: 'delete' | 'update';
 }
 
-function makeClient(db: FakeDb, failAt: FailurePoint | null = null) {
+/**
+ * Runs `inject` immediately after the named call's own mutation lands, but
+ * before applyEnvelopeReplacement issues its next call. Models a concurrent
+ * writer -- an in-flight sync calling record_stealth_scan_range() through a
+ * separate connection -- landing a write in the gap between this module's two
+ * unlocked, non-transactional statements (OR-T1258 / OR-T2457).
+ */
+interface RaceInjection {
+  after: FailurePoint;
+  inject: (db: FakeDb) => void;
+}
+
+function makeClient(
+  db: FakeDb,
+  failAt: FailurePoint | null = null,
+  raceAt: RaceInjection | null = null,
+) {
   const calls: RecordedCall[] = [];
 
   function query(table: string, op: 'delete' | 'update', payload?: Record<string, unknown>) {
@@ -99,6 +116,10 @@ function makeClient(db: FakeDb, failAt: FailurePoint | null = null) {
           // Never silently accept an unmodelled write: a fake that shrugs is
           // how a test starts proving nothing.
           throw new Error(`fake client: unmodelled ${op} on ${table}`);
+        }
+
+        if (raceAt && raceAt.after.table === table && raceAt.after.op === op) {
+          raceAt.inject(db);
         }
 
         resolve({ error: null });
@@ -147,6 +168,8 @@ const COVERAGE_TOP = 963_896;
 const OLD_ENVELOPE = { version: 1, algorithm: 'AES-GCM', iv_b64: 'old', ciphertext_b64: 'old' };
 const NEW_ENVELOPE = { version: 1, algorithm: 'AES-GCM', iv_b64: 'new', ciphertext_b64: 'new' };
 
+const INITIAL_GENERATION = 'gen-before-any-reset';
+
 function dbWithCoverage(): FakeDb {
   return {
     connections: [
@@ -155,6 +178,7 @@ function dbWithCoverage(): FakeDb {
         sealed_envelope: OLD_ENVELOPE,
         wallet_birthday_plaintext: '2024-01-01',
         last_block_scanned: COVERAGE_TOP,
+        scan_generation: INITIAL_GENERATION,
       },
     ],
     ranges: [
@@ -197,6 +221,28 @@ Deno.test('with coverage recorded, an envelope replacement makes the next sync s
   assertEquals(db.ranges.length, 0, 'the coverage rows are gone');
 });
 
+// ── 1b. OR-T2457: the reset must rotate the fencing token ──────────────────
+
+Deno.test(
+  'an envelope replacement rotates scan_generation to a fresh value',
+  async () => {
+    const db = dbWithCoverage();
+    const { client } = makeClient(db);
+
+    const result = await applyEnvelopeReplacement(client, CONNECTION, {
+      sealed_envelope: NEW_ENVELOPE,
+      wallet_birthday_plaintext: '2023-06-01',
+    });
+
+    assertEquals(isEnvelopeReplacementError(result), false, JSON.stringify(result));
+    assert(
+      db.connections[0].scan_generation !== INITIAL_GENERATION,
+      'the reset must rotate scan_generation, or a write in flight from before it ' +
+        'would still carry a value that matches after the reset',
+    );
+  },
+);
+
 // ── 2. the case the old path already handled, unchanged ────────────────────
 
 Deno.test('with no coverage recorded, behaviour is what it was before ranges existed', async () => {
@@ -207,6 +253,7 @@ Deno.test('with no coverage recorded, behaviour is what it was before ranges exi
         sealed_envelope: OLD_ENVELOPE,
         wallet_birthday_plaintext: '2024-01-01',
         last_block_scanned: COVERAGE_TOP,
+        scan_generation: INITIAL_GENERATION,
       },
     ],
     ranges: [],
@@ -271,6 +318,7 @@ Deno.test('the coverage clear is scoped to the connection being replaced', async
     sealed_envelope: OLD_ENVELOPE,
     wallet_birthday_plaintext: '2024-01-01',
     last_block_scanned: COVERAGE_TOP,
+    scan_generation: INITIAL_GENERATION,
   });
   db.ranges.push({
     connection_id: OTHER_CONNECTION,
@@ -336,4 +384,61 @@ Deno.test('a failed envelope write reports an error and leaves the connection re
   assertEquals(db.connections[0].sealed_envelope, OLD_ENVELOPE);
   assertEquals(db.connections[0].last_block_scanned, COVERAGE_TOP);
   assertEquals(nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT), COVERAGE_TOP + 1);
+});
+
+// ── 7. a known, open race: a concurrent write lands in the reset's gap ─────
+//
+// OR-T1258 / OR-T2457. applyEnvelopeReplacement's two writes are unlocked and
+// non-transactional (see the module header, ORDER MATTERS). Nothing here
+// fences a concurrent record_stealth_scan_range() call -- issued by an
+// in-flight sync that read its own start height BEFORE this reset ran --
+// against the reset. If that call's write lands in the gap between our
+// DELETE and our UPDATE, it re-creates coverage for this connection using
+// data computed under the OLD envelope.
+//
+// This is a CHARACTERIZATION test, not a regression guard: it pins what the
+// code on dev actually does today, which is the open defect OR-T2457 exists
+// to close via a generation/version fence (see that ticket's brief -- no
+// schema for the fence exists on dev yet, so no fix can land here without
+// duplicating or conflicting with OR-T2457's in-flight, already-reviewed
+// migration). When that fence lands, record_stealth_scan_range() must start
+// refusing a write carrying a stale generation, this stray range must never
+// get written, and the final assertion below must be INVERTED to expect
+// BIRTHDAY_HEIGHT. Leaving this red after that lands is the signal the fence
+// did not actually close this path.
+Deno.test('OR-T1258/OR-T2457: a coverage row written between the delete and the envelope store defeats the reset (open, tracked)', async () => {
+  const db = dbWithCoverage();
+
+  const { client } = makeClient(db, null, {
+    after: { table: 'stealth_scan_ranges', op: 'delete' },
+    inject: (fdb) => {
+      // The concurrent in-flight sync: it read its start height under the
+      // OLD envelope (this connection's birthday never changed here, it is
+      // simply being re-added), scanned forward, and is now writing that
+      // range back via record_stealth_scan_range() -- landing after our
+      // delete cleared coverage but before our update lands.
+      fdb.ranges.push({
+        connection_id: CONNECTION,
+        from_height: BIRTHDAY_HEIGHT,
+        to_height: COVERAGE_TOP,
+      });
+    },
+  });
+
+  const result = await applyEnvelopeReplacement(client, CONNECTION, {
+    sealed_envelope: NEW_ENVELOPE,
+    wallet_birthday_plaintext: '2024-01-01',
+  });
+  assertEquals(isEnvelopeReplacementError(result), false, JSON.stringify(result));
+
+  // What the ticket asks a real fix to guarantee: nextSyncStartHeight ===
+  // BIRTHDAY_HEIGHT. What the code on dev actually returns today, because
+  // the stray range survives the update and covers the birthday again:
+  assertEquals(
+    nextSyncStartHeight(db, CONNECTION, BIRTHDAY_HEIGHT),
+    COVERAGE_TOP,
+    'OPEN DEFECT (OR-T1258/OR-T2457): the reset is silently defeated by the ' +
+      'race. If this assertion starts failing, the fence landed -- update it ' +
+      'to assertEquals(..., BIRTHDAY_HEIGHT) and close both tickets.',
+  );
 });

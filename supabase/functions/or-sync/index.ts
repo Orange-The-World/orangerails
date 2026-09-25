@@ -46,12 +46,12 @@
  * registry; see _shared/providers/dispatch.ts for the source adapter registry.
  */
 
-import { buildCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
+import { buildCorsHeaders, buildPublicCorsHeaders, jsonResponse, readBoundedText } from '../_shared/http.ts';
 import { authenticateRequest, resolveSubaccount, isAuthError } from '../_shared/platform-auth.ts';
 import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
 import { classifyUpstreamError, errorClassName } from '../_shared/upstream-errors.ts';
-import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
 import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
 import {
   getSinkAdapter,
@@ -65,7 +65,7 @@ import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
 import { computeWalletFingerprint } from '../_shared/account-fingerprint.ts';
 import { toByteaHex } from '../_shared/bytea.ts';
-import { readSyncCompleteness } from './_connection-result.ts';
+import { readSyncCompleteness, buildProbeBody } from './_connection-result.ts';
 
 // ─── Error sanitization (audit 2026-05-16, findings #1 + #4) ──────────────
 //
@@ -130,7 +130,35 @@ export function redactedUpstreamDetail(raw: string): string {
     .replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]')
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
     .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
-    .replace(/\b\d{4,}\b/g, '[redacted]')
+    // Redact ANY standalone 6+ digit run unconditionally: long enough on its
+    // own to be an identifier (member/account/phone-like), so a keyword
+    // allowlist at this length is inherently incomplete -- the pre-existing
+    // pinned test (redact-detail.test.ts) uses "member 998877665544", and
+    // "member", "user", "customer", "wallet" and others could equally well
+    // precede a real one. Same threshold the sibling helper already uses
+    // with no keyword gate at all: redactProviderError, or-quiltt-sync/
+    // resolve.ts (`\b\d{6,}\b`).
+    .replace(/\b\d{6,}\b/g, '[redacted]')
+    // Below 6 digits, only redact a digit run when an account/card/reference
+    // keyword sits within 20 non-digit characters before it. A blanket \d{4,} match here
+    // used to strip every 4+ digit number in the line, including HTTP status
+    // codes, retry-after seconds, amounts and timestamps that carry no PII at
+    // all (QA, OR-T0362, 2026-08-28: "over-redaction destroys the diagnostic
+    // is a failure of this ticket, not a success").
+    //
+    // The captured digit run includes internal spaces and hyphens so a value
+    // written as several groups (1234-5678-9012-3456) is matched and redacted
+    // WHOLE. An earlier attempt stopped after the first group: the global
+    // pass then needed another keyword before it would match again, so every
+    // later group survived untouched. That completeness gap is what this
+    // version fixes.
+    .replace(
+      /\b(account|acct|card|reference|ref)\b([^0-9]{0,20})(\d(?:[\d\s-]*\d)?)/gi,
+      (whole: string, keyword: string, gap: string, digits: string): string => {
+        const digitCount = digits.replace(/[^0-9]/g, '').length;
+        return digitCount >= 4 ? `${keyword}${gap}[redacted]` : whole;
+      },
+    )
     .slice(0, 300);
 }
 
@@ -204,6 +232,16 @@ async function encryptAes(plaintext: string, key: CryptoKey): Promise<string> {
 Deno.serve(wrapSentryHandler(async (req: Request) => {
   const cors = buildCorsHeaders(req);
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
+  // Anonymous, unauthenticated probe (DEV-0126): proves the deployed bundle,
+  // not just the source, carries the connection-result wiring. No DB access,
+  // no auth, no customer data, no secrets. Safe to call repeatedly.
+  // Public no-auth endpoint convention (see or-providers): this arm answers
+  // with Access-Control-Allow-Origin: * instead of the origin allow-list
+  // `cors` carries for the authenticated POST path below, so any caller can
+  // read the response, not just callers on an allow-listed origin.
+  if (req.method === 'GET') {
+    return jsonResponse(buildProbeBody(Deno.env.get('OR_BUILD_SHA') ?? null), 200, buildPublicCorsHeaders());
+  }
   if (req.method !== 'POST') return jsonResponse({ error: 'Method not allowed' }, 405, cors);
 
   try {
@@ -349,12 +387,26 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     let connQuery = ctx.serviceClient
       .from('connections')
-      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at, strike_subscription_id')
+      .select('id, provider_type, encrypted_credentials, last_sync_cursor, created_at, strike_subscription_id, strike_needs_resubscribe, strike_subscription_checked_at, strike_subscription_rotated_at')
       .eq('subaccount_id', subaccountId)
       .neq('status', 'disconnected');
     if (connection_ids?.length) connQuery = connQuery.in('id', connection_ids);
 
-    const { data: connections, error: connErr } = await connQuery;
+    // Cast breaks the supabase-js literal-string union that the select string
+    // produces: adding strike_needs_resubscribe made the union deep enough to
+    // cause TS7022 circular implicit-any on Quiltt variables (resp, json,
+    // pageInfo ...) in the same for-loop scope. Explicit element type here
+    // gives conn a simple type that does not cascade into downstream inference.
+    const { data: connections, error: connErr } = (await connQuery) as unknown as {
+      data: Array<{
+        id: string; provider_type: string; encrypted_credentials: string | null;
+        last_sync_cursor: string | null; created_at: string;
+        strike_subscription_id: string | null; strike_needs_resubscribe: boolean | null;
+        strike_subscription_checked_at: string | null;
+        strike_subscription_rotated_at: string | null;
+      }> | null;
+      error: unknown;
+    };
     if (connErr) throw connErr;
     if (!connections?.length) {
       // When the caller requested specific IDs and none resolved to a regular
@@ -523,7 +575,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       correlation_id?: string;
       message?: string;
       detail?: string;
-      action?: string;
+      action?: string | null;
       help_url?: string | null;
       skip_reason?: string;
       partial?: boolean;
@@ -758,7 +810,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
                 }
                 const jsonDirect = await respDirect.json();
                 if (jsonDirect?.errors) {
-                  console.error('[or-sync] Quiltt direct GraphQL errors:', JSON.stringify(jsonDirect.errors).slice(0, 300));
+                  const rawQuilttErr = JSON.stringify(jsonDirect.errors);
+                  const quilttErrClass = 'QuilttDirectGraphQLError';
+                  const quilttErrCode = classifyUpstreamError(rawQuilttErr, quilttErrClass);
+                  const quilttCorrelationId = randomCorrelationId();
+                  const quilttFp = await errorFingerprint(rawQuilttErr, quilttErrClass);
+                  console.error(`[or-sync] Quiltt direct GraphQL errors code=${quilttErrCode} class=${quilttErrClass} fp=${quilttFp} cid=${quilttCorrelationId}${upstreamDetailSuffix(quilttErrCode, rawQuilttErr)}`);
                   break;
                 }
                 const txsDirect = (jsonDirect?.data?.transactions?.nodes ?? []) as Array<{
@@ -1271,6 +1328,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
               id: conn.id as string,
               strike_subscription_id: (conn as { strike_subscription_id?: string | null }).strike_subscription_id ?? null,
               last_sync_cursor: conn.last_sync_cursor ?? null,
+              needs_resubscribe: (conn as { strike_needs_resubscribe?: boolean | null }).strike_needs_resubscribe ?? false,
+              subscription_checked_at: (conn as { strike_subscription_checked_at?: string | null }).strike_subscription_checked_at ?? null,
+              subscription_rotated_at: (conn as { strike_subscription_rotated_at?: string | null }).strike_subscription_rotated_at ?? null,
             },
             credentials,
             subaccountId: subaccountId as string,
@@ -1288,6 +1348,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // Polling cursor takes precedence (it's a real timestamp, 'or-sync'));
           // drain.next_cursor is unused under the webhook model.
           next_cursor = poll.next_cursor ?? drain.next_cursor;
+          // The Strike branch was the only one that never read the adapter's
+          // completeness, so `completeness` stayed at its 'active' default and
+          // a poll that lost a source was still written as a healthy sync.
+          // The two non-Strike branches below have always done this.
+          completeness = readSyncCompleteness(poll);
         } else if (sourceWallets && sourceWallets.length > 0) {
           const walletIds = sourceWallets.map((w: { external_wallet_id: string }) => w.external_wallet_id);
           const out = await adapter.syncByWallets(credentials, walletIds, conn.last_sync_cursor ?? null);
@@ -1436,7 +1501,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     return jsonResponse({ synced: results.reduce((s, r) => s + (r.synced ?? 0), 0), connections: results }, batchHttpStatus(results), cors);
 
   } catch (err) {
-    console.error('[or-sync] fatal:', err);
+    const rawFatalErr = err instanceof Error ? err.message : String(err);
+    const fatalErrClass = errorClassName(err);
+    const fatalErrCode = classifyUpstreamError(rawFatalErr, fatalErrClass);
+    const fatalCorrelationId = randomCorrelationId();
+    const fatalFp = await errorFingerprint(rawFatalErr, fatalErrClass);
+    console.error(`[or-sync] fatal code=${fatalErrCode} class=${fatalErrClass} fp=${fatalFp} cid=${fatalCorrelationId}${upstreamDetailSuffix(fatalErrCode, rawFatalErr)}`);
+    // DL-0603 / issue #373: this catch returns a Response rather than
+    // rethrowing, so wrapSentryHandler's own catch (which only fires on an
+    // exception that escapes the handler entirely) never sees it either.
+    // Report it directly so a fatal request-level failure is not silent.
+    void reportError(err, 'or-sync', req);
     return jsonResponse({ error: 'Internal error' }, 500, cors);
   }
 }, 'or-sync'));
@@ -1549,6 +1624,14 @@ export async function handleConnectionError(
   const correlationId = randomCorrelationId();
   const fp = await errorFingerprint(raw, errorClass);
   console.error(`[or-sync] connection ${conn.id} code=${code} class=${errorClass} fp=${fp} cid=${correlationId}${upstreamDetailSuffix(code, raw)}`);
+
+  // DL-0603 / issue #373: this per-connection catch previously only logged
+  // and updated the connection row, so a real sync error never reached
+  // GlitchTip (wrapSentryHandler only fires on an exception that escapes
+  // the whole request, and this catch does not rethrow). Report it here,
+  // fire-and-forget so a slow or unreachable pulse never adds latency to
+  // the batch response the caller is waiting on.
+  void reportError(e, 'or-sync');
 
   // Persist the taxonomy code on the connection row. In legacy
   // (non-sink) mode we still want it encrypted at rest so the column
