@@ -12,7 +12,6 @@ import {
   HANDLED_QUILTT_EVENT_TYPE_PREFIXES,
   isKnownQuilttEventType,
   KNOWN_QUILTT_EVENT_TYPE_PREFIXES,
-  MAX_UNKNOWN_ALARMS_PER_BATCH,
   UNKNOWN_EVENT_TYPE_MARKER,
 } from './quiltt-event-types.ts';
 import { buildRows } from '../or-quiltt-webhook/routing.ts';
@@ -186,24 +185,21 @@ Deno.test('one alarm per event, even when a batch repeats one', () => {
   assertEquals(out.captures.length, 1);
 });
 
-Deno.test('a batch past the cap itemises up to the cap and says how many it did not', () => {
+Deno.test('every unknown event in a batch gets one alarm', () => {
   const { sink, out } = recorder();
-  const over = MAX_UNKNOWN_ALARMS_PER_BATCH + 5;
+  const unknownCount = 30;
 
   const fired = alarmOnUnknownQuilttEventTypes(
-    Array.from({ length: over }, (_, i) => ({
+    Array.from({ length: unknownCount }, (_, i) => ({
       event_id: `evt_${i}`,
       event_type: 'some.type.nobody.listed',
     })),
     sink,
   );
 
-  // Every unknown event is still reported to the caller.
-  assertEquals(fired.length, over);
-  // Itemised alarms are capped, plus exactly one summary line for the rest.
-  assertEquals(out.warns.length, MAX_UNKNOWN_ALARMS_PER_BATCH + 1);
-  assertEquals(out.captures.length, MAX_UNKNOWN_ALARMS_PER_BATCH + 1);
-  assert(out.warns[out.warns.length - 1].includes('5 further unknown-type'));
+  assertEquals(fired.length, unknownCount);
+  assertEquals(out.warns.length, unknownCount);
+  assertEquals(out.captures.length, unknownCount);
 });
 
 Deno.test('a control character in an upstream type cannot forge a second log line', () => {
