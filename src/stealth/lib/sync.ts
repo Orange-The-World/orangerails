@@ -243,6 +243,14 @@ export interface RunSyncOptions {
   /** Override the maximum number of rolling-window extension passes.
    *  Defaults to 10. Exposed for tests; production callers should omit it. */
   maxWindowPasses?: number;
+  /**
+   * The sealed UTXO set persisted by a prior run. When present and
+   * successfully unsealed, its entries seed the in-run UTXO map so spends
+   * of UTXOs funded in an earlier run are detected. On failure (corrupt or
+   * wrong key) the run starts with an empty map: a missed spend detection
+   * is a missing direction='out' record, not a security violation.
+   */
+  sealedUtxos?: SealedEnvelope | null;
 }
 
 export interface SyncResult {
@@ -288,6 +296,12 @@ export interface SyncResult {
    * failure are still in sealedTransactions and normalized.
    */
   filterFetchError?: { failedHeight: number; cause: string };
+  /**
+   * The sealed UTXO map after this run, ready to pass to
+   * or-stealth-transactions-store as sealed_utxos. Null on the
+   * short-circuit path (nothing scanned) or when the map is empty.
+   */
+  sealedUtxos: SealedEnvelope | null;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -780,6 +794,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
       sealedTransactions: [],
       normalized: [],
       windowExhausted: false,
+      sealedUtxos: opts.sealedUtxos ?? null,
     };
   }
 
@@ -952,6 +967,24 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     string,
     { value: bigint; address: string }
   >();
+  // Seed the map from the prior run's sealed UTXO set, if supplied.
+  if (opts.sealedUtxos) {
+    try {
+      const prior = await unsealEnvelope<Array<[string, { value: string; address: string }]>>(
+        opts.sealedUtxos,
+        opts.orStealthKey,
+      );
+      if (Array.isArray(prior)) {
+        for (const [k, v] of prior) {
+          if (typeof k === 'string' && v && typeof v.value === 'string' && typeof v.address === 'string') {
+            utxoMap.set(k, { value: BigInt(v.value), address: v.address });
+          }
+        }
+      }
+    } catch {
+      // Corrupt or wrong-key envelope: start fresh.
+    }
+  }
   function utxoKey(txid: string, voutIdx: number): string {
     return `${txid}:${voutIdx}`;
   }
@@ -1393,6 +1426,16 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
   }
   emit(opts, progress('sealing', 100));
 
+  // ── seal the final UTXO map for persistence across runs ────────────────
+  let sealedUtxos: SealedEnvelope | null = null;
+  if (utxoMap.size > 0) {
+    const entries = Array.from(utxoMap.entries()).map(
+      ([k, v]): [string, { value: string; address: string }] =>
+        [k, { value: v.value.toString(), address: v.address }],
+    );
+    sealedUtxos = await sealEnvelope(entries, opts.orStealthKey);
+  }
+
   // ── uploading (the orchestrator emits the stage; the actual POST is the
   // caller's job so the same orchestrator works for tests with no network) ──
   emit(opts, progress('uploading', 0));
@@ -1406,6 +1449,7 @@ export async function runSync(opts: RunSyncOptions): Promise<SyncResult> {
     sealedTransactions,
     normalized,
     windowExhausted,
+    sealedUtxos,
     ...(fetchFailure !== undefined
       ? {
           filterFetchError: {
