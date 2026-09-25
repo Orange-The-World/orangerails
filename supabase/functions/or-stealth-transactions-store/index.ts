@@ -188,7 +188,13 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
     Number.isInteger(o.block_height) &&
     (o.block_height as number) >= 0 &&
     typeof o.txid_blind_index_hex === 'string' &&
-    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string)
+    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string) &&
+    // block_hash_hex is optional (pre-hash records, OR-T0407), but when the
+    // caller sends one it must be well-formed lowercase hex. Any other shape
+    // fails the whole record rather than being stored verbatim (OR-C2078).
+    (o.block_hash_hex === undefined ||
+      (typeof o.block_hash_hex === 'string' &&
+        BLOCK_HASH_HEX_RE.test(o.block_hash_hex as string)))
   );
 }
 
