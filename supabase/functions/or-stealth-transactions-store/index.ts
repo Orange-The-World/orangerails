@@ -375,6 +375,18 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
     }
 
+    // OR-T2457 step 7: refuse the WHOLE request when the caller's
+    // scan_generation does not match the connection's current one. See
+    // checkScanGenerationFence below for why this runs before the
+    // transaction insert, not only before the cursor patch further down.
+    const fence = checkScanGenerationFence(
+      ownerRow.scan_generation as string | null,
+      body.scan_generation as string,
+    );
+    if (!fence.ok) {
+      return jsonResponse({ error: fence.error }, fence.status ?? 409, cors);
+    }
+
     // Stamp last_sync_attempt_at on entry so every sync attempt is recorded,
     // including runs that find zero new transactions (where last_sync_at would
     // still advance but the attempt column would otherwise stay NULL forever).
