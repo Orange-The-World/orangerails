@@ -188,6 +188,39 @@ export function batchHttpStatus(results: Array<{ synced?: number; error?: string
   return 207;
 }
 
+/**
+ * Build the default unknown-id rejection for a filtered sync request.
+ *
+ * The caller checks unresolved ids against the stealth and disconnected
+ * stores before returning this response. Keeping the set-difference and the
+ * response together lets the regression test exercise the same response the
+ * live handler returns without constructing authenticated Supabase clients.
+ */
+export function buildUnknownConnectionIdsMiss(
+  requestedConnectionIds: string[],
+  resolvedConnectionIds: string[],
+  cors: Record<string, string> = {},
+): { unresolvedIds: string[]; response: Response } | null {
+  const resolvedSet = new Set(resolvedConnectionIds);
+  const unresolvedIds = [...new Set(requestedConnectionIds)].filter(
+    (id) => !resolvedSet.has(id),
+  );
+
+  if (unresolvedIds.length === 0) return null;
+
+  return {
+    unresolvedIds,
+    response: jsonResponse(
+      {
+        error: 'Connection not found in this subaccount',
+        unresolved_ids: unresolvedIds,
+      },
+      404,
+      cors,
+    ),
+  };
+}
+
 
 // ─── AES-256-GCM helpers ─────────────────────────────────────────────────────
 
@@ -482,12 +515,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // unresolved_ids: []. The main query also excludes status='disconnected';
     // a disconnected id is real and must not be conflated with "not found".
     if (connection_ids?.length) {
-      const resolvedSet = new Set(connections!.map((c) => c.id));
-      const unresolvedIds = [...new Set(connection_ids)].filter(
-        (id) => !resolvedSet.has(id),
+      const connectionIdsMiss = buildUnknownConnectionIdsMiss(
+        connection_ids,
+        connections!.map((c) => c.id),
+        cors,
       );
 
-      if (unresolvedIds.length > 0) {
+      if (connectionIdsMiss) {
+        const { unresolvedIds } = connectionIdsMiss;
         const { data: subRow, error: subErr } = await ctx.serviceClient
           .from('subaccounts')
           .select('platform_id, external_user_id')
@@ -545,14 +580,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           );
         }
 
-        return jsonResponse(
-          {
-            error: 'Connection not found in this subaccount',
-            unresolved_ids: unresolvedIds,
-          },
-          404,
-          cors,
-        );
+        return connectionIdsMiss.response;
       }
     }
 
