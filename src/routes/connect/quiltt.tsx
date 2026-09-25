@@ -187,6 +187,17 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   );
   const autoOpenedRef = useRef(false);
   const autoCloseTimerRef = useRef<number | null>(null);
+  // Mirrors `phase` synchronously. React runs effects (and therefore the
+  // pagehide listener re-subscription in the effect below) strictly after
+  // paint, not synchronously with setPhase, so a pagehide firing in that
+  // window would otherwise see the PRIOR phase via a stale closure. Written
+  // in lockstep with every phase change via setPhaseSync below, so
+  // onPageHide always reads the current phase regardless of render timing.
+  const phaseRef = useRef<Phase>("ready");
+  function setPhaseSync(next: Phase) {
+    phaseRef.current = next;
+    setPhase(next);
+  }
 
   const effectiveInstitutionId = selectedInstitution?.id ?? params.institution ?? undefined;
 
@@ -202,13 +213,13 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
       // instead of being stuck waiting for the connector to re-open.
       setSelectedInstitution(null);
       autoOpenedRef.current = false;
-      setPhase("aborted");
+      setPhaseSync("aborted");
     },
     onExitError: (metadata) => {
       setErrorMsg(
         `Quiltt reported an error during link (connectorId=${metadata.connectorId}). Try again or contact support.`,
       );
-      setPhase("error");
+      setPhaseSync("error");
     },
   });
 
@@ -223,7 +234,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   }, [phase, openConnector]);
 
   async function completeLinkOnOR(quilttConnectionId: string | undefined) {
-    setPhase("completing");
+    setPhaseSync("completing");
     try {
       const supabaseUrl =
         (import.meta.env.VITE_SUPABASE_URL as string | undefined) ||
@@ -273,7 +284,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
         typeof completeJson?.connection_id === "string" ? completeJson.connection_id : null;
       const orSubaccountId =
         typeof completeJson?.subaccount_id === "string" ? completeJson.subaccount_id : null;
-      setPhase("done");
+      setPhaseSync("done");
       if (window.opener) {
         // Pass everything the integrating app needs to (a) find the OR
         // connection row, (b) fetch the discovered accounts via
@@ -298,7 +309,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
     } catch (e) {
       console.error("[connect/quiltt] complete failed:", e);
       setErrorMsg(e instanceof Error ? e.message : String(e));
-      setPhase("error");
+      setPhaseSync("error");
     }
   }
 
@@ -325,9 +336,9 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
   //                   so we send OR_QUILTT_POPUP_CLOSED_INCOMPLETE.
   useEffect(() => {
     function onPageHide() {
-      if (phase === "done" || !window.opener) return;
+      if (phaseRef.current === "done" || !window.opener) return;
       try {
-        if (phase === "completing") {
+        if (phaseRef.current === "completing") {
           // A write was in flight when the popup went away. Different fact from
           // abandonment, and deliberately a different message type: this one
           // means "go and reconcile", the other means "nothing was attempted".
@@ -352,7 +363,7 @@ function ConnectorPanel({ params }: { params: FragmentParams }) {
     }
     window.addEventListener("pagehide", onPageHide);
     return () => window.removeEventListener("pagehide", onPageHide);
-  }, [phase]);
+  }, []);
 
   if (phase === "completing") {
     return (
