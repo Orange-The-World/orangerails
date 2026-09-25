@@ -424,19 +424,6 @@ export async function persistCoAdminGrant(params: {
     grant_sig: grantSig,
   });
   if (wdkErr) {
-    // SCRATCH PROOF FOR OR-T1262 (temporary, this branch is never merged):
-    // a compensating delete added here should make
-    // co-admin-grant-order.test.ts's "does not delete the list row back out
-    // after the key write fails" case go red.
-    try {
-      await supabase
-        .from("workspace_admins")
-        .delete()
-        .eq("owner_user_id", ownerUserId)
-        .eq("admin_user_id", targetUserId);
-    } catch {
-      // ignore: proof-of-concept compensating delete only
-    }
     throw new CoAdminGrantIncompleteError(
       "This co-admin was added to your list, but the key that gives them access was not stored, " +
         "so they cannot open any of your data. They are shown in your list on purpose, so the " +
