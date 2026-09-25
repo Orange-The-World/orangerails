@@ -52,6 +52,7 @@ import { resolveSinkFormatForPlatform } from '../_shared/quiltt-config.ts';
 import { lookupErrorCopy } from '../_shared/error-catalog.ts';
 import { classifyUpstreamError, errorClassName } from '../_shared/upstream-errors.ts';
 import { reportError, wrapSentryHandler } from '../_shared/sentry.ts';
+import { postToZulip } from '../_shared/zulip-alert.ts';
 import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
 import {
   getSinkAdapter,
@@ -62,7 +63,7 @@ import {
 import type { SinkOutput } from '../_shared/sinks/dispatch.ts';
 import { getProvider, parseCredentials } from '../_shared/providers/dispatch.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
-import { drainStrikeQueue } from '../_shared/providers/strike/queue.ts';
+import { drainStrikeQueue, SYSTEMIC_FAILURE_THRESHOLD } from '../_shared/providers/strike/queue.ts';
 import { computeWalletFingerprint } from '../_shared/account-fingerprint.ts';
 import { toByteaHex } from '../_shared/bytea.ts';
 import { readSyncCompleteness } from './_connection-result.ts';
@@ -1332,6 +1333,33 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // the poll was given, so "poll attributed by walletIds[0]" and the
           // guard here read off the same value.
           drainSubscriptionError = drain.subscriptionError ?? null;
+          if (drain.breakerTripped) {
+            // Systemic failure: N events failed for the same reason in one
+            // drain pass (including a mark-processed database write that
+            // failed for many events at once, see queue.ts). Remaining
+            // events are retryable. Alert a human now.
+            //
+            // GlitchTip (pulse.orangerails.com) is dead (DL-0603) and does
+            // not reach anyone; the real page is Zulip #Connectors per
+            // SRE's spec on this ticket (2026-08-27). void'd (fire and
+            // forget, matching the existing GlitchTip call below) so a chat
+            // outage cannot block or slow the sync response; postToZulip
+            // never throws and logs its own failure if the page itself
+            // could not be sent.
+            const alertMsg =
+              `[or-sync] CIRCUIT_BREAKER_TRIPPED conn=${conn.id as string} ` +
+              `reason=${drain.tripReason ?? 'UNKNOWN'} threshold=${SYSTEMIC_FAILURE_THRESHOLD}; ` +
+              `events left retryable; manual investigation required`;
+            console.error(alertMsg);
+            void postToZulip(
+              'Connectors',
+              'sync circuit breaker (OR-T0335)',
+              `:warning: **Strike sync breaker tripped** for connection \`${conn.id as string}\`\n` +
+                `Reason: \`${drain.tripReason ?? 'UNKNOWN'}\` (>= ${SYSTEMIC_FAILURE_THRESHOLD} identical failures)\n` +
+                `Remaining events in this batch were left retryable, not discarded. Manual investigation required.`,
+            );
+            void reportError(new Error(alertMsg), 'or-sync');
+          }
           newTxs = mergeStrikeTransactions(poll.transactions, drain.transactions, strikeWalletIds);
           // Polling cursor takes precedence (it's a real timestamp, 'or-sync'));
           // drain.next_cursor is unused under the webhook model.
