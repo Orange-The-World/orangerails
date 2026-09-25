@@ -26,7 +26,7 @@ blind index, zero server-side key handling) is the ZKA boundary we reuse verbati
 | Stealth Sync | LDK |
 |---|---|
 | `derive.ts` (descriptor parse + address derivation) | `derive.ts` — `deriveOrLdkKey(mek)` HKDF, channel/keysend param parsing |
-| `seal.ts` (`sealEnvelope`/`unsealEnvelope`/`blindIndex`) | reused unchanged as the ZKA boundary; wraps channel-state backups + payment records |
+| `seal.ts` (`sealEnvelope`/`unsealEnvelope`/`computeTxidBlindIndex`) | reused unchanged as the ZKA boundary; wraps channel-state backups + payment records. LDK computes its own blind index under its own HKDF subkey (see §2), not the deprecated `blindIndex` alias. |
 | `sync.ts` (`runSync` client-side filter scan) | `sync.ts` — client-side scan over channel monitors / payment records |
 | `postmessage.ts` (`deriveOrStealthKey` + widget protocol) | `postmessage.ts` — `deriveOrLdkKey(mek)` + widget protocol |
 | `supabase/functions/or-stealth-*` | `supabase/functions/or-ldk-persist` (sealed blob + blind index only) |
@@ -38,6 +38,12 @@ blind index, zero server-side key handling) is the ZKA boundary we reuse verbati
 - **Backup/seal key:** HKDF-SHA256 from the client MEK, fixed info string `'or-ldk-v1'`,
   domain-separated from any signing key. **Client-only, deterministic, zero server salt.**
   Same primitives as `or-stealth-v1`.
+- **Blind index key:** a separate HKDF-SHA256 subkey from the client MEK, fixed info
+  string `'or-ldk-blind-index-v1'`, distinct from the seal key above. Mirrors
+  `computeTxidBlindIndex`'s subkey pattern in `seal.ts` (info `'or-stealth/blind-index/v1'`),
+  never the master-key-direct `computeConnectionBlindIndex` path kept there only for
+  compatibility with legacy connection rows. One key must not do both jobs: that is how a
+  side channel opens later.
 - **Seed + node/channel keys:** generated and stored client-side only, in-app entropy,
   never transmitted. Signing is on-device; the server never holds material that can move
   funds.
