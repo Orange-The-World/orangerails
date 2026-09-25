@@ -1607,29 +1607,35 @@ export type Database = {
       }
       stealth_transactions: {
         Row: {
+          block_hash: string | null
           block_height: number
           connection_id: string
           created_at: string
           id: string
           occurred_at: string
+          orphaned_at: string | null
           sealed_record: Json
           txid_blind_index_hex: string
         }
         Insert: {
+          block_hash?: string | null
           block_height: number
           connection_id: string
           created_at?: string
           id?: string
           occurred_at: string
+          orphaned_at?: string | null
           sealed_record: Json
           txid_blind_index_hex: string
         }
         Update: {
+          block_hash?: string | null
           block_height?: number
           connection_id?: string
           created_at?: string
           id?: string
           occurred_at?: string
+          orphaned_at?: string | null
           sealed_record?: Json
           txid_blind_index_hex?: string
         }
