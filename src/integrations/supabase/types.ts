@@ -63,6 +63,93 @@ export type Database = {
         }
         Relationships: []
       }
+      agent_invitation_tokens: {
+        Row: {
+          agent_member_id: string
+          created_at: string
+          created_from_ip: string | null
+          created_from_ua: string | null
+          expires_at: string
+          id: string
+          owner_user_id: string
+          redeemed_at: string | null
+          revoked_at: string | null
+          token_hash: string
+        }
+        Insert: {
+          agent_member_id: string
+          created_at?: string
+          created_from_ip?: string | null
+          created_from_ua?: string | null
+          expires_at: string
+          id?: string
+          owner_user_id: string
+          redeemed_at?: string | null
+          revoked_at?: string | null
+          token_hash: string
+        }
+        Update: {
+          agent_member_id?: string
+          created_at?: string
+          created_from_ip?: string | null
+          created_from_ua?: string | null
+          expires_at?: string
+          id?: string
+          owner_user_id?: string
+          redeemed_at?: string | null
+          revoked_at?: string | null
+          token_hash?: string
+        }
+        Relationships: []
+      }
+      agent_members: {
+        Row: {
+          activated_at: string | null
+          agent_kind: Database["public"]["Enums"]["agent_kind"]
+          agent_name: string
+          id: string
+          identity_pubkey: string | null
+          invited_at: string
+          kem_pubkey: string | null
+          last_activity_at: string | null
+          notes: string | null
+          owner_user_id: string
+          revoked_at: string | null
+          role: Database["public"]["Enums"]["agent_role"]
+          shadow_user_id: string | null
+        }
+        Insert: {
+          activated_at?: string | null
+          agent_kind: Database["public"]["Enums"]["agent_kind"]
+          agent_name: string
+          id?: string
+          identity_pubkey?: string | null
+          invited_at?: string
+          kem_pubkey?: string | null
+          last_activity_at?: string | null
+          notes?: string | null
+          owner_user_id: string
+          revoked_at?: string | null
+          role?: Database["public"]["Enums"]["agent_role"]
+          shadow_user_id?: string | null
+        }
+        Update: {
+          activated_at?: string | null
+          agent_kind?: Database["public"]["Enums"]["agent_kind"]
+          agent_name?: string
+          id?: string
+          identity_pubkey?: string | null
+          invited_at?: string
+          kem_pubkey?: string | null
+          last_activity_at?: string | null
+          notes?: string | null
+          owner_user_id?: string
+          revoked_at?: string | null
+          role?: Database["public"]["Enums"]["agent_role"]
+          shadow_user_id?: string | null
+        }
+        Relationships: []
+      }
       apps: {
         Row: {
           client_secret: string
@@ -93,6 +180,63 @@ export type Database = {
           redirect_uri_pattern?: string | null
           slug?: string
           updated_at?: string
+        }
+        Relationships: []
+      }
+      audit_entries: {
+        Row: {
+          action: string
+          actor_member_id: string | null
+          actor_user_id: string | null
+          after_ciphertext: string | null
+          before_ciphertext: string | null
+          chain_height: number
+          client_ip: string | null
+          client_user_agent: string | null
+          created_at: string
+          id: string
+          prev_hash: string
+          reason: string | null
+          resource_id: string | null
+          resource_type: string | null
+          result: string | null
+          this_hash: string
+        }
+        Insert: {
+          action: string
+          actor_member_id?: string | null
+          actor_user_id?: string | null
+          after_ciphertext?: string | null
+          before_ciphertext?: string | null
+          chain_height?: number
+          client_ip?: string | null
+          client_user_agent?: string | null
+          created_at?: string
+          id?: string
+          prev_hash: string
+          reason?: string | null
+          resource_id?: string | null
+          resource_type?: string | null
+          result?: string | null
+          this_hash: string
+        }
+        Update: {
+          action?: string
+          actor_member_id?: string | null
+          actor_user_id?: string | null
+          after_ciphertext?: string | null
+          before_ciphertext?: string | null
+          chain_height?: number
+          client_ip?: string | null
+          client_user_agent?: string | null
+          created_at?: string
+          id?: string
+          prev_hash?: string
+          reason?: string | null
+          resource_id?: string | null
+          resource_type?: string | null
+          result?: string | null
+          this_hash?: string
         }
         Relationships: []
       }
@@ -137,10 +281,49 @@ export type Database = {
           },
         ]
       }
+      channel_state: {
+        Row: {
+          closed_at: string | null
+          created_at: string
+          id: string
+          outpoint_bidx: string
+          seal_version: number
+          sealed_ct: string
+          sealed_iv: string
+          update_id: number
+          user_id: string
+        }
+        Insert: {
+          closed_at?: string | null
+          created_at?: string
+          id?: string
+          outpoint_bidx: string
+          seal_version: number
+          sealed_ct: string
+          sealed_iv: string
+          update_id: number
+          user_id: string
+        }
+        Update: {
+          closed_at?: string | null
+          created_at?: string
+          id?: string
+          outpoint_bidx?: string
+          seal_version?: number
+          sealed_ct?: string
+          sealed_iv?: string
+          update_id?: number
+          user_id?: string
+        }
+        Relationships: []
+      }
       connections: {
         Row: {
+          account_emitted_id: string | null
+          account_fingerprint: string | null
           created_at: string
           credentials_key_version: number
+          data_key_generation: number
           encrypted_credentials: string
           encrypted_label: string | null
           encrypted_last_error: string | null
@@ -148,13 +331,22 @@ export type Database = {
           last_sync_at: string | null
           last_sync_cursor: string | null
           provider_type: string
+          quiltt_connection_id: string | null
           status: string
+          strike_bad_sig_count: number
+          strike_needs_resubscribe: boolean
+          strike_subscription_checked_at: string | null
+          strike_subscription_id: string | null
+          strike_webhook_secret: string | null
           subaccount_id: string
           updated_at: string
         }
         Insert: {
+          account_emitted_id?: string | null
+          account_fingerprint?: string | null
           created_at?: string
           credentials_key_version?: number
+          data_key_generation?: number
           encrypted_credentials: string
           encrypted_label?: string | null
           encrypted_last_error?: string | null
@@ -162,13 +354,22 @@ export type Database = {
           last_sync_at?: string | null
           last_sync_cursor?: string | null
           provider_type: string
+          quiltt_connection_id?: string | null
           status?: string
+          strike_bad_sig_count?: number
+          strike_needs_resubscribe?: boolean
+          strike_subscription_checked_at?: string | null
+          strike_subscription_id?: string | null
+          strike_webhook_secret?: string | null
           subaccount_id: string
           updated_at?: string
         }
         Update: {
+          account_emitted_id?: string | null
+          account_fingerprint?: string | null
           created_at?: string
           credentials_key_version?: number
+          data_key_generation?: number
           encrypted_credentials?: string
           encrypted_label?: string | null
           encrypted_last_error?: string | null
@@ -176,7 +377,13 @@ export type Database = {
           last_sync_at?: string | null
           last_sync_cursor?: string | null
           provider_type?: string
+          quiltt_connection_id?: string | null
           status?: string
+          strike_bad_sig_count?: number
+          strike_needs_resubscribe?: boolean
+          strike_subscription_checked_at?: string | null
+          strike_subscription_id?: string | null
+          strike_webhook_secret?: string | null
           subaccount_id?: string
           updated_at?: string
         }
@@ -189,6 +396,27 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      consumed_refresh_nonces: {
+        Row: {
+          agent_member_id: string
+          consumed_at: string
+          id: string
+          payload_hash: string
+        }
+        Insert: {
+          agent_member_id: string
+          consumed_at?: string
+          id?: string
+          payload_hash: string
+        }
+        Update: {
+          agent_member_id?: string
+          consumed_at?: string
+          id?: string
+          payload_hash?: string
+        }
+        Relationships: []
       }
       customer_recovery_shares: {
         Row: {
@@ -243,12 +471,14 @@ export type Database = {
           kdf_params: Json
           kem_public_key: string | null
           kem_secret_wrapped: string | null
+          multi_unlock_confirmed_at: string | null
           pqc_key_version: number
           recovery_ciphertext: string | null
           sig_public_key: string | null
           sig_secret_wrapped: string | null
           updated_at: string
           vault_key_version: number
+          vault_mode: string
           vault_salt: string
           vault_verifier_ciphertext: string
           workspace_key_id: string | null
@@ -261,12 +491,14 @@ export type Database = {
           kdf_params?: Json
           kem_public_key?: string | null
           kem_secret_wrapped?: string | null
+          multi_unlock_confirmed_at?: string | null
           pqc_key_version?: number
           recovery_ciphertext?: string | null
           sig_public_key?: string | null
           sig_secret_wrapped?: string | null
           updated_at?: string
           vault_key_version?: number
+          vault_mode?: string
           vault_salt: string
           vault_verifier_ciphertext: string
           workspace_key_id?: string | null
@@ -279,12 +511,14 @@ export type Database = {
           kdf_params?: Json
           kem_public_key?: string | null
           kem_secret_wrapped?: string | null
+          multi_unlock_confirmed_at?: string | null
           pqc_key_version?: number
           recovery_ciphertext?: string | null
           sig_public_key?: string | null
           sig_secret_wrapped?: string | null
           updated_at?: string
           vault_key_version?: number
+          vault_mode?: string
           vault_salt?: string
           vault_verifier_ciphertext?: string
           workspace_key_id?: string | null
@@ -301,6 +535,7 @@ export type Database = {
       }
       customers: {
         Row: {
+          analytics_id: string
           auth_user_id: string | null
           created_at: string
           customer_type: string
@@ -314,6 +549,7 @@ export type Database = {
           updated_at: string
         }
         Insert: {
+          analytics_id?: string
           auth_user_id?: string | null
           created_at?: string
           customer_type: string
@@ -327,6 +563,7 @@ export type Database = {
           updated_at?: string
         }
         Update: {
+          analytics_id?: string
           auth_user_id?: string | null
           created_at?: string
           customer_type?: string
@@ -341,9 +578,85 @@ export type Database = {
         }
         Relationships: []
       }
+      data_keys: {
+        Row: {
+          created_at: string
+          data_key_id: string
+          owner_user_id: string
+        }
+        Insert: {
+          created_at?: string
+          data_key_id: string
+          owner_user_id: string
+        }
+        Update: {
+          created_at?: string
+          data_key_id?: string
+          owner_user_id?: string
+        }
+        Relationships: []
+      }
+      discovery_sessions: {
+        Row: {
+          account_key: string
+          created_at: string
+          currency: string
+          expires_at: string
+          external_wallet_id: string
+          id: string
+          provider_type: string
+          widget_session_id: string
+        }
+        Insert: {
+          account_key: string
+          created_at?: string
+          currency: string
+          expires_at: string
+          external_wallet_id: string
+          id?: string
+          provider_type: string
+          widget_session_id: string
+        }
+        Update: {
+          account_key?: string
+          created_at?: string
+          currency?: string
+          expires_at?: string
+          external_wallet_id?: string
+          id?: string
+          provider_type?: string
+          widget_session_id?: string
+        }
+        Relationships: []
+      }
+      drain_alert_state: {
+        Row: {
+          id: number
+          last_attempt_at: string | null
+          last_error: string | null
+          last_notified_at: string | null
+          last_signal_snapshot: Json | null
+        }
+        Insert: {
+          id?: number
+          last_attempt_at?: string | null
+          last_error?: string | null
+          last_notified_at?: string | null
+          last_signal_snapshot?: Json | null
+        }
+        Update: {
+          id?: number
+          last_attempt_at?: string | null
+          last_error?: string | null
+          last_notified_at?: string | null
+          last_signal_snapshot?: Json | null
+        }
+        Relationships: []
+      }
       encrypted_transactions: {
         Row: {
           connection_id: string
+          data_key_generation: number
           encrypted_payload: string
           external_id: string
           fetched_at: string
@@ -353,9 +666,12 @@ export type Database = {
           id: string
           occurred_at: string
           payload_key_version: number
+          sealed_alg: string | null
+          sealed_under: string
         }
         Insert: {
           connection_id: string
+          data_key_generation?: number
           encrypted_payload: string
           external_id: string
           fetched_at?: string
@@ -365,9 +681,12 @@ export type Database = {
           id?: string
           occurred_at: string
           payload_key_version?: number
+          sealed_alg?: string | null
+          sealed_under?: string
         }
         Update: {
           connection_id?: string
+          data_key_generation?: number
           encrypted_payload?: string
           external_id?: string
           fetched_at?: string
@@ -377,6 +696,8 @@ export type Database = {
           id?: string
           occurred_at?: string
           payload_key_version?: number
+          sealed_alg?: string | null
+          sealed_under?: string
         }
         Relationships: [
           {
@@ -387,6 +708,99 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      exchange_rate_resolutions: {
+        Row: {
+          fetched_at: string
+          id: string
+          median_calculation: string | null
+          outliers_discarded: Json | null
+          provider_responses: Json
+          providers_failed: Json | null
+          providers_succeeded: string[]
+          rate_id: string
+        }
+        Insert: {
+          fetched_at: string
+          id?: string
+          median_calculation?: string | null
+          outliers_discarded?: Json | null
+          provider_responses: Json
+          providers_failed?: Json | null
+          providers_succeeded: string[]
+          rate_id: string
+        }
+        Update: {
+          fetched_at?: string
+          id?: string
+          median_calculation?: string | null
+          outliers_discarded?: Json | null
+          provider_responses?: Json
+          providers_failed?: Json | null
+          providers_succeeded?: string[]
+          rate_id?: string
+        }
+        Relationships: []
+      }
+      exchange_rates: {
+        Row: {
+          bucket_ts: string
+          composite: boolean
+          composite_via: string | null
+          computed_at: string
+          fetched_at: string
+          granularity: string
+          id: string
+          product: string
+          provenance: string
+          provider_count: number
+          rate: number
+          source_authority: string
+          source_currency: string
+          status: string
+          superseded_by_id: string | null
+          target_currency: string
+          tier: string
+        }
+        Insert: {
+          bucket_ts: string
+          composite?: boolean
+          composite_via?: string | null
+          computed_at: string
+          fetched_at: string
+          granularity: string
+          id?: string
+          product: string
+          provenance?: string
+          provider_count: number
+          rate: number
+          source_authority?: string
+          source_currency: string
+          status: string
+          superseded_by_id?: string | null
+          target_currency: string
+          tier: string
+        }
+        Update: {
+          bucket_ts?: string
+          composite?: boolean
+          composite_via?: string | null
+          computed_at?: string
+          fetched_at?: string
+          granularity?: string
+          id?: string
+          product?: string
+          provenance?: string
+          provider_count?: number
+          rate?: number
+          source_authority?: string
+          source_currency?: string
+          status?: string
+          superseded_by_id?: string | null
+          target_currency?: string
+          tier?: string
+        }
+        Relationships: []
       }
       invoices: {
         Row: {
@@ -454,6 +868,189 @@ export type Database = {
           },
         ]
       }
+      opk_key_rotations: {
+        Row: {
+          id: string
+          new_opk_alg: string
+          new_opk_public: string
+          old_opk_alg: string | null
+          old_opk_public: string | null
+          platform_id: string
+          request_ip: string | null
+          rotated_at: string
+          rotation_reason: string | null
+          subaccount_id: string
+        }
+        Insert: {
+          id?: string
+          new_opk_alg: string
+          new_opk_public: string
+          old_opk_alg?: string | null
+          old_opk_public?: string | null
+          platform_id: string
+          request_ip?: string | null
+          rotated_at?: string
+          rotation_reason?: string | null
+          subaccount_id: string
+        }
+        Update: {
+          id?: string
+          new_opk_alg?: string
+          new_opk_public?: string
+          old_opk_alg?: string | null
+          old_opk_public?: string | null
+          platform_id?: string
+          request_ip?: string | null
+          rotated_at?: string
+          rotation_reason?: string | null
+          subaccount_id?: string
+        }
+        Relationships: []
+      }
+      orbi_api_keys: {
+        Row: {
+          consumer_id: string
+          consumer_name: string
+          created_at: string
+          created_by: string
+          id: string
+          key_hash: string
+          key_prefix: string
+          revoked_at: string | null
+        }
+        Insert: {
+          consumer_id: string
+          consumer_name: string
+          created_at?: string
+          created_by: string
+          id?: string
+          key_hash: string
+          key_prefix: string
+          revoked_at?: string | null
+        }
+        Update: {
+          consumer_id?: string
+          consumer_name?: string
+          created_at?: string
+          created_by?: string
+          id?: string
+          key_hash?: string
+          key_prefix?: string
+          revoked_at?: string | null
+        }
+        Relationships: []
+      }
+      orbi_usage_log: {
+        Row: {
+          asset: string
+          batch_size: number
+          consumer_id: string
+          fiat: string
+          fill_type: string
+          http_status: number
+          id: number
+          key_prefix: string
+          requested_at: string | null
+          served_at: string
+        }
+        Insert: {
+          asset: string
+          batch_size: number
+          consumer_id: string
+          fiat: string
+          fill_type: string
+          http_status: number
+          id?: number
+          key_prefix: string
+          requested_at?: string | null
+          served_at?: string
+        }
+        Update: {
+          asset?: string
+          batch_size?: number
+          consumer_id?: string
+          fiat?: string
+          fill_type?: string
+          http_status?: number
+          id?: number
+          key_prefix?: string
+          requested_at?: string | null
+          served_at?: string
+        }
+        Relationships: []
+      }
+      org_recovery_challenges: {
+        Row: {
+          consumed_at: string | null
+          issued_at: string
+          nonce_bytes: string
+          nonce_id: string
+          source_ip: string | null
+          vault_id: string
+        }
+        Insert: {
+          consumed_at?: string | null
+          issued_at?: string
+          nonce_bytes: string
+          nonce_id?: string
+          source_ip?: string | null
+          vault_id: string
+        }
+        Update: {
+          consumed_at?: string | null
+          issued_at?: string
+          nonce_bytes?: string
+          nonce_id?: string
+          source_ip?: string | null
+          vault_id?: string
+        }
+        Relationships: []
+      }
+      org_vault_meta: {
+        Row: {
+          break_glass_available_at: string | null
+          break_glass_notify_at: string | null
+          created_at: string
+          customer_id: string
+          org_recovery_kem_pubkey: string
+          org_recovery_sig_pubkey: string
+          org_vault_recovery_slot: string
+          recovery_code_seen_by: string[]
+          recovery_slot_version: number
+          rotation_required: boolean
+          vault_id: string
+          vault_version: number
+        }
+        Insert: {
+          break_glass_available_at?: string | null
+          break_glass_notify_at?: string | null
+          created_at?: string
+          customer_id: string
+          org_recovery_kem_pubkey: string
+          org_recovery_sig_pubkey: string
+          org_vault_recovery_slot: string
+          recovery_code_seen_by?: string[]
+          recovery_slot_version?: number
+          rotation_required?: boolean
+          vault_id: string
+          vault_version?: number
+        }
+        Update: {
+          break_glass_available_at?: string | null
+          break_glass_notify_at?: string | null
+          created_at?: string
+          customer_id?: string
+          org_recovery_kem_pubkey?: string
+          org_recovery_sig_pubkey?: string
+          org_vault_recovery_slot?: string
+          recovery_code_seen_by?: string[]
+          recovery_slot_version?: number
+          rotation_required?: boolean
+          vault_id?: string
+          vault_version?: number
+        }
+        Relationships: []
+      }
       payments: {
         Row: {
           amount_cents: number
@@ -520,6 +1117,7 @@ export type Database = {
       pending_widget_sessions: {
         Row: {
           app_user_id: string
+          completed_connection_id: string | null
           created_at: string
           expires_at: string
           id: string
@@ -528,6 +1126,7 @@ export type Database = {
         }
         Insert: {
           app_user_id: string
+          completed_connection_id?: string | null
           created_at?: string
           expires_at: string
           id?: string
@@ -536,6 +1135,7 @@ export type Database = {
         }
         Update: {
           app_user_id?: string
+          completed_connection_id?: string | null
           created_at?: string
           expires_at?: string
           id?: string
@@ -552,48 +1152,189 @@ export type Database = {
           },
         ]
       }
+      pg_net_cron_state: {
+        Row: {
+          endpoint_path: string
+          job_name: string
+          last_check_status: string | null
+          last_checked_at: string | null
+          last_checked_request_id: number | null
+          last_error: string | null
+          last_request_id: number | null
+          last_requested_at: string | null
+          last_status_code: number | null
+          last_timed_out: boolean | null
+          timeout_milliseconds: number
+        }
+        Insert: {
+          endpoint_path: string
+          job_name: string
+          last_check_status?: string | null
+          last_checked_at?: string | null
+          last_checked_request_id?: number | null
+          last_error?: string | null
+          last_request_id?: number | null
+          last_requested_at?: string | null
+          last_status_code?: number | null
+          last_timed_out?: boolean | null
+          timeout_milliseconds: number
+        }
+        Update: {
+          endpoint_path?: string
+          job_name?: string
+          last_check_status?: string | null
+          last_checked_at?: string | null
+          last_checked_request_id?: number | null
+          last_error?: string | null
+          last_request_id?: number | null
+          last_requested_at?: string | null
+          last_status_code?: number | null
+          last_timed_out?: boolean | null
+          timeout_milliseconds?: number
+        }
+        Relationships: []
+      }
+      platform_key_audit: {
+        Row: {
+          action: string
+          actor: string
+          created_at: string
+          env: string
+          id: string
+          platform_id: string | null
+          platform_slug: string
+        }
+        Insert: {
+          action: string
+          actor: string
+          created_at?: string
+          env: string
+          id?: string
+          platform_id?: string | null
+          platform_slug: string
+        }
+        Update: {
+          action?: string
+          actor?: string
+          created_at?: string
+          env?: string
+          id?: string
+          platform_id?: string | null
+          platform_slug?: string
+        }
+        Relationships: []
+      }
+      platform_rate_limits: {
+        Row: {
+          count: number
+          key: string
+          scope: string
+          window_start: string
+        }
+        Insert: {
+          count?: number
+          key: string
+          scope: string
+          window_start: string
+        }
+        Update: {
+          count?: number
+          key?: string
+          scope?: string
+          window_start?: string
+        }
+        Relationships: []
+      }
       platforms: {
         Row: {
           api_key_hash: string
+          api_key_prefix: string | null
+          app_profile_slug: string | null
+          bootstrap_ttl_seconds: number
           cors_origin: string | null
           created_at: string
           customer_id: string | null
           display_brand_color: string | null
           display_name: string | null
+          env: string
           id: string
           is_internal: boolean
           name: string
+          quiltt_api_key: string | null
+          quiltt_api_key_id: string | null
+          quiltt_catalog_profile_id: string | null
+          quiltt_connector_id_link: string | null
+          quiltt_connector_id_reconnect: string | null
+          quiltt_environment_id: string | null
+          rotated_at: string | null
+          sink_format: string | null
           slug: string
+          status: string
           tier: string
           updated_at: string
+          webhook_secret: string | null
+          webhook_url: string | null
+          widget_url: string | null
         }
         Insert: {
           api_key_hash: string
+          api_key_prefix?: string | null
+          app_profile_slug?: string | null
+          bootstrap_ttl_seconds?: number
           cors_origin?: string | null
           created_at?: string
           customer_id?: string | null
           display_brand_color?: string | null
           display_name?: string | null
+          env?: string
           id?: string
           is_internal?: boolean
           name: string
+          quiltt_api_key?: string | null
+          quiltt_api_key_id?: string | null
+          quiltt_catalog_profile_id?: string | null
+          quiltt_connector_id_link?: string | null
+          quiltt_connector_id_reconnect?: string | null
+          quiltt_environment_id?: string | null
+          rotated_at?: string | null
+          sink_format?: string | null
           slug: string
+          status?: string
           tier?: string
           updated_at?: string
+          webhook_secret?: string | null
+          webhook_url?: string | null
+          widget_url?: string | null
         }
         Update: {
           api_key_hash?: string
+          api_key_prefix?: string | null
+          app_profile_slug?: string | null
+          bootstrap_ttl_seconds?: number
           cors_origin?: string | null
           created_at?: string
           customer_id?: string | null
           display_brand_color?: string | null
           display_name?: string | null
+          env?: string
           id?: string
           is_internal?: boolean
           name?: string
+          quiltt_api_key?: string | null
+          quiltt_api_key_id?: string | null
+          quiltt_catalog_profile_id?: string | null
+          quiltt_connector_id_link?: string | null
+          quiltt_connector_id_reconnect?: string | null
+          quiltt_environment_id?: string | null
+          rotated_at?: string | null
+          sink_format?: string | null
           slug?: string
+          status?: string
           tier?: string
           updated_at?: string
+          webhook_secret?: string | null
+          webhook_url?: string | null
+          widget_url?: string | null
         }
         Relationships: [
           {
@@ -605,33 +1346,156 @@ export type Database = {
           },
         ]
       }
+      queue_health_alert_state: {
+        Row: {
+          last_notified_at: string
+          queue: string
+        }
+        Insert: {
+          last_notified_at: string
+          queue: string
+        }
+        Update: {
+          last_notified_at?: string
+          queue?: string
+        }
+        Relationships: []
+      }
+      quiltt_institutions_cache: {
+        Row: {
+          connector_id: string
+          institution_id: string
+          logo_url: string | null
+          name: string
+          raw: Json | null
+          refreshed_at: string
+          searchable: string
+        }
+        Insert: {
+          connector_id: string
+          institution_id: string
+          logo_url?: string | null
+          name: string
+          raw?: Json | null
+          refreshed_at?: string
+          searchable: string
+        }
+        Update: {
+          connector_id?: string
+          institution_id?: string
+          logo_url?: string | null
+          name?: string
+          raw?: Json | null
+          refreshed_at?: string
+          searchable?: string
+        }
+        Relationships: []
+      }
+      quiltt_profile_map: {
+        Row: {
+          created_at: string
+          platform_id: string
+          quiltt_environment_id: string
+          quiltt_profile_id: string
+          subaccount_id: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          platform_id: string
+          quiltt_environment_id: string
+          quiltt_profile_id: string
+          subaccount_id: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          platform_id?: string
+          quiltt_environment_id?: string
+          quiltt_profile_id?: string
+          subaccount_id?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      quiltt_webhook_inbox: {
+        Row: {
+          attempts: number
+          event_id: string
+          event_type: string
+          last_error: string | null
+          opk_deferred_at: string | null
+          payload: Json
+          platform_id: string | null
+          processed_at: string | null
+          received_at: string
+          retirement_reason: string | null
+          subaccount_id: string | null
+        }
+        Insert: {
+          attempts?: number
+          event_id: string
+          event_type: string
+          last_error?: string | null
+          opk_deferred_at?: string | null
+          payload: Json
+          platform_id?: string | null
+          processed_at?: string | null
+          received_at?: string
+          retirement_reason?: string | null
+          subaccount_id?: string | null
+        }
+        Update: {
+          attempts?: number
+          event_id?: string
+          event_type?: string
+          last_error?: string | null
+          opk_deferred_at?: string | null
+          payload?: Json
+          platform_id?: string | null
+          processed_at?: string | null
+          received_at?: string
+          retirement_reason?: string | null
+          subaccount_id?: string | null
+        }
+        Relationships: []
+      }
       source_wallets: {
         Row: {
           connection_id: string
           created_at: string
+          discovery_source: string | null
           encrypted_metadata: string
           encrypted_metadata_key_version: number
           external_wallet_id: string
           id: string
           is_synced: boolean
+          wallet_fingerprint: string | null
+          wallet_fingerprint_key_version: number | null
         }
         Insert: {
           connection_id: string
           created_at?: string
+          discovery_source?: string | null
           encrypted_metadata: string
           encrypted_metadata_key_version?: number
           external_wallet_id: string
           id?: string
           is_synced?: boolean
+          wallet_fingerprint?: string | null
+          wallet_fingerprint_key_version?: number | null
         }
         Update: {
           connection_id?: string
           created_at?: string
+          discovery_source?: string | null
           encrypted_metadata?: string
           encrypted_metadata_key_version?: number
           external_wallet_id?: string
           id?: string
           is_synced?: boolean
+          wallet_fingerprint?: string | null
+          wallet_fingerprint_key_version?: number | null
         }
         Relationships: [
           {
@@ -674,6 +1538,7 @@ export type Database = {
           id: string
           last_block_scanned: number | null
           last_sync_at: string | null
+          last_sync_attempt_at: string | null
           platform_id: string
           sealed_envelope: Json
           status: string
@@ -689,6 +1554,7 @@ export type Database = {
           id?: string
           last_block_scanned?: number | null
           last_sync_at?: string | null
+          last_sync_attempt_at?: string | null
           platform_id: string
           sealed_envelope: Json
           status?: string
@@ -704,6 +1570,7 @@ export type Database = {
           id?: string
           last_block_scanned?: number | null
           last_sync_at?: string | null
+          last_sync_attempt_at?: string | null
           platform_id?: string
           sealed_envelope?: Json
           status?: string
@@ -720,31 +1587,55 @@ export type Database = {
           },
         ]
       }
+      stealth_scan_ranges: {
+        Row: {
+          connection_id: string
+          from_height: number
+          to_height: number
+        }
+        Insert: {
+          connection_id: string
+          from_height: number
+          to_height: number
+        }
+        Update: {
+          connection_id?: string
+          from_height?: number
+          to_height?: number
+        }
+        Relationships: []
+      }
       stealth_transactions: {
         Row: {
+          block_hash: string | null
           block_height: number
           connection_id: string
           created_at: string
           id: string
           occurred_at: string
+          orphaned_at: string | null
           sealed_record: Json
           txid_blind_index_hex: string
         }
         Insert: {
+          block_hash?: string | null
           block_height: number
           connection_id: string
           created_at?: string
           id?: string
           occurred_at: string
+          orphaned_at?: string | null
           sealed_record: Json
           txid_blind_index_hex: string
         }
         Update: {
+          block_hash?: string | null
           block_height?: number
           connection_id?: string
           created_at?: string
           id?: string
           occurred_at?: string
+          orphaned_at?: string | null
           sealed_record?: Json
           txid_blind_index_hex?: string
         }
@@ -758,23 +1649,86 @@ export type Database = {
           },
         ]
       }
+      stealth_utxos: {
+        Row: {
+          connection_id: string
+          id: string
+          scanned_to: number
+          sealed_utxos: Json
+          updated_at: string
+        }
+        Insert: {
+          connection_id: string
+          id?: string
+          scanned_to: number
+          sealed_utxos: Json
+          updated_at?: string
+        }
+        Update: {
+          connection_id?: string
+          id?: string
+          scanned_to?: number
+          sealed_utxos?: Json
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      strike_webhook_events: {
+        Row: {
+          connection_id: string
+          entity_id: string
+          event_type: string
+          id: string
+          processed_at: string | null
+          received_at: string
+          strike_event_id: string
+        }
+        Insert: {
+          connection_id: string
+          entity_id: string
+          event_type: string
+          id?: string
+          processed_at?: string | null
+          received_at?: string
+          strike_event_id: string
+        }
+        Update: {
+          connection_id?: string
+          entity_id?: string
+          event_type?: string
+          id?: string
+          processed_at?: string | null
+          received_at?: string
+          strike_event_id?: string
+        }
+        Relationships: []
+      }
       subaccounts: {
         Row: {
           created_at: string
           external_user_id: string
           id: string
+          opk_alg: string | null
+          opk_public: string | null
+          opk_registered_at: string | null
           platform_id: string
         }
         Insert: {
           created_at?: string
           external_user_id: string
           id?: string
+          opk_alg?: string | null
+          opk_public?: string | null
+          opk_registered_at?: string | null
           platform_id: string
         }
         Update: {
           created_at?: string
           external_user_id?: string
           id?: string
+          opk_alg?: string | null
+          opk_public?: string | null
+          opk_registered_at?: string | null
           platform_id?: string
         }
         Relationships: [
@@ -887,6 +1841,24 @@ export type Database = {
           },
         ]
       }
+      user_vault_keyring_watermark: {
+        Row: {
+          max_keyring_epoch: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          max_keyring_epoch: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          max_keyring_epoch?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       user_vault_meta: {
         Row: {
           created_at: string
@@ -895,6 +1867,8 @@ export type Database = {
           kdf_params: Json
           kem_public_key: string | null
           kem_secret_wrapped: string | null
+          keyring_ciphertext: string | null
+          keyring_epoch: number
           pqc_key_version: number
           recovery_ciphertext: string | null
           sig_public_key: string | null
@@ -913,6 +1887,8 @@ export type Database = {
           kdf_params?: Json
           kem_public_key?: string | null
           kem_secret_wrapped?: string | null
+          keyring_ciphertext?: string | null
+          keyring_epoch?: number
           pqc_key_version?: number
           recovery_ciphertext?: string | null
           sig_public_key?: string | null
@@ -931,6 +1907,8 @@ export type Database = {
           kdf_params?: Json
           kem_public_key?: string | null
           kem_secret_wrapped?: string | null
+          keyring_ciphertext?: string | null
+          keyring_epoch?: number
           pqc_key_version?: number
           recovery_ciphertext?: string | null
           sig_public_key?: string | null
@@ -941,6 +1919,84 @@ export type Database = {
           vault_salt?: string
           vault_verifier_ciphertext?: string
           workspace_key_id?: string | null
+        }
+        Relationships: []
+      }
+      user_vault_pubkeys: {
+        Row: {
+          enc_x25519_privkey: string
+          recovery_enc_x25519_privkey: string
+          registered_at: string
+          user_id: string
+          x25519_public_key: string
+        }
+        Insert: {
+          enc_x25519_privkey: string
+          recovery_enc_x25519_privkey: string
+          registered_at?: string
+          user_id: string
+          x25519_public_key: string
+        }
+        Update: {
+          enc_x25519_privkey?: string
+          recovery_enc_x25519_privkey?: string
+          registered_at?: string
+          user_id?: string
+          x25519_public_key?: string
+        }
+        Relationships: []
+      }
+      vault_blobs: {
+        Row: {
+          ciphertext: string
+          created_at: string
+          id: string
+          updated_at: string
+          vault_id: string
+        }
+        Insert: {
+          ciphertext: string
+          created_at?: string
+          id?: string
+          updated_at?: string
+          vault_id: string
+        }
+        Update: {
+          ciphertext?: string
+          created_at?: string
+          id?: string
+          updated_at?: string
+          vault_id?: string
+        }
+        Relationships: []
+      }
+      vault_member_slots: {
+        Row: {
+          added_at: string
+          added_by: string
+          last_vault_activity_at: string
+          member_slot: string
+          member_user_id: string
+          role: string
+          vault_id: string
+        }
+        Insert: {
+          added_at?: string
+          added_by: string
+          last_vault_activity_at?: string
+          member_slot: string
+          member_user_id: string
+          role: string
+          vault_id: string
+        }
+        Update: {
+          added_at?: string
+          added_by?: string
+          last_vault_activity_at?: string
+          member_slot?: string
+          member_user_id?: string
+          role?: string
+          vault_id?: string
         }
         Relationships: []
       }
@@ -992,6 +2048,48 @@ export type Database = {
           source?: string | null
           use_case?: string | null
           utm_campaign?: string | null
+        }
+        Relationships: []
+      }
+      webhook_delivery: {
+        Row: {
+          attempts: number
+          created_at: string
+          event_id: string
+          event_type: string
+          id: string
+          last_attempt_at: string | null
+          last_error: string | null
+          payload: Json
+          platform_id: string
+          subaccount_id: string | null
+          succeeded_at: string | null
+        }
+        Insert: {
+          attempts?: number
+          created_at?: string
+          event_id?: string
+          event_type: string
+          id?: string
+          last_attempt_at?: string | null
+          last_error?: string | null
+          payload: Json
+          platform_id: string
+          subaccount_id?: string | null
+          succeeded_at?: string | null
+        }
+        Update: {
+          attempts?: number
+          created_at?: string
+          event_id?: string
+          event_type?: string
+          id?: string
+          last_attempt_at?: string | null
+          last_error?: string | null
+          payload?: Json
+          platform_id?: string
+          subaccount_id?: string | null
+          succeeded_at?: string | null
         }
         Relationships: []
       }
@@ -1057,7 +2155,29 @@ export type Database = {
       }
     }
     Views: {
-      [_ in never]: never
+      platform_rate_limits_stale: {
+        Row: {
+          count: number | null
+          key: string | null
+          scope: string | null
+          window_start: string | null
+        }
+        Relationships: []
+      }
+      v_platform_quiltt_config: {
+        Row: {
+          platform_id: string | null
+          quiltt_api_key: string | null
+          quiltt_api_key_id: string | null
+          quiltt_catalog_profile_id: string | null
+          quiltt_connector_id_link: string | null
+          quiltt_connector_id_reconnect: string | null
+          sink_format: string | null
+          slug: string | null
+          tier: string | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
       allocate_workspace_key: { Args: never; Returns: string }
@@ -1107,7 +2227,15 @@ export type Database = {
       rotate_or_access_token: { Args: { p_grant_id: string }; Returns: string }
     }
     Enums: {
-      [_ in never]: never
+      agent_kind:
+        | "claude_code"
+        | "claude_desktop"
+        | "chatgpt"
+        | "cursor"
+        | "continue"
+        | "cline"
+        | "custom"
+      agent_role: "read_only" | "bookkeeper" | "accountant" | "owner"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -1237,6 +2365,17 @@ export const Constants = {
     Enums: {},
   },
   public: {
-    Enums: {},
+    Enums: {
+      agent_kind: [
+        "claude_code",
+        "claude_desktop",
+        "chatgpt",
+        "cursor",
+        "continue",
+        "cline",
+        "custom",
+      ],
+      agent_role: ["read_only", "bookkeeper", "accountant", "owner"],
+    },
   },
 } as const
