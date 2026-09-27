@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # orbi-staleness-probe.sh
 #
-# Checks whether the ORBI 1-minute exchange-rate table has fresh data.
+# Checks whether the ORBI 1-minute exchange-rate table has fresh, dense data.
 # Exit codes (see STALENESS_PROBE_CRON.md for the full spec):
-#   0  -- OK: newest bucket_ts is within the threshold
-#   1  -- STALE: newest bucket_ts is older than STALE_THRESHOLD_MINUTES AND the
-#         page was delivered
+#   0  -- OK: newest bucket_ts is within the threshold and every active pair
+#         meets the density floor
+#   1  -- DEGRADED: the age or density threshold failed AND the page was
+#         delivered
 #   2  -- ERROR: could not reach the database, query failed, the alert script is
 #         unusable, or the page could not be delivered. Exit 1 therefore always
 #         means someone was actually told; every other failure is 2.
@@ -22,12 +23,20 @@
 #
 # Optional env:
 #   STALE_THRESHOLD_MINUTES   integer, default 90
+#   DENSITY_WINDOW_MINUTES    positive integer, default 60
+#   DENSITY_MIN_BUCKETS       positive integer, default 30
+#   DENSITY_PAIR_LOOKBACK_DAYS
+#                              positive integer, default 30; a pair with a
+#                              confirmed 1m bucket in this period is active
 
 set -uo pipefail
 
 PROBE="orbi-staleness-probe"
 DSN="${ORBI_PROBE_DSN:-${DATABASE_URL:-}}"
 THRESHOLD="${STALE_THRESHOLD_MINUTES:-90}"
+DENSITY_WINDOW="${DENSITY_WINDOW_MINUTES:-60}"
+DENSITY_MIN="${DENSITY_MIN_BUCKETS:-30}"
+DENSITY_LOOKBACK="${DENSITY_PAIR_LOOKBACK_DAYS:-30}"
 ALERT_SCRIPT="${ORBI_ALERT_SCRIPT:-}"
 
 # The alert script must be usable BEFORE anything else runs. A probe that can
@@ -60,6 +69,26 @@ alarm() {
 
 if [[ -z "$DSN" ]]; then
   alarm ERROR "ORBI_PROBE_DSN is not set; cannot query exchange_rates"
+  exit 2
+fi
+
+if ! [[ "$DENSITY_WINDOW" =~ ^[1-9][0-9]*$ ]]; then
+  alarm ERROR "DENSITY_WINDOW_MINUTES must be a positive integer (got '${DENSITY_WINDOW}')"
+  exit 2
+fi
+
+if ! [[ "$DENSITY_MIN" =~ ^[1-9][0-9]*$ ]]; then
+  alarm ERROR "DENSITY_MIN_BUCKETS must be a positive integer (got '${DENSITY_MIN}')"
+  exit 2
+fi
+
+if ! [[ "$DENSITY_LOOKBACK" =~ ^[1-9][0-9]*$ ]]; then
+  alarm ERROR "DENSITY_PAIR_LOOKBACK_DAYS must be a positive integer (got '${DENSITY_LOOKBACK}')"
+  exit 2
+fi
+
+if (( DENSITY_MIN > DENSITY_WINDOW )); then
+  alarm ERROR "DENSITY_MIN_BUCKETS (${DENSITY_MIN}) cannot exceed DENSITY_WINDOW_MINUTES (${DENSITY_WINDOW}) for 1m buckets"
   exit 2
 fi
 
@@ -153,5 +182,42 @@ if (( AGE_SECONDS > THRESHOLD_SECONDS )); then
   exit 1
 fi
 
-echo "[$PROBE] OK: max(bucket_ts) is ${AGE_SECONDS}s old (threshold ${THRESHOLD_SECONDS}s)"
+# A pair remains in the active set for DENSITY_PAIR_LOOKBACK_DAYS after its
+# last bucket. That makes a total pair outage visible as count zero instead of
+# allowing the pair to disappear from the check. Count distinct minute buckets
+# because multiple products or authorities may write the same pair and minute.
+DENSITY_OUT=$(psql "$SAFE_DSN" --no-password -t -A \
+  --command "WITH pair_density AS ( \
+               SELECT source_currency, target_currency, \
+                      count(DISTINCT date_trunc('minute', bucket_ts)) FILTER ( \
+                        WHERE bucket_ts > now() - make_interval(mins => ${DENSITY_WINDOW}) \
+                      ) AS bucket_count \
+               FROM public.exchange_rates \
+               WHERE granularity = '1m' \
+                 AND status = 'CONFIRMED' \
+                 AND bucket_ts > now() - make_interval(days => ${DENSITY_LOOKBACK}) \
+                 AND bucket_ts <= now() \
+               GROUP BY source_currency, target_currency \
+             ) \
+             SELECT source_currency || '/' || target_currency || '=' || bucket_count \
+             FROM pair_density \
+             WHERE bucket_count < ${DENSITY_MIN} \
+             ORDER BY source_currency, target_currency;" 2>&1)
+PSQL_RC=$?
+
+if [[ $PSQL_RC -ne 0 ]]; then
+  alarm ERROR "Density query failed (psql exit ${PSQL_RC}): ${DENSITY_OUT}"
+  exit 2
+fi
+
+if [[ -n "$DENSITY_OUT" ]]; then
+  DENSITY_PAIRS="${DENSITY_OUT//$'\n'/, }"
+  if ! alarm STALE "DENSITY LOW: active pairs below ${DENSITY_MIN} distinct buckets in trailing ${DENSITY_WINDOW}m: ${DENSITY_PAIRS}"; then
+    echo "[$PROBE] ERROR: pair density is LOW and the page could NOT be delivered; exiting 2 so an undelivered density failure never reads as a delivered one" >&2
+    exit 2
+  fi
+  exit 1
+fi
+
+echo "[$PROBE] OK: max(bucket_ts) is ${AGE_SECONDS}s old (threshold ${THRESHOLD_SECONDS}s); every active pair has at least ${DENSITY_MIN} distinct buckets in trailing ${DENSITY_WINDOW}m"
 exit 0

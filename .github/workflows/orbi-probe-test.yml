@@ -105,14 +105,18 @@ jobs:
       # Staleness probe -- path 1: fresh data, expect exit 0
       # Proves the script does NOT false-alarm on healthy data.
       # -----------------------------------------------------------------------
-      - name: "[staleness] seed fresh data (1 minute old)"
+      - name: "[staleness] seed healthy BTC/USD and TST/USD density"
         env:
           PGPASSWORD: testpass
         run: |
           psql -h localhost -U testuser -d testdb -c "
             TRUNCATE public.exchange_rates;
             INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
-            VALUES (now() - interval '1 minute', '1m', 'BTC', 'USD');
+            SELECT now() - make_interval(mins => minute_offset), '1m', 'BTC', 'USD'
+            FROM generate_series(0, 59) AS minute_offset;
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            SELECT now() - make_interval(mins => minute_offset), '1m', 'TST', 'USD'
+            FROM generate_series(0, 29) AS minute_offset;
           "
 
       - name: "[staleness] path 1 -- fresh -> expect exit 0"
@@ -281,20 +285,106 @@ jobs:
           echo "confirmed: exit 2 (stale, alert script exited non-zero)"
 
       # -----------------------------------------------------------------------
-      # DSN sanitizer -- coverage added for the DL-2098 review findings on
-      # DL-1341: a password can be percent-encoded, a DSN can already carry a
-      # query string, and a DSN can have a shape the sanitizer regex does not
-      # anticipate at all. Each of these has to behave correctly or fail LOUD,
-      # never fail silent.
+      # Per-pair density -- force a test pair below the agreed hourly floor.
+      # BTC/USD keeps the age tripwire green, so exit 1 can only come from the
+      # density check. The alert-call assertion proves it paged, not just logged.
       # -----------------------------------------------------------------------
-      - name: "[dsn-sanitizer] re-seed fresh data (1 minute old)"
+      - name: "[density] seed healthy anchor and under-dense test pair"
         env:
           PGPASSWORD: testpass
         run: |
           psql -h localhost -U testuser -d testdb -c "
             TRUNCATE public.exchange_rates;
             INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
-            VALUES (now() - interval '1 minute', '1m', 'BTC', 'USD');
+            SELECT now() - make_interval(mins => minute_offset), '1m', 'BTC', 'USD'
+            FROM generate_series(0, 59) AS minute_offset;
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            SELECT now() - make_interval(mins => minute_offset), '1m', 'TST', 'USD'
+            FROM generate_series(0, 28) AS minute_offset;
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            VALUES (now() - interval '2 hours', '1m', 'ZRO', 'USD');
+          "
+
+      - name: "[density] 29 of 30 required buckets -> expect exit 1 and alert"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          DENSITY_WINDOW_MINUTES: "60"
+          DENSITY_MIN_BUCKETS: "30"
+        run: |
+          rm -f "$RUNNER_TEMP/alert-calls.log"
+          set +e
+          ./scripts/ops/orbi-staleness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 1 ]]; then
+            echo "ERROR: expected exit 1 (under-dense pair), got $EXIT" >&2
+            exit 1
+          fi
+          if [[ ! -s "$RUNNER_TEMP/alert-calls.log" ]]; then
+            echo "ERROR: density probe exited 1 but the alert script was never invoked; nobody was paged" >&2
+            exit 1
+          fi
+          if ! grep -q 'STALE DENSITY LOW:.*TST/USD=29' "$RUNNER_TEMP/alert-calls.log"; then
+            echo "ERROR: density alert did not name the under-dense pair and count: $(cat "$RUNNER_TEMP/alert-calls.log")" >&2
+            exit 1
+          fi
+          if ! grep -q 'ZRO/USD=0' "$RUNNER_TEMP/alert-calls.log"; then
+            echo "ERROR: a pair with zero buckets disappeared from the density alert: $(cat "$RUNNER_TEMP/alert-calls.log")" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 1 (under-dense TST/USD and zero-bucket ZRO/USD), alert invoked: $(cat "$RUNNER_TEMP/alert-calls.log")"
+
+      - name: "[density] under-dense + page undeliverable -> expect exit 2"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/failing-alert.sh
+          DENSITY_WINDOW_MINUTES: "60"
+          DENSITY_MIN_BUCKETS: "30"
+        run: |
+          set +e
+          ./scripts/ops/orbi-staleness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (density low, page undeliverable), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (density low, alert script exited non-zero)"
+
+      - name: "[density] invalid floor above window -> expect exit 2"
+        env:
+          ORBI_PROBE_DSN: "postgres://testuser:testpass@localhost:5432/testdb"
+          ORBI_ALERT_SCRIPT: ${{ runner.temp }}/stub-alert.sh
+          DENSITY_WINDOW_MINUTES: "60"
+          DENSITY_MIN_BUCKETS: "61"
+        run: |
+          set +e
+          ./scripts/ops/orbi-staleness-probe.sh
+          EXIT=$?
+          set -e
+          if [[ $EXIT -ne 2 ]]; then
+            echo "ERROR: expected exit 2 (invalid density configuration), got $EXIT" >&2
+            exit 1
+          fi
+          echo "confirmed: exit 2 (density floor cannot exceed window)"
+
+      # -----------------------------------------------------------------------
+      # DSN sanitizer -- coverage added for the DL-2098 review findings on
+      # DL-1341: a password can be percent-encoded, a DSN can already carry a
+      # query string, and a DSN can have a shape the sanitizer regex does not
+      # anticipate at all. Each of these has to behave correctly or fail LOUD,
+      # never fail silent.
+      # -----------------------------------------------------------------------
+      - name: "[dsn-sanitizer] re-seed 60 fresh BTC/USD minute buckets"
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -U testuser -d testdb -c "
+            TRUNCATE public.exchange_rates;
+            INSERT INTO public.exchange_rates (bucket_ts, granularity, source_currency, target_currency)
+            SELECT now() - make_interval(mins => minute_offset), '1m', 'BTC', 'USD'
+            FROM generate_series(0, 59) AS minute_offset;
           "
 
       - name: "[dsn-sanitizer] no password in the DSN -> parses cleanly, auth required -> expect exit 2"
