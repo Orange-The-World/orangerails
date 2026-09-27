@@ -1226,6 +1226,17 @@ const EXPECTED = {
   // back UNPARSEABLE for the whole file.
   '20990101000030_reversible_dollar_quoted_argument.sql': { verdict: REVERSIBLE, id: null },
   '20990101000031_irreversible_dollar_quoted_argument.sql': { verdict: IRREVERSIBLE, id: 'TRUNCATE' },
+  // OR-T1715, OR-T2363. A routine body this file invokes builds its SQL at
+  // run time. The literal EXECUTE would run is blanked by scrub() before the
+  // rules ever see it, same as at the top level, so this proves the general
+  // DYNAMIC EXECUTE rule (executeIsUnreadable) reaches an invoked body's
+  // statements through the same applyRules call the top level uses, and no
+  // separate pre-scan is needed to catch it.
+  '20990101000033_irreversible_dynamic_sql_in_invoked_body.sql': {
+    verdict: IRREVERSIBLE,
+    id: 'DYNAMIC EXECUTE',
+    line: 33,
+  },
 };
 
 function selftest() {
