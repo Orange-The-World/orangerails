@@ -49,7 +49,13 @@
 REVOKE SELECT ON TABLE public.stealth_connections  FROM anon;
 REVOKE SELECT ON TABLE public.stealth_scan_ranges  FROM anon;
 REVOKE SELECT ON TABLE public.stealth_transactions FROM anon;
-REVOKE SELECT ON TABLE public.stealth_utxos        FROM anon;
+DO $$
+BEGIN
+  IF to_regclass('public.stealth_utxos') IS NOT NULL THEN
+    EXECUTE 'REVOKE SELECT ON TABLE public.stealth_utxos FROM anon';
+  END IF;
+END
+$$;
 REVOKE SELECT ON TABLE public.workspace_admins     FROM anon;
 REVOKE SELECT ON TABLE public.wrapped_data_keys    FROM anon;
 
