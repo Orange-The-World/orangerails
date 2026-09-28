@@ -40,7 +40,7 @@
  * every v3 grant look like an empty row.
  */
 export const CO_ADMIN_GRANT_COLUMNS =
-  "wrapped_ciphertext, grant_sig, wrapped_cak, coadmin_keyring_ciphertext";
+  "id, wrapped_ciphertext, grant_sig, wrapped_cak, coadmin_keyring_ciphertext";
 
 /**
  * One co-admin grant, in whichever envelope it was written.
