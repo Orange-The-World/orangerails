@@ -59,6 +59,7 @@ export type CoAdminGrant =
     }
   | {
       version: 3;
+      grantId: string;
       wrappedCakB64: string;
       coadminKeyringCiphertextB64: string;
       grantSigB64: string | null;
