@@ -575,6 +575,8 @@ export async function grantCoAdmin(params: {
     targetUserId,
     targetKemPubB64,
     supabase,
+    ownerKeyringCiphertextB64,
+    ownerKeyringEpoch,
   } = params;
 
   // Step a , confirm the owner is present. This is the only thing the password
@@ -592,23 +594,6 @@ export async function grantCoAdmin(params: {
       "That vault password is not correct. Nothing was granted and nothing was changed.",
     );
   }
-
-  // Step b-c , derive both subkeys from the UNLOCKED MEK as raw bytes and
-  // concat into the 64-byte blob.
-  const credsRaw = await hkdfSubkeyRaw(
-    vaultMek,
-    HKDF_CONTEXTS.ORANGERAILS_CREDENTIALS_V1,
-    ownerSaltB64,
-  );
-  const txnsRaw = await hkdfSubkeyRaw(
-    vaultMek,
-    HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1,
-    ownerSaltB64,
-  );
-
-  const blob = new Uint8Array(64);
-  blob.set(credsRaw, 0);
-  blob.set(txnsRaw, 32);
 
   // Step d , get the workspace key id. The SERVER mints it; this browser must
   // not, and as of the server-allocation migration it no longer can.
