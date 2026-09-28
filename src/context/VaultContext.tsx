@@ -981,21 +981,27 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const targetUserId = row.user_id;
       const targetKemPubB64 = row.kem_public_key;
 
-      // Fetch the owner's ML-DSA-65 signing secret (wrapped) to sign the grant
-      // binding, plus the three fields the password confirmation needs. Reading
-      // them here keeps app.tsx free of vault-shape handling, and reads what
-      // the row says now rather than what the page loaded earlier.
+      // Fetch what the grant needs to sign and derive from, plus the three
+      // fields the password confirmation needs. Reading them here keeps
+      // app.tsx free of vault-shape handling, and reads what the row says now
+      // rather than what the page loaded earlier. keyring_ciphertext and
+      // keyring_epoch are the v3 envelope; sig_secret_wrapped is the legacy
+      // v2 one. An owner has exactly one of the two once PQC setup has run.
       const { data: metaRow } = await (supabase as any)
         .from("user_vault_meta")
         .select(
-          "sig_secret_wrapped, vault_verifier_ciphertext, vault_key_version, enc_mek_ciphertext",
+          "sig_secret_wrapped, keyring_ciphertext, keyring_epoch, vault_verifier_ciphertext, vault_key_version, enc_mek_ciphertext",
         )
         .eq("user_id", params.ownerUserId)
         .single();
       const meta = metaRow as Record<string, unknown> | null;
 
       const ownerSigSecretWrapped = meta?.sig_secret_wrapped as string | undefined;
-      if (!ownerSigSecretWrapped) {
+      const ownerKeyringCiphertextB64 = meta?.keyring_ciphertext as string | undefined;
+      const ownerKeyringEpoch = meta?.keyring_epoch as number | string | undefined;
+      const hasOwnerKeyring =
+        typeof ownerKeyringCiphertextB64 === "string" && ownerKeyringEpoch != null;
+      if (!hasOwnerKeyring && !ownerSigSecretWrapped) {
         throw new Error(
           "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
         );
@@ -1018,6 +1024,8 @@ export function VaultProvider({ children }: VaultProviderProps) {
         ownerKeyVersion: (meta?.vault_key_version as number | null) ?? 1,
         ownerEncMekCiphertext: (meta?.enc_mek_ciphertext as string | null) ?? null,
         ownerSigSecretWrapped,
+        ownerKeyringCiphertextB64,
+        ownerKeyringEpoch,
         targetUserId,
         targetKemPubB64,
         supabase: supabase as unknown as Parameters<typeof grantCoAdminImpl>[0]["supabase"],
