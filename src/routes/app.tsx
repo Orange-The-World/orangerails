@@ -123,7 +123,15 @@ interface WorkspaceOption {
   ownerUserId: string;
   ownerEmail: string;
   workspaceKeyId: string;
-  wrappedCiphertextB64: string;
+  // Envelope v2: the 64-byte subkey blob. Envelope v3: the wrapped per-grant
+  // CAK plus the sealed keyring projection, and the grant row's own id
+  // (grantId), which is half of the AAD binding that sealed it. A workspace
+  // carries exactly one envelope's fields, decided by grantVersion.
+  grantVersion: 2 | 3;
+  wrappedCiphertextB64: string | null;
+  wrappedCakB64: string | null;
+  coadminKeyringCiphertextB64: string | null;
+  grantId: string | null;
   // Grant-signature binding fields (DL-0619). loadAdminSubkeys verifies the
   // owner's ML-DSA-65 signature over (granteeUserId, workspaceKeyId, wrapped
   // ciphertext) before any decryption, so all three must travel with the row.
