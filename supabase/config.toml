@@ -11,6 +11,11 @@ project_id = "fzwmnzmtqidumdqjdddz"
 # Functions NOT listed here (e.g. sync-blink) intentionally require a real
 # Supabase / shadow-user JWT and benefit from the gateway pre-check
 # (verify_jwt = true default).
+#
+# Deploy note: on a push, the deploy workflow ships only the function
+# directories changed in that push, EXCEPT when this file (or a _-prefixed
+# shared directory) changed, in which case it redeploys every function.
+# A comment-only edit here counts as a change to this file.
 
 # --- Public, no auth --------------------------------------------------
 [functions.or-providers]
