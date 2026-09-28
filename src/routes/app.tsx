@@ -447,19 +447,35 @@ export function AppHome() {
           // same as the unverifiable grant skipped a few lines above.
           const grant = readCoAdminGrant(wdkRead.row);
           if (!grant) continue;
-          // A v3 grant is recognised here but cannot be opened yet: the per
-          // grant keyring primitive that unseals one is not wired into the
-          // consume path. Decline it rather than half handle it. See DEV-0308.
-          if (grant.version !== 2) continue;
-          workspaces.push({
-            ownerUserId: ownerId,
-            ownerEmail: ownerId, // resolved below
-            workspaceKeyId: ownerKeyId,
-            wrappedCiphertextB64: grant.wrappedCiphertextB64,
-            grantSigB64: grant.grantSigB64,
-            ownerSigPubB64,
-            granteeUserId: session.user.id,
-          });
+          workspaces.push(
+            grant.version === 3
+              ? {
+                  ownerUserId: ownerId,
+                  ownerEmail: ownerId, // resolved below
+                  workspaceKeyId: ownerKeyId,
+                  grantVersion: 3 as const,
+                  wrappedCiphertextB64: null,
+                  wrappedCakB64: grant.wrappedCakB64,
+                  coadminKeyringCiphertextB64: grant.coadminKeyringCiphertextB64,
+                  grantId: grant.grantId,
+                  grantSigB64: grant.grantSigB64,
+                  ownerSigPubB64,
+                  granteeUserId: session.user.id,
+                }
+              : {
+                  ownerUserId: ownerId,
+                  ownerEmail: ownerId, // resolved below
+                  workspaceKeyId: ownerKeyId,
+                  grantVersion: 2 as const,
+                  wrappedCiphertextB64: grant.wrappedCiphertextB64,
+                  wrappedCakB64: null,
+                  coadminKeyringCiphertextB64: null,
+                  grantId: null,
+                  grantSigB64: grant.grantSigB64,
+                  ownerSigPubB64,
+                  granteeUserId: session.user.id,
+                },
+          );
         }
       }
 
