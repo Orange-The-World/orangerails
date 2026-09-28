@@ -59,6 +59,7 @@ import {
   type CredentialsPayload,
   type NormalizedTransaction,
 } from "@/lib/crypto-fields";
+import { readOwnKeyringRow } from "@/lib/vault-keyring-row";
 import {
   ensurePqcKeypairs as ensurePqcKeypairsImpl,
   carryPqcSecretsAcrossRotation,
@@ -981,7 +982,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
       const { data: metaRow } = await (supabase as any)
         .from("user_vault_meta")
         .select(
-          "sig_secret_wrapped, vault_verifier_ciphertext, vault_key_version, enc_mek_ciphertext, keyring_ciphertext, keyring_epoch",
+          "sig_secret_wrapped, vault_verifier_ciphertext, vault_key_version, enc_mek_ciphertext",
         )
         .eq("user_id", params.ownerUserId)
         .single();
@@ -990,7 +991,23 @@ export function VaultProvider({ children }: VaultProviderProps) {
       // A vault that keeps a keyring holds its signing secret inside it and has no
       // legacy wrapped column, so the owner needs one or the other.
       const ownerSigSecretWrapped = (meta?.sig_secret_wrapped as string | null | undefined) ?? null;
-      const ownerKeyringCiphertext = (meta?.keyring_ciphertext as string | null | undefined) ?? null;
+      // The keyring columns are read on their own, tolerantly (see
+      // vault-keyring-row.ts), so the select above stays the pre v3 one. Only
+      // "column does not exist" reads as no keyring. Any other failure stops the
+      // grant: an owner who holds a keyring and is mistaken for one who does not
+      // would be granted under the v2 envelope, whose keys open nothing on a
+      // keyring vault.
+      const keyringRead = await readOwnKeyringRow(
+        supabase as unknown as Parameters<typeof readOwnKeyringRow>[0],
+        params.ownerUserId,
+      );
+      if (keyringRead.status === "error") {
+        throw new Error(
+          "Your vault keyring could not be read, so nothing was granted and nothing was changed. Reload the page and try again.",
+        );
+      }
+      const ownerKeyringCiphertext =
+        keyringRead.status === "ok" ? keyringRead.keyringCiphertext : null;
       if (!ownerSigSecretWrapped && !ownerKeyringCiphertext) {
         throw new Error(
           "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
@@ -1015,7 +1032,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
         ownerEncMekCiphertext: (meta?.enc_mek_ciphertext as string | null) ?? null,
         ownerSigSecretWrapped,
         ownerKeyringCiphertext,
-        ownerKeyringEpoch: (meta?.keyring_epoch as number | string | null | undefined) ?? null,
+        ownerKeyringEpoch: keyringRead.status === "ok" ? keyringRead.keyringEpoch : null,
         targetUserId,
         targetKemPubB64,
         supabase: supabase as unknown as Parameters<typeof grantCoAdminImpl>[0]["supabase"],
