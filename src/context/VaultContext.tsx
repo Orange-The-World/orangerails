@@ -1059,16 +1059,28 @@ export function VaultProvider({ children }: VaultProviderProps) {
   const loadAdminSubkeys = useCallback(
     async (params: {
       ownerWorkspaceKeyId: string;
-      wrappedCiphertextB64: string;
       kemSecretWrapped: string;
       grantSigB64: string | null;
       ownerSigPubB64: string;
       granteeUserId: string;
+      wrappedCiphertextB64?: string;
+      wrappedCakB64?: string;
+      coadminKeyringCiphertextB64?: string;
+      grantId?: string;
+      ownerUserId?: string;
+      adminKeyringCiphertextB64?: string | null;
+      adminKeyringEpoch?: number | string | null;
     }): Promise<AdminSubkeys> => {
       const { mek, saltB64: s } = requireUnlocked();
       return loadAdminSubkeysDirect({
         wrappedCiphertextB64: params.wrappedCiphertextB64,
+        wrappedCakB64: params.wrappedCakB64,
+        coadminKeyringCiphertextB64: params.coadminKeyringCiphertextB64,
+        grantId: params.grantId,
+        ownerUserId: params.ownerUserId,
         kemSecretWrapped: params.kemSecretWrapped,
+        adminKeyringCiphertextB64: params.adminKeyringCiphertextB64,
+        adminKeyringEpoch: params.adminKeyringEpoch,
         adminMek: mek,
         adminSaltB64: s,
         grantSigB64: params.grantSigB64,
