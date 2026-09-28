@@ -522,6 +522,17 @@ export async function persistCoAdminGrant(
  * than whoever found an unlocked tab. It is checked and discarded; nothing is
  * derived from it here.
  *
+ * ENVELOPE V3, CONSTRUCTION (D). When the owner has a keyring
+ * (ownerKeyringCiphertextB64 is present), this skips the HKDF-blob path
+ * entirely and instead: unwraps the owner's own keyring, projects the
+ * credentials and transactions data keys only (never the owner's KEM or
+ * signing secrets, see projectKeyringForCoAdmin), seals that projection under
+ * a fresh single-purpose Co-Admin Key, and wraps the Co-Admin Key to the
+ * recipient. The grant signature covers the wrapped Co-Admin Key ciphertext
+ * in place of the wrapped blob; everything else about the binding, including
+ * workspace key allocation, is unchanged. See co-admin-keyring.ts for the
+ * sealing primitives.
+ *
  * @param params.ownerUserId       The authenticated owner's user ID.
  * @param params.ownerSaltB64      The owner's vault salt (from user_vault_meta).
  * @param params.ownerPassword     Re-confirmed vault password (never leaves the browser).
@@ -534,6 +545,9 @@ export async function persistCoAdminGrant(
  * @param params.existingKeyId     Current workspace_key_id from user_vault_meta (null if not yet
  *                                 allocated, in which case the server allocates one).
  * @param params.supabase          Authenticated Supabase client for the owner.
+ * @param params.ownerKeyringCiphertextB64  user_vault_meta.keyring_ciphertext, null on a v2 vault.
+ * @param params.ownerKeyringEpoch          user_vault_meta.keyring_epoch, required whenever the
+ *                                          ciphertext is present.
  */
 export async function grantCoAdmin(params: {
   ownerUserId: string;
