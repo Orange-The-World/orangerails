@@ -10,12 +10,12 @@
  *      material is derived from it (see confirmVaultPassword).
  *   2. Run HKDF on the UNLOCKED MEK to extract credentials + transactions
  *      subkeys as raw bits.
- *   3. Concatenate into a 64-byte blob.
+ *   3. Concatenate the two subkeys into one blob (64 bytes today).
  *   4. Wrap the blob with the admin's hybrid KEM public key (see wrapBlob64).
  *   5. Insert workspace_admins, then wrapped_data_keys. That order is not
  *      interchangeable; see persistCoAdminGrant for why.
  *
- * ## A GRANT IS FROZEN AT THE MOMENT IT IS MADE. Read this before relying on one.
+ * ## A V2 GRANT IS FROZEN AT THE MOMENT IT IS MADE. Read this before relying on one.
  *   The blob holds HKDF subkeys of the OWNER's MEK, captured at step 2 and
  *   never touched again. It is not a stable property of the workspace.
  *
@@ -36,7 +36,7 @@
  * ## Consume flow (admin side, post-unlock)
  *   1. Fetch wrapped_data_keys row for the owner's workspace_key_id.
  *   2. Unwrap with the admin's own PQC secret key (see unwrapBlob64).
- *   3. Split into two 32-byte subkeys; import as AES-GCM CryptoKeys.
+ *   3. Split at the midpoint into two equal subkeys; import as AES-GCM CryptoKeys.
  *   4. Return for use in encrypt/decrypt calls.
  *
  * ## Revoke flow (owner side)
@@ -57,6 +57,38 @@
  *   bytes 0..HYBRID_KEM_CIPHERTEXT_BYTES      : hybrid KEM ciphertext
  *   bytes HYBRID_KEM_CIPHERTEXT_BYTES..+12     : AES-GCM IV
  *   bytes ..end                                : AES-GCM(sharedSecret, blob64) + 16-byte tag
+ *
+ * ## Envelope v3 (construction (d)): a grant that survives a recovery
+ *   On a v3 vault the data keys live inside the owner's keyring and do not
+ *   change when the master key is replaced, so a grant is not frozen the way
+ *   the v2 blob above is. The owner mints a random per grant key (the CAK),
+ *   seals a projection of the keyring's two data key fields under it, and
+ *   wraps only the CAK to the recipient's hybrid KEM public key. The sealed
+ *   keyring is bound to the owner and the grant id, and the owner's ML-DSA
+ *   signature covers (recipient, workspace key id, wrapped CAK) once, at
+ *   grant time. See co-admin-keyring.ts for the primitives.
+ *
+ *   The consume side verifies that signature BEFORE it decrypts anything and
+ *   rejects on the default branch, so a row that carries neither a valid v2
+ *   nor a valid v3 shape opens nothing. The admin's own vault version decides
+ *   only where the admin's KEM secret is read from (their keyring, or the
+ *   older kem_secret_wrapped column). It never decides whether a grant is
+ *   valid: a v3 admin can consume a v2 grant and a v2 admin can consume a v3
+ *   grant.
+ *
+ *   REVOCATION WORDING. Revoking deletes the wrapped_data_keys row, so the
+ *   admin can no longer fetch the grant. An admin who kept the CAK and the
+ *   sealed keyring keeps the data keys they already had, exactly as an admin
+ *   who kept the v2 blob does. Nothing here claims otherwise.
+ *
+ *   ONE KEY OF EACH KIND. AdminSubkeys carries a single credentials key and a
+ *   single transactions key, so a v3 consume returns the LATEST generation of
+ *   each. Rows written under an older generation need a generation aware
+ *   read, which is a follow up and not part of this change.
+ *
+ *   No vault flow writes a v3 keyring yet, so every owner takes the v2 path
+ *   today. The v3 branches are covered by tests and stay inert in the app
+ *   until a vault flow produces a keyring.
  *
  * MVP limitation: cached subkeys in the admin's browser tab survive
  * revocation until the tab is closed. See docs/OrangeRails-CoAdmins.md.
@@ -138,23 +170,34 @@ async function hkdfSubkeyRaw(
 }
 
 // ------------------------------------------------------------------
-// 64-byte blob wrap / unwrap , co-admin-specific, same wire format as
-// key-wrapping.ts but without the 32-byte data-key size restriction.
+// Subkey blob wrap / unwrap , co-admin-specific, same wire format as
+// key-wrapping.ts but without the 32-byte data-key size restriction. The 64
+// in the function names is the size the blob has today, not a limit.
 // ------------------------------------------------------------------
 
-const BLOB64_BYTES = 64;
 const AES_IV_BYTES = 12;
+const AES_GCM_TAG_BYTES = 16;
 
 /**
- * Wrap a 64-byte blob for a recipient's hybrid KEM public key.
+ * Wrap a co-admin subkey blob (two 32-byte subkeys, 64 bytes today) for a
+ * recipient's hybrid KEM public key.
+ *
+ * The length is not pinned. The producer decides how long the plaintext is and
+ * AES-GCM authenticates whatever was written, so a pin here would only turn a
+ * length change in the producer into a mismatch found at the far end. What is
+ * checked is structure: the blob must be non-empty and hold two equal halves,
+ * because that is what the consume side splits it into.
+ *
  * Output is opaque bytes; store base64 in wrapped_data_keys.wrapped_ciphertext.
  */
 export async function wrapBlob64(
   blob: Uint8Array,
   recipientPublicKey: Uint8Array,
 ): Promise<Uint8Array> {
-  if (blob.length !== BLOB64_BYTES) {
-    throw new Error(`blob must be ${BLOB64_BYTES} bytes, got ${blob.length}`);
+  if (blob.length === 0 || blob.length % 2 !== 0) {
+    throw new Error(
+      `co-admin blob must hold two equal length subkeys, got ${blob.length} bytes`,
+    );
   }
 
   const { ciphertext: kemCt, sharedSecret } = hybridEncapsulate(recipientPublicKey);
@@ -185,15 +228,20 @@ export async function wrapBlob64(
 
 /**
  * Unwrap a blob produced by wrapBlob64 using the recipient's own secret key.
- * Returns the original 64-byte blob.
+ * Returns the original blob, whatever length it was wrapped at.
+ *
+ * The only length check is a floor: the wrapped value has to be longer than the
+ * KEM ciphertext, the IV and the AES-GCM tag together, or there is no room for
+ * a plaintext at all. Anything longer goes to AES-GCM, whose tag check is what
+ * says whether the bytes are the ones that were wrapped.
  */
 export async function unwrapBlob64(
   wrapped: Uint8Array,
   ownSecretKey: Uint8Array,
 ): Promise<Uint8Array> {
-  const expectedMin = HYBRID_KEM_CIPHERTEXT_BYTES + AES_IV_BYTES + BLOB64_BYTES + 16;
-  if (wrapped.length !== expectedMin) {
-    throw new Error(`wrapped blob must be ${expectedMin} bytes, got ${wrapped.length}`);
+  const floor = HYBRID_KEM_CIPHERTEXT_BYTES + AES_IV_BYTES + AES_GCM_TAG_BYTES;
+  if (wrapped.length <= floor) {
+    throw new Error(`wrapped blob must be longer than ${floor} bytes, got ${wrapped.length}`);
   }
 
   const kemCt = wrapped.subarray(0, HYBRID_KEM_CIPHERTEXT_BYTES);
@@ -778,9 +826,9 @@ export async function grantCoAdmin(params: {
     ownerSaltB64,
   );
 
-  const blob = new Uint8Array(64);
+  const blob = new Uint8Array(credsRaw.length + txnsRaw.length);
   blob.set(credsRaw, 0);
-  blob.set(txnsRaw, 32);
+  blob.set(txnsRaw, credsRaw.length);
 
   // Step d , get the workspace key id. The SERVER mints it; this browser must
   // not, and as of the server-allocation migration it no longer can.
@@ -1025,8 +1073,17 @@ export async function loadAdminSubkeysDirect(
   const wrappedCiphertext = base64ToBytes(params.wrappedCiphertextB64);
   const blob = await unwrapBlob64(wrappedCiphertext, kemSecretBytes);
 
-  const credentialsKey = await importAesKey(blob.slice(0, 32).buffer);
-  const transactionsKey = await importAesKey(blob.slice(32, 64).buffer);
+  // Two equal halves, split at the midpoint rather than at a fixed offset, so
+  // the split stays right if a subkey length ever changes. A blob that is empty
+  // or odd cannot be two equal keys and is refused before anything is imported.
+  if (blob.length === 0 || blob.length % 2 !== 0) {
+    throw new Error(
+      `co-admin blob must hold two equal length subkeys, got ${blob.length} bytes`,
+    );
+  }
+  const half = blob.length / 2;
+  const credentialsKey = await importAesKey(blob.slice(0, half).buffer);
+  const transactionsKey = await importAesKey(blob.slice(half).buffer);
 
   return { credentialsKey, transactionsKey };
 }
