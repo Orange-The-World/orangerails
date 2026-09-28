@@ -99,6 +99,83 @@ function errResponse(status: number, code: string, message: string): Response {
   return Response.json({ error: code, message }, { status })
 }
 
+// ----- Bounded coverage probe (OR-T0113) -----
+// The single unbounded ascending probe this replaced scanned forward from the
+// start of a pair's history to find its earliest qualifying row, which is fine
+// when the requested instant is near the start of history and a near-full scan
+// when it is not: measured 20-28s against orbi-prod for BTC-EUR/GBP historical
+// requests, past the statement timeout and surfacing to the caller as a 500,
+// not a 404.
+//
+// This splits the same question into two bounded, indexable probes:
+//   1. the latest CONFIRMED, non-superseded row at or before bucketTs (covers
+//      the common case: an in-range or exact-match request), and only if that
+//      finds nothing,
+//   2. the earliest such row strictly after bucketTs (covers a before-coverage
+//      request, so the caller still gets the real coverage-start message).
+// A pair with no rows at all falls through both probes to { row: null }, which
+// the caller already treats as unsupported_pair.
+interface RateRow {
+  bucket_ts: string
+}
+
+interface CoverageQuery {
+  eq(col: string, val: string): CoverageQuery
+  is(col: string, val: null): CoverageQuery
+  lte(col: string, val: string): CoverageQuery
+  gt(col: string, val: string): CoverageQuery
+  order(col: string, opts: { ascending: boolean }): CoverageQuery
+  limit(n: number): CoverageQuery
+  maybeSingle(): Promise<{ data: RateRow | null; error: unknown }>
+}
+
+interface CoverageClient {
+  from(table: string): { select(cols: string): CoverageQuery }
+}
+
+export interface CoverageParams {
+  asset: string
+  fiat: string
+  product: string
+  granularity: string
+  bucketTs: string
+}
+
+export async function resolveCoverage(
+  client: CoverageClient,
+  p: CoverageParams,
+): Promise<{ row: RateRow | null; error: unknown }> {
+  const scoped = () =>
+    client
+      .from('exchange_rates')
+      .select('bucket_ts')
+      .eq('source_currency', p.asset)
+      .eq('target_currency', p.fiat)
+      .eq('granularity', p.granularity)
+      .eq('product', p.product)
+      .eq('source_authority', 'ORBI')
+      .eq('status', 'CONFIRMED')
+      .is('superseded_by_id', null)
+
+  const { data: atOrBefore, error: atOrBeforeErr } = await scoped()
+    .lte('bucket_ts', p.bucketTs)
+    .order('bucket_ts', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (atOrBeforeErr) return { row: null, error: atOrBeforeErr }
+  if (atOrBefore) return { row: atOrBefore, error: null }
+
+  const { data: after, error: afterErr } = await scoped()
+    .gt('bucket_ts', p.bucketTs)
+    .order('bucket_ts', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (afterErr) return { row: null, error: afterErr }
+  return { row: after, error: null }
+}
+
 interface RateItem {
   asset: string
   fiat: string
@@ -250,29 +327,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     const bucketTs = ts.toISOString()
 
-    // ----- Coverage probe FIRST (OR-T0113) -----
-    // The point lookup below orders bucket_ts DESC and scans backward from the
-    // requested instant. When that instant is before the pair's first CONFIRMED,
-    // non-superseded row, the backward scan finds nothing and must heap-fetch and
-    // reject every non-qualifying candidate on the way back -- measured 20-28s
-    // against orbi-prod for BTC-EUR/GBP historical requests (OR-T0113), which is
-    // past any statement timeout and surfaces to the caller as a 500, not a 404.
-    // This ascending, unbounded probe finds the pair's earliest qualifying row
-    // directly, so a before-coverage or unsupported-pair request is answered here
-    // without ever running the expensive backward scan.
-    const { data: coverageRow, error: coverageErr } = await supabase
-      .from('exchange_rates')
-      .select('bucket_ts')
-      .eq('source_currency', item.asset.toUpperCase())
-      .eq('target_currency', item.fiat.toUpperCase())
-      .eq('granularity', granularity)
-      .eq('product', product)
-      .eq('source_authority', 'ORBI')
-      .eq('status', 'CONFIRMED')
-      .is('superseded_by_id', null)
-      .order('bucket_ts', { ascending: true })
-      .limit(1)
-      .maybeSingle()
+    // ----- Coverage probe (OR-T0113): bounded two-step lookup -----
+    // resolveCoverage runs two bounded, indexable probes instead of the single
+    // unbounded ascending scan this replaced (see its definition above for why
+    // that scan measured 20-28s against orbi-prod and surfaced as a 500).
+    const { row: coverageRow, error: coverageErr } = await resolveCoverage(supabase, {
+      asset: item.asset.toUpperCase(),
+      fiat: item.fiat.toUpperCase(),
+      product,
+      granularity,
+      bucketTs,
+    })
 
     if (coverageErr) {
       console.error(`coverage-probe DB error [${correlationId}]:`, coverageErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity }))
