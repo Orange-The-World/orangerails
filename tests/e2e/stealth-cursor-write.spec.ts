@@ -193,7 +193,9 @@ async function deleteNonUuidFixture(connectionId: string): Promise<void> {
 
 // Requirement 3: check stealth_connections.last_block_scanned via the
 // envelope-fetch edge function, which reads the real DB row.
-async function fetchConnectionCursor(connectionId: string): Promise<number | null> {
+async function fetchConnectionRow(
+  connectionId: string,
+): Promise<{ last_block_scanned: number | null; scan_generation?: string }> {
   const resp = await fetch(`${FN}/or-stealth-envelope-fetch`, {
     method: 'POST',
     headers: {
@@ -207,8 +209,11 @@ async function fetchConnectionCursor(connectionId: string): Promise<number | nul
     }),
   });
   if (!resp.ok) throw new Error(`or-stealth-envelope-fetch failed ${resp.status}`);
-  const row = (await resp.json()) as { last_block_scanned: number | null };
-  return row.last_block_scanned;
+  return (await resp.json()) as { last_block_scanned: number | null; scan_generation?: string };
+}
+
+async function fetchConnectionCursor(connectionId: string): Promise<number | null> {
+  return (await fetchConnectionRow(connectionId)).last_block_scanned;
 }
 
 // ------ suite -------------------------------------------------------------
@@ -340,6 +345,15 @@ _testDescribe('stealth cursor write (DL-0649 Part 2)', () => {
     //   (!useMock || isForceCursor()) && 800010 > (null ?? -1)
     // = (false || true) && true = true
     // fires the cursor write.
+    // The cursor-write endpoint requires the connection's current
+    // scan_generation (the widget echoes the value from this response), and
+    // answers 409 on mismatch, so read the real one from the fixture row.
+    const realRow = await fetchConnectionRow(capturedId);
+    expect(
+      typeof realRow.scan_generation,
+      'envelope-fetch must return scan_generation for the fixture row',
+    ).toBe('string');
+
     await widgetPage.route('**/or-stealth-envelope-fetch', (route) => {
       void route.fulfill({
         status: 200,
@@ -351,6 +365,7 @@ _testDescribe('stealth cursor write (DL-0649 Part 2)', () => {
           wallet_birthday_plaintext: '2020-01-01',
           last_block_scanned: null,
           last_sync_at: null,
+          scan_generation: realRow.scan_generation,
           status: 'active',
         }),
       });
