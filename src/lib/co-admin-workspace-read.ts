@@ -57,6 +57,7 @@ import { CO_ADMIN_GRANT_COLUMNS } from "@/lib/co-admin-grant-row";
 export type WrappedKeyClient = { from: (table: string) => any };
 
 export interface WrappedDataKeyRow {
+  id: string | null;
   wrapped_ciphertext: string | null;
   grant_sig: string | null;
   wrapped_cak: string | null;
