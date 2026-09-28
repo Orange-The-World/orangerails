@@ -1041,7 +1041,7 @@ export async function reconcileConnectionError(
   } else {
     const legacy = await client
       .from('connections')
-      .select('id')
+      .select('id, updated_at')
       .eq('subaccount_id', subaccountId)
       .eq('provider_type', 'quiltt')
       .is('quiltt_connection_id', null)
