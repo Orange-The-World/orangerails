@@ -418,16 +418,24 @@ function isUniqueViolation(err: unknown): boolean {
  * this point, deriving the MEK, wrapping the blob and signing the binding, is
  * what makes the rows written here mean anything.
  */
-export async function persistCoAdminGrant(params: {
-  ownerUserId: string;
-  targetUserId: string;
-  workspaceKeyId: string;
-  wrappedCiphertextB64: string;
-  grantSig: string;
-  supabase: CoAdminSupabaseLike;
-}): Promise<void> {
-  const { ownerUserId, targetUserId, workspaceKeyId, wrappedCiphertextB64, grantSig, supabase } =
-    params;
+export async function persistCoAdminGrant(
+  params: {
+    ownerUserId: string;
+    targetUserId: string;
+    workspaceKeyId: string;
+    grantSig: string;
+    supabase: CoAdminSupabaseLike;
+  } & (
+    | { version: 2; wrappedCiphertextB64: string }
+    | {
+        version: 3;
+        grantId: string;
+        wrappedCakB64: string;
+        coadminKeyringCiphertextB64: string;
+      }
+  ),
+): Promise<void> {
+  const { ownerUserId, targetUserId, workspaceKeyId, grantSig, supabase } = params;
 
   // The record of who holds access. Deliberately first.
   const { error: adminErr } = await supabase.from("workspace_admins").insert({
@@ -438,14 +446,29 @@ export async function persistCoAdminGrant(params: {
     throw new Error(`Failed to insert workspace_admins: ${formatError(adminErr)}`);
   }
 
-  // The wrapped key. THIS is the write that grants access.
-  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
-    data_key_id: workspaceKeyId,
-    recipient_user_id: targetUserId,
-    wrapped_ciphertext: wrappedCiphertextB64,
-    algorithm: "hybrid-x25519-mlkem768-blob64",
-    grant_sig: grantSig,
-  });
+  // The wrapped key. THIS is the write that grants access. Which columns
+  // carry it depends on the envelope: v3 writes its own id (the grantId the
+  // keyring projection was sealed under) plus the CAK pair, never
+  // wrapped_ciphertext; v2 is unchanged.
+  const wrappedKeyRow =
+    params.version === 3
+      ? {
+          id: params.grantId,
+          data_key_id: workspaceKeyId,
+          recipient_user_id: targetUserId,
+          wrapped_cak: params.wrappedCakB64,
+          coadmin_keyring_ciphertext: params.coadminKeyringCiphertextB64,
+          algorithm: "coadmin-keyring-v3",
+          grant_sig: grantSig,
+        }
+      : {
+          data_key_id: workspaceKeyId,
+          recipient_user_id: targetUserId,
+          wrapped_ciphertext: params.wrappedCiphertextB64,
+          algorithm: "hybrid-x25519-mlkem768-blob64",
+          grant_sig: grantSig,
+        };
+  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert(wrappedKeyRow);
   if (wdkErr) {
     if (isUniqueViolation(wdkErr)) {
       // A row already exists at this exact (workspaceKeyId, targetUserId)
