@@ -224,6 +224,17 @@ async function cakOf(row: StoredGrant, admin: Admin): Promise<Uint8Array> {
   return unwrapCoAdminKey(encoding.base64ToBytes(str(row, "wrapped_cak")), admin.kemSecretKey);
 }
 
+/**
+ * How each call to a spied decrypt step ended, in call order. The spied steps
+ * are async, so the plain results list records a returned promise as a return
+ * even when that promise later rejects. Only the settled results list can tell
+ * a refusal from a success.
+ */
+function outcomes(step: unknown): string[] {
+  const spy = vi.mocked(step as (...args: unknown[]) => Promise<unknown>);
+  return spy.mock.settledResults.map((r) => r.type);
+}
+
 // ==================================================================
 // A sealed keyring cannot be moved between two grants of one owner
 // ==================================================================
@@ -278,9 +289,11 @@ describe("a sealed keyring cannot be moved between two grants of the same owner"
     // The sealed keyring is outside the signed set on purpose: the signature
     // covers the wrapped key, and without that key the sealed keyring is
     // inert. So the signature check passes here and the refusal comes from the
-    // seal itself. Each attempt reached the open step, and that step threw.
-    expect(unwrapCoAdminKey).toHaveBeenCalledTimes(2);
-    expect(openCoAdminKeyring).toHaveBeenCalledTimes(2);
+    // seal itself. Each attempt got past the signature check and opened its own
+    // wrapped key, and then the open step refused the swapped seal. Naming how
+    // each step ended is what stops a rejection from anywhere else from passing.
+    expect(outcomes(unwrapCoAdminKey)).toEqual(["fulfilled", "fulfilled"]);
+    expect(outcomes(openCoAdminKeyring)).toEqual(["rejected", "rejected"]);
   });
 
   it("refuses a keyring sealed under the very same key but bound to another grant's id", async () => {
@@ -308,5 +321,12 @@ describe("a sealed keyring cannot be moved between two grants of the same owner"
         coadminKeyringCiphertextB64: boundToTheOtherGrant,
       }),
     ).rejects.toBeTruthy();
+
+    // Three unwraps: the one in cakOf, then one per consume. All three succeed,
+    // so the recipient's own key was never the problem. The open step accepted
+    // the seal bound to the grant's own id and refused the one bound to the
+    // other grant's id.
+    expect(outcomes(unwrapCoAdminKey)).toEqual(["fulfilled", "fulfilled", "fulfilled"]);
+    expect(outcomes(openCoAdminKeyring)).toEqual(["fulfilled", "rejected"]);
   });
 });
