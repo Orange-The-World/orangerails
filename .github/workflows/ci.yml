@@ -832,7 +832,7 @@ jobs:
       PGDATABASE: vaultmetarls
       # Number of assertions the suite is expected to report OK. Checked,
       # not assumed, same reasoning as scan-range-sql's own baseline.
-      VAULT_META_ASSERTION_BASELINE: '4'
+      VAULT_META_ASSERTION_BASELINE: '6'
     steps:
       - name: Checkout
         uses: actions/checkout@v7
