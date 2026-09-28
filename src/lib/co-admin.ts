@@ -1012,8 +1012,19 @@ export async function loadAdminSubkeysDirect(
   // The bytes the owner's signature covers: the wrapped subkey blob on a v2
   // grant, the wrapped co-admin key on a v3 grant. Which one comes from the
   // shape of the material handed in, never from an algorithm string.
-  const signedWrappedB64 =
-    "wrappedCakB64" in params ? params.wrappedCakB64 : params.wrappedCiphertextB64;
+  //
+  // A shape that is neither is refused here, before anything is verified or
+  // decrypted: the default is to reject, never to treat an unknown shape as v2.
+  let signedWrappedB64: string;
+  if ("wrappedCakB64" in params) {
+    signedWrappedB64 = params.wrappedCakB64;
+  } else if ("wrappedCiphertextB64" in params) {
+    signedWrappedB64 = params.wrappedCiphertextB64;
+  } else {
+    throw new Error(
+      "Co-admin grant carries neither a v2 subkey blob nor a v3 wrapped key: refusing to decrypt anything.",
+    );
+  }
 
   // Step 0 , verify the grant signature before any decryption (fail-closed).
   // Both a missing signature and an invalid signature cause an immediate throw.
