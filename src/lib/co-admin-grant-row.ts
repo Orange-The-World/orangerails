@@ -38,9 +38,13 @@
  * Kept next to the function that interprets them so a reader cannot silently
  * select less than the shape rule needs: a select that omits wrapped_cak makes
  * every v3 grant look like an empty row.
+ *
+ * id is in the list for the same reason. It is the grant id the sealed keyring
+ * is bound to (the keyring's authenticated data names it), so a v3 read that
+ * left it out could not open the keyring it had just fetched.
  */
 export const CO_ADMIN_GRANT_COLUMNS =
-  "wrapped_ciphertext, grant_sig, wrapped_cak, coadmin_keyring_ciphertext";
+  "id, wrapped_ciphertext, grant_sig, wrapped_cak, coadmin_keyring_ciphertext";
 
 /**
  * One co-admin grant, in whichever envelope it was written.
@@ -59,6 +63,11 @@ export type CoAdminGrant =
     }
   | {
       version: 3;
+      /**
+       * The row id. The sealed keyring is bound to it, so it is part of what
+       * opens the grant, not bookkeeping.
+       */
+      grantId: string;
       wrappedCakB64: string;
       coadminKeyringCiphertextB64: string;
       grantSigB64: string | null;
@@ -98,6 +107,7 @@ export function readCoAdminGrant(row: unknown): CoAdminGrant | null {
   const wrappedCakB64 = presentString(fields, "wrapped_cak");
   const coadminKeyringCiphertextB64 = presentString(fields, "coadmin_keyring_ciphertext");
   const grantSigB64 = presentString(fields, "grant_sig");
+  const grantId = presentString(fields, "id");
 
   // Both envelopes at once. The database permits it (the presence rule only
   // asks for at least one), no writer produces it, and choosing one of the two
@@ -109,11 +119,18 @@ export function readCoAdminGrant(row: unknown): CoAdminGrant | null {
     return { version: 2, wrappedCiphertextB64, grantSigB64 };
   }
 
-  // A v3 grant needs both halves. The wrapped co-admin key alone opens
-  // nothing, and the sealed keyring alone cannot be opened.
-  if (wrappedCakB64 !== null && coadminKeyringCiphertextB64 !== null) {
+  // A v3 grant needs both halves and its row id. The wrapped co-admin key
+  // alone opens nothing, the sealed keyring alone cannot be opened, and
+  // without the id the keyring's binding cannot be rebuilt, so it would refuse
+  // to open anyway. Refusing here names the reason instead of failing later.
+  if (
+    grantId !== null &&
+    wrappedCakB64 !== null &&
+    coadminKeyringCiphertextB64 !== null
+  ) {
     return {
       version: 3,
+      grantId,
       wrappedCakB64,
       coadminKeyringCiphertextB64,
       grantSigB64,
