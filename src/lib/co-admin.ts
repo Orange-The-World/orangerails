@@ -638,39 +638,104 @@ export async function grantCoAdmin(params: {
     workspaceKeyId = allocated;
   }
 
-  // Step e , wrap the 64-byte blob for the recipient's KEM public key.
+  // recipientPub and the owner's own unwrapped signing secret are needed by
+  // both envelopes below.
   const recipientPub = base64ToBytes(targetKemPubB64);
+  const pqcWrapKey = await derivePqcSecretWrapKey(vaultMek, ownerSaltB64);
+  const ownerSigSecretBytes = await unwrapPqcSecretKey(pqcWrapKey, ownerSigSecretWrapped);
+
+  if (ownerKeyringCiphertextB64) {
+    // Envelope v3, construction (d). See this function's own docstring and
+    // co-admin-keyring.ts for why this seals a PROJECTION under a fresh
+    // per-grant key rather than wrapping the owner's keyring directly.
+    if (ownerKeyringEpoch === null || ownerKeyringEpoch === undefined) {
+      throw new Error(
+        "Owner keyring ciphertext present with no keyring epoch: refusing to unwrap.",
+      );
+    }
+    const ownerKeyring = await unwrapKeyring(ownerKeyringCiphertextB64, vaultMek, ownerSaltB64, {
+      userId: ownerUserId,
+      keyringEpoch: ownerKeyringEpoch,
+    });
+    const projection = projectKeyringForCoAdmin(ownerKeyring);
+    const cak = generateCoAdminKey();
+    // Minted here, not read back after the insert: sealCoAdminKeyring's AAD
+    // and the row's own id must be the exact same value, and the only way to
+    // guarantee that is to generate it once and pass it to both.
+    const grantId = crypto.randomUUID();
+    const coadminKeyringCiphertextB64 = await sealCoAdminKeyring(projection, cak, {
+      ownerUserId,
+      grantId,
+    });
+    const wrappedCakB64 = bytesToBase64(await wrapCoAdminKey(cak, recipientPub));
+
+    // Sign the wrapped Co-Admin Key in place of the wrapped blob v2 signs.
+    // Same four bound fields, same fail-closed consume side.
+    const { signature: grantSig } = await signMemberGrant(ownerSigSecretBytes, {
+      memberUserId: targetUserId,
+      workspaceKeyId,
+      wrappedMekCiphertextB64: wrappedCakB64,
+    });
+
+    await persistCoAdminGrant({
+      ownerUserId,
+      targetUserId,
+      workspaceKeyId,
+      grantSig,
+      supabase,
+      version: 3,
+      grantId,
+      wrappedCakB64,
+      coadminKeyringCiphertextB64,
+    });
+
+    return { workspaceKeyId };
+  }
+
+  // Envelope v2, unchanged. Derive both subkeys from the UNLOCKED MEK as raw
+  // bytes, concat into the 64-byte blob, and wrap it for the recipient's KEM
+  // public key.
+  const credsRaw = await hkdfSubkeyRaw(
+    vaultMek,
+    HKDF_CONTEXTS.ORANGERAILS_CREDENTIALS_V1,
+    ownerSaltB64,
+  );
+  const txnsRaw = await hkdfSubkeyRaw(
+    vaultMek,
+    HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1,
+    ownerSaltB64,
+  );
+
+  const blob = new Uint8Array(64);
+  blob.set(credsRaw, 0);
+  blob.set(txnsRaw, 32);
+
   const wrappedBytes = await wrapBlob64(blob, recipientPub);
   const wrappedCt = bytesToBase64(wrappedBytes);
 
-  // Step e.1 , ML-DSA-65 sign the grant binding so neither the recipient nor
-  // the wrapped ciphertext can be swapped after the fact. The signed payload
-  // binds all four fields: context, grantee user id, workspace key id, and the
-  // wrapped ciphertext bytes. All four must match at verify time.
-  //
-  // The owner's signing secret was wrapped under a subkey of the MEK by
-  // ensurePqcKeypairs, so it unwraps under that same MEK and nothing else.
-  // This is the identical call the consume side makes in
-  // loadAdminSubkeysDirect.
-  const pqcWrapKey = await derivePqcSecretWrapKey(vaultMek, ownerSaltB64);
-  const ownerSigSecretBytes = await unwrapPqcSecretKey(pqcWrapKey, ownerSigSecretWrapped);
+  // ML-DSA-65 sign the grant binding so neither the recipient nor the wrapped
+  // ciphertext can be swapped after the fact. The signed payload binds all
+  // four fields: context, grantee user id, workspace key id, and the wrapped
+  // ciphertext bytes. All four must match at verify time. This is the
+  // identical call the consume side makes in loadAdminSubkeysDirect.
   const { signature: grantSig } = await signMemberGrant(ownerSigSecretBytes, {
     memberUserId: targetUserId,
     workspaceKeyId,
     wrappedMekCiphertextB64: wrappedCt,
   });
 
-  // Steps f-g , write the two rows. The list row goes first and the wrapped
-  // key second, so a stop between them leaves the evidence rather than the
-  // access. persistCoAdminGrant is the only path by which this module writes a
-  // grant, and its docstring is where that rule is argued.
+  // Write the two rows. The list row goes first and the wrapped key second,
+  // so a stop between them leaves the evidence rather than the access.
+  // persistCoAdminGrant is the only path by which this module writes a grant,
+  // and its docstring is where that rule is argued.
   await persistCoAdminGrant({
     ownerUserId,
     targetUserId,
     workspaceKeyId,
-    wrappedCiphertextB64: wrappedCt,
     grantSig,
     supabase,
+    version: 2,
+    wrappedCiphertextB64: wrappedCt,
   });
 
   return { workspaceKeyId };
