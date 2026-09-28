@@ -1166,6 +1166,40 @@ export async function reconcileConnectionError(
 }
 
 /**
+ * OR-T2694: has a NEWER success event for the same Quiltt connection already
+ * been processed? Event-to-event, no row timestamp.
+ *
+ * Keyed on the Quiltt connection id in the payload AND the subaccount, never
+ * the subaccount alone: two distinct Quiltt connections can resolve under one
+ * subaccount (OR-T2218), and a subaccount-only match would let a success on one
+ * suppress a real error on the other. The subaccount_id index narrows the scan;
+ * the received_at index only covers pending rows, so this must not be widened
+ * into a scan of processed rows by received_at alone. Retired success events
+ * are ignored: they never ran a reconcile. A lookup failure is returned so the
+ * caller retries instead of writing on unknown ordering.
+ */
+export async function findNewerProcessedSuccess(
+  client: SupabaseClient,
+  ev: PendingEvent,
+  subaccountId: string,
+  connectionId: string,
+): Promise<{ eventId: string | null; error: string | null }> {
+  const { data, error } = await client
+    .from('quiltt_webhook_inbox')
+    .select('event_id')
+    .eq('subaccount_id', subaccountId)
+    .eq('payload->record->>id', connectionId)
+    .like('event_type', 'connection.synced.successful%')
+    .not('processed_at', 'is', null)
+    .is('retirement_reason', null)
+    .gt('received_at', ev.received_at as string)
+    .limit(1);
+  if (error) return { eventId: null, error: `newer-success lookup failed: ${error.message}` };
+  const row = Array.isArray(data) ? data[0] : null;
+  return { eventId: row && typeof row.event_id === 'string' ? row.event_id : null, error: null };
+}
+
+/**
  * Map a Quiltt errored event subtype onto the shared error catalog.
  *
  * Derived from event_type and NOT from payload.record.status: on production
