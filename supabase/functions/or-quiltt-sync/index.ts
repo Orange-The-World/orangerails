@@ -1086,18 +1086,22 @@ export async function reconcileConnectionError(
   // newer than this event's received_at, a fresher reconciliation has
   // already run: skip the write and mark this event processed as-is (return
   // null), rather than regress a connection a newer success already fixed.
-  if (
-    ev.received_at &&
-    conn.updated_at &&
-    new Date(conn.updated_at).getTime() > new Date(ev.received_at).getTime()
-  ) {
-    console.warn(
-      `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} updated_at ` +
-        `(${conn.updated_at}) is newer than this errored event's received_at ` +
-        `(${ev.received_at}); a newer reconciliation already ran, not regressing status to error ` +
-        `[OR-T2694 ordering guard]`,
-    );
-    return null;
+  //
+  // The decision compares EVENT to EVENT. It deliberately does not use the
+  // connections row updated_at: a trigger rewrites it on every update, so a
+  // success reconcile earlier in the same drain batch would make a genuine,
+  // newer errored event look stale.
+  if (ev.received_at) {
+    const newer = await findNewerProcessedSuccess(client, ev, subaccountId, connectionId);
+    if (newer.error) return newer.error;
+    if (newer.eventId) {
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: a newer success event ${newer.eventId} ` +
+          `for this Quiltt connection was already processed; not regressing connection ` +
+          `${conn.id} to error [OR-T2694 ordering guard]`,
+      );
+      return null;
+    }
   }
 
   // DL-1445: record WHY, not just THAT. This block used to write status alone,
