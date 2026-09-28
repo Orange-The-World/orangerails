@@ -6,6 +6,7 @@
  * browser; the server never sees plaintext subkeys.
  *
  * ## Grant flow (owner side)
+ *   Envelope v2 (legacy, owner has no keyring):
  *   1. Confirm the owner's vault password. Presence check only: no key
  *      material is derived from it (see confirmVaultPassword).
  *   2. Run HKDF on the UNLOCKED MEK to extract credentials + transactions
@@ -14,6 +15,11 @@
  *   4. Wrap the blob with the admin's hybrid KEM public key (see wrapBlob64).
  *   5. Insert workspace_admins, then wrapped_data_keys. That order is not
  *      interchangeable; see persistCoAdminGrant for why.
+ *
+ *   Envelope v3 (owner has a keyring_ciphertext): steps 2-4 above are replaced
+ *   by projecting the owner's keyring to a per grant CAK-sealed blob and
+ *   wrapping the CAK to the admin, instead of a flat 64-byte HKDF blob. See
+ *   co-admin-keyring.ts and the grantCoAdmin body. Steps 1 and 5 are unchanged.
  *
  * ## A GRANT IS FROZEN AT THE MOMENT IT IS MADE. Read this before relying on one.
  *   The blob holds HKDF subkeys of the OWNER's MEK, captured at step 2 and
@@ -34,10 +40,16 @@
  *   Recovery is the only path that rotates.
  *
  * ## Consume flow (admin side, post-unlock)
+ *   Envelope v2 (row carries wrapped_ciphertext):
  *   1. Fetch wrapped_data_keys row for the owner's workspace_key_id.
  *   2. Unwrap with the admin's own PQC secret key (see unwrapBlob64).
  *   3. Split into two 32-byte subkeys; import as AES-GCM CryptoKeys.
  *   4. Return for use in encrypt/decrypt calls.
+ *
+ *   Envelope v3 (row carries wrapped_cak + coadmin_keyring_ciphertext instead):
+ *   unwrap the CAK with the admin's own PQC secret key, open the sealed
+ *   projection with the CAK, then read the credentials/transactions data key
+ *   out of the projection. See loadAdminSubkeysDirect and co-admin-keyring.ts.
  *
  * ## Revoke flow (owner side)
  *   1. Delete the wrapped_data_keys row, which is what removes access.
@@ -70,6 +82,17 @@ import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } fro
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
 import { signMemberGrant, verifyMemberGrant } from "./member-grant";
 import { formatError } from "./format-error";
+import { unwrapKeyring } from "./keyring";
+import {
+  projectKeyringForCoAdmin,
+  generateCoAdminKey,
+  sealCoAdminKeyring,
+  openCoAdminKeyring,
+  wrapCoAdminKey,
+  unwrapCoAdminKey,
+  coAdminDataKeyFor,
+  COADMIN_CAK_ALGORITHM,
+} from "./co-admin-keyring";
 
 // ------------------------------------------------------------------
 // Encoding helpers
@@ -412,12 +435,44 @@ export async function persistCoAdminGrant(params: {
   ownerUserId: string;
   targetUserId: string;
   workspaceKeyId: string;
-  wrappedCiphertextB64: string;
   grantSig: string;
   supabase: CoAdminSupabaseLike;
+  wrappedCiphertextB64?: string | null;
+  grantId?: string | null;
+  wrappedCakB64?: string | null;
+  coadminKeyringCiphertextB64?: string | null;
 }): Promise<void> {
-  const { ownerUserId, targetUserId, workspaceKeyId, wrappedCiphertextB64, grantSig, supabase } =
-    params;
+  const {
+    ownerUserId,
+    targetUserId,
+    workspaceKeyId,
+    grantSig,
+    supabase,
+    wrappedCiphertextB64,
+    grantId,
+    wrappedCakB64,
+    coadminKeyringCiphertextB64,
+  } = params;
+
+  // Exactly one envelope shape, never both and never neither. Guessing which
+  // one is real is worse than refusing: see the module docstring's v2/v3 split.
+  const isV3 = Boolean(wrappedCakB64) || Boolean(coadminKeyringCiphertextB64);
+  const isV2 = Boolean(wrappedCiphertextB64);
+  if (isV2 && isV3) {
+    throw new Error(
+      "persistCoAdminGrant received both a v2 wrapped ciphertext and v3 keyring fields. " +
+        "A grant row is exactly one shape; refusing rather than guessing which one is real.",
+    );
+  }
+  if (!isV2 && !isV3) {
+    throw new Error("persistCoAdminGrant received no key material to persist.");
+  }
+  if (isV3 && (!wrappedCakB64 || !coadminKeyringCiphertextB64 || !grantId)) {
+    throw new Error(
+      "persistCoAdminGrant received a partial v3 grant: wrappedCakB64, coadminKeyringCiphertextB64 " +
+        "and grantId must all be present together.",
+    );
+  }
 
   // The record of who holds access. Deliberately first.
   const { error: adminErr } = await supabase.from("workspace_admins").insert({
@@ -429,13 +484,23 @@ export async function persistCoAdminGrant(params: {
   }
 
   // The wrapped key. THIS is the write that grants access.
-  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
-    data_key_id: workspaceKeyId,
-    recipient_user_id: targetUserId,
-    wrapped_ciphertext: wrappedCiphertextB64,
-    algorithm: "hybrid-x25519-mlkem768-blob64",
-    grant_sig: grantSig,
-  });
+  const { error: wdkErr } = isV3
+    ? await supabase.from("wrapped_data_keys").insert({
+        id: grantId,
+        data_key_id: workspaceKeyId,
+        recipient_user_id: targetUserId,
+        wrapped_cak: wrappedCakB64,
+        coadmin_keyring_ciphertext: coadminKeyringCiphertextB64,
+        algorithm: COADMIN_CAK_ALGORITHM,
+        grant_sig: grantSig,
+      })
+    : await supabase.from("wrapped_data_keys").insert({
+        data_key_id: workspaceKeyId,
+        recipient_user_id: targetUserId,
+        wrapped_ciphertext: wrappedCiphertextB64,
+        algorithm: "hybrid-x25519-mlkem768-blob64",
+        grant_sig: grantSig,
+      });
   if (wdkErr) {
     if (isUniqueViolation(wdkErr)) {
       // A row already exists at this exact (workspaceKeyId, targetUserId)
