@@ -752,28 +752,60 @@ export async function grantCoAdmin(params: {
  * from Supabase. Separating the crypto from the data-fetch keeps this
  * function fully unit-testable without a Supabase stub.
  *
- * @param params.wrappedCiphertextB64  Base64 wrapped blob (from wrapped_data_keys).
- * @param params.kemSecretWrapped      Admin's AES-GCM-wrapped PQC secret key (from user_vault_meta).
+ * Two independent choices, not one. Which envelope the grant is written in
+ * (the `version` discriminant) decides how to open wrapped_data_keys. Where
+ * the admin's own PQC KEM secret lives (adminKeyringCiphertextB64 present or
+ * not) decides how to read the admin's OWN vault. Every combination of the
+ * two is valid: a v3 admin consuming a v2 grant, and a v2 admin consuming a
+ * v3 grant, both work, because what has to match is the KEM keypair, not the
+ * envelope version.
+ *
  * @param params.adminMek              Admin's own MEK (from VaultContext).
  * @param params.adminSaltB64          Admin's own vault salt.
+ * @param params.ownerUserId           The grant owner's user id (AAD for a v3 open).
+ * @param params.kemSecretWrapped      Admin's legacy AES-GCM-wrapped PQC secret key, null once
+ *                                     the admin has migrated to a keyring.
+ * @param params.adminKeyringCiphertextB64  The admin's OWN keyring, when they have one. Takes
+ *                                          priority over kemSecretWrapped when present.
+ * @param params.adminKeyringEpoch     Required whenever adminKeyringCiphertextB64 is present.
  */
-export async function loadAdminSubkeysDirect(params: {
-  wrappedCiphertextB64: string;
-  kemSecretWrapped: string;
-  adminMek: CryptoKey;
-  adminSaltB64: string;
-  grantSigB64: string | null;
-  ownerSigPubB64: string;
-  granteeUserId: string;
-  ownerWorkspaceKeyId: string;
-}): Promise<AdminSubkeys> {
-  const { wrappedCiphertextB64, kemSecretWrapped, adminMek, adminSaltB64,
-          grantSigB64, ownerSigPubB64, granteeUserId, ownerWorkspaceKeyId } = params;
+export async function loadAdminSubkeysDirect(
+  params: {
+    adminMek: CryptoKey;
+    adminSaltB64: string;
+    grantSigB64: string | null;
+    ownerSigPubB64: string;
+    granteeUserId: string;
+    ownerWorkspaceKeyId: string;
+    ownerUserId: string;
+    kemSecretWrapped: string | null;
+    adminKeyringCiphertextB64: string | null;
+    adminKeyringEpoch: number | string | null;
+  } & (
+    | { version: 2; wrappedCiphertextB64: string }
+    | { version: 3; wrappedCakB64: string; coadminKeyringCiphertextB64: string; grantId: string }
+  ),
+): Promise<AdminSubkeys> {
+  const {
+    adminMek,
+    adminSaltB64,
+    grantSigB64,
+    ownerSigPubB64,
+    granteeUserId,
+    ownerWorkspaceKeyId,
+    ownerUserId,
+    kemSecretWrapped,
+    adminKeyringCiphertextB64,
+    adminKeyringEpoch,
+  } = params;
+  const wrappedForSig = params.version === 3 ? params.wrappedCakB64 : params.wrappedCiphertextB64;
 
   // Step 0 , verify the grant signature before any decryption (fail-closed).
   // Both a missing signature and an invalid signature cause an immediate throw.
   // Decryption only proceeds AFTER a verified signature. Reject is the default
-  // branch, not an else.
+  // branch, not an else. Which bytes are signed differs by envelope (the
+  // wrapped Co-Admin Key for v3, the wrapped blob for v2); the check itself
+  // is identical either way.
   if (!grantSigB64) {
     throw new Error(
       "Co-admin grant signature missing: refusing to decrypt wrapped subkeys.",
@@ -787,7 +819,7 @@ export async function loadAdminSubkeysDirect(params: {
   const sigValid = await verifyMemberGrant(ownerSigPubB64, {
     memberUserId: granteeUserId,
     workspaceKeyId: ownerWorkspaceKeyId,
-    wrappedMekCiphertextB64: wrappedCiphertextB64,
+    wrappedMekCiphertextB64: wrappedForSig,
   }, grantSigB64);
   if (!sigValid) {
     throw new Error(
@@ -795,12 +827,46 @@ export async function loadAdminSubkeysDirect(params: {
     );
   }
 
-  // Unwrap the admin's PQC secret key from their own vault.
-  const wrapKey = await derivePqcSecretWrapKey(adminMek, adminSaltB64);
-  const kemSecretBytes = await unwrapPqcSecretKey(wrapKey, kemSecretWrapped);
+  // Resolve the admin's own PQC KEM secret. This is a property of the
+  // ADMIN's vault, independent of which envelope the grant itself is in.
+  let kemSecretBytes: Uint8Array;
+  if (adminKeyringCiphertextB64) {
+    if (adminKeyringEpoch === null || adminKeyringEpoch === undefined) {
+      throw new Error(
+        "Admin keyring ciphertext present with no keyring epoch: refusing to unwrap.",
+      );
+    }
+    const adminKeyring = await unwrapKeyring(adminKeyringCiphertextB64, adminMek, adminSaltB64, {
+      userId: granteeUserId,
+      keyringEpoch: adminKeyringEpoch,
+    });
+    if (!adminKeyring.kemSecretB64) {
+      throw new Error("Admin keyring carries no KEM secret: PQC setup is incomplete.");
+    }
+    kemSecretBytes = base64ToBytes(adminKeyring.kemSecretB64);
+  } else {
+    if (!kemSecretWrapped) {
+      throw new Error(
+        "Admin has neither a keyring nor a legacy wrapped KEM secret: PQC setup is incomplete.",
+      );
+    }
+    const wrapKey = await derivePqcSecretWrapKey(adminMek, adminSaltB64);
+    kemSecretBytes = await unwrapPqcSecretKey(wrapKey, kemSecretWrapped);
+  }
+
+  if (params.version === 3) {
+    const cak = await unwrapCoAdminKey(base64ToBytes(params.wrappedCakB64), kemSecretBytes);
+    const projection = await openCoAdminKeyring(params.coadminKeyringCiphertextB64, cak, {
+      ownerUserId,
+      grantId: params.grantId,
+    });
+    const credentialsKey = await coAdminDataKeyFor(projection, "credentials");
+    const transactionsKey = await coAdminDataKeyFor(projection, "transactions");
+    return { credentialsKey, transactionsKey };
+  }
 
   // Unwrap the 64-byte subkey blob using the admin's PQC secret key.
-  const wrappedCiphertext = base64ToBytes(wrappedCiphertextB64);
+  const wrappedCiphertext = base64ToBytes(params.wrappedCiphertextB64);
   const blob = await unwrapBlob64(wrappedCiphertext, kemSecretBytes);
 
   const credentialsKey = await importAesKey(blob.slice(0, 32).buffer);
