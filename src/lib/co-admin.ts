@@ -70,6 +70,17 @@ import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } fro
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
 import { signMemberGrant, verifyMemberGrant } from "./member-grant";
 import { formatError } from "./format-error";
+import {
+  COADMIN_CAK_ALGORITHM,
+  projectKeyringForCoAdmin,
+  generateCoAdminKey,
+  sealCoAdminKeyring,
+  openCoAdminKeyring,
+  wrapCoAdminKey,
+  unwrapCoAdminKey,
+  coAdminDataKeyFor,
+} from "./co-admin-keyring";
+import { unwrapKeyring } from "./keyring";
 
 // ------------------------------------------------------------------
 // Encoding helpers
@@ -377,6 +388,31 @@ function isUniqueViolation(err: unknown): boolean {
 }
 
 /**
+ * What persistCoAdminGrant needs to write a grant. The two envelopes differ
+ * only in which wrapped material rides along; everything else is shared.
+ *
+ *   v2  wrappedCiphertextB64: the 64 byte subkey blob wrapped to the recipient.
+ *   v3  grantId, wrappedCakB64, coadminKeyringCiphertextB64: the per grant key
+ *       wrapped to the recipient, plus the keyring projection it opens. The
+ *       grant id becomes the row's primary key and is bound into the sealed
+ *       keyring, so it must be the same value in both places.
+ */
+export type PersistCoAdminGrantParams = {
+  ownerUserId: string;
+  targetUserId: string;
+  workspaceKeyId: string;
+  grantSig: string;
+  supabase: CoAdminSupabaseLike;
+} & (
+  | { wrappedCiphertextB64: string }
+  | {
+      grantId: string;
+      wrappedCakB64: string;
+      coadminKeyringCiphertextB64: string;
+    }
+);
+
+/**
  * Write the two rows a grant consists of, in the order that makes a stop
  * between them safe.
  *
@@ -408,16 +444,8 @@ function isUniqueViolation(err: unknown): boolean {
  * this point, deriving the MEK, wrapping the blob and signing the binding, is
  * what makes the rows written here mean anything.
  */
-export async function persistCoAdminGrant(params: {
-  ownerUserId: string;
-  targetUserId: string;
-  workspaceKeyId: string;
-  wrappedCiphertextB64: string;
-  grantSig: string;
-  supabase: CoAdminSupabaseLike;
-}): Promise<void> {
-  const { ownerUserId, targetUserId, workspaceKeyId, wrappedCiphertextB64, grantSig, supabase } =
-    params;
+export async function persistCoAdminGrant(params: PersistCoAdminGrantParams): Promise<void> {
+  const { ownerUserId, targetUserId, workspaceKeyId, grantSig, supabase } = params;
 
   // The record of who holds access. Deliberately first.
   const { error: adminErr } = await supabase.from("workspace_admins").insert({
@@ -428,14 +456,30 @@ export async function persistCoAdminGrant(params: {
     throw new Error(`Failed to insert workspace_admins: ${formatError(adminErr)}`);
   }
 
-  // The wrapped key. THIS is the write that grants access.
-  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
-    data_key_id: workspaceKeyId,
-    recipient_user_id: targetUserId,
-    wrapped_ciphertext: wrappedCiphertextB64,
-    algorithm: "hybrid-x25519-mlkem768-blob64",
-    grant_sig: grantSig,
-  });
+  // The wrapped key. THIS is the write that grants access. The row's shape is
+  // the envelope: v2 carries wrapped_ciphertext, v3 carries wrapped_cak and
+  // coadmin_keyring_ciphertext and leaves wrapped_ciphertext unset. Nothing
+  // reads the algorithm string back to decide which one a row is; the reader
+  // tells them apart by which columns are present.
+  const grantRow: Record<string, unknown> =
+    "wrappedCakB64" in params
+      ? {
+          id: params.grantId,
+          data_key_id: workspaceKeyId,
+          recipient_user_id: targetUserId,
+          wrapped_cak: params.wrappedCakB64,
+          coadmin_keyring_ciphertext: params.coadminKeyringCiphertextB64,
+          algorithm: COADMIN_CAK_ALGORITHM,
+          grant_sig: grantSig,
+        }
+      : {
+          data_key_id: workspaceKeyId,
+          recipient_user_id: targetUserId,
+          wrapped_ciphertext: params.wrappedCiphertextB64,
+          algorithm: "hybrid-x25519-mlkem768-blob64",
+          grant_sig: grantSig,
+        };
+  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert(grantRow);
   if (wdkErr) {
     if (isUniqueViolation(wdkErr)) {
       // A row already exists at this exact (workspaceKeyId, targetUserId)
@@ -476,7 +520,144 @@ export async function persistCoAdminGrant(params: {
 }
 
 /**
+ * The workspace key id a grant is signed against.
+ *
+ * The id already on the owner's vault row when there is one, otherwise a fresh
+ * one that the SERVER allocates. It is never minted here: ownership on every
+ * wrapped_data_keys policy is decided by the value of
+ * user_vault_meta.workspace_key_id, so that value is assigned by the server and
+ * never proposed by a caller. A second call returns the id already allocated,
+ * so a dropped response needs no guard. The call can refuse (no session, or no
+ * vault row yet) and that refusal must stop the grant: there is deliberately no
+ * fallback to a locally minted id, which would sign an id no row carries and
+ * surface later as a co-admin who cannot open anything. Both envelopes call
+ * this BEFORE they sign, because the signature binds the id.
+ */
+async function resolveWorkspaceKeyId(
+  existingKeyId: string | null,
+  supabase: CoAdminSupabaseLike,
+): Promise<string> {
+  if (existingKeyId) return existingKeyId;
+  const { data: allocated, error: allocErr } = await supabase.rpc("allocate_workspace_key");
+  if (allocErr) {
+    throw new Error(`Failed to allocate workspace_key_id: ${formatError(allocErr)}`);
+  }
+  if (typeof allocated !== "string" || allocated.length === 0) {
+    throw new Error(
+      "allocate_workspace_key returned no workspace key id. Refusing to continue: a grant signed " +
+        "against an id the vault row does not carry would verify against nothing.",
+    );
+  }
+  return allocated;
+}
+
+/**
+ * Grant under envelope v3, construction (d): a fresh key for this one grant.
+ *
+ * WHAT CHANGES FROM v2. A v2 grant wraps the owner's two data subkeys straight
+ * to the recipient, so it is frozen to the keys of that moment. A v3 grant
+ * wraps a random per grant key (the CAK) to the recipient and seals a
+ * PROJECTION of the owner's keyring under it. The projection carries the data
+ * keys and nothing else, so the recipient can read the owner's data and cannot
+ * sign anything in the owner's name. Because the data keys in a keyring do not
+ * move when the owner's master key does, a v3 grant made before an owner
+ * recovery still opens after it, with no re-grant.
+ *
+ * WHAT STAYS THE SAME. The caller has already confirmed the owner's password.
+ * The owner's ML-DSA signature is made once, at grant time, over the grantee,
+ * the workspace key id and the wrapped CAK, and the consume side verifies it
+ * before it decrypts anything. The two rows are written by the same function
+ * in the same order.
+ *
+ * THE GRANT ID is minted here because it is the primary key of the
+ * wrapped_data_keys row AND part of what the sealed keyring is bound to, so it
+ * has to exist before the seal and travel with the row.
+ *
+ * EXPORTED FOR ITS TESTS. grantCoAdmin is the only caller.
+ */
+export async function grantCoAdminV3(params: {
+  ownerUserId: string;
+  ownerSaltB64: string;
+  vaultMek: CryptoKey;
+  ownerKeyringCiphertext: string;
+  ownerKeyringEpoch: number | string | null | undefined;
+  targetUserId: string;
+  targetKemPubB64: string;
+  existingKeyId: string | null;
+  supabase: CoAdminSupabaseLike;
+}): Promise<GrantResult> {
+  const { ownerUserId, ownerSaltB64, vaultMek, targetUserId, targetKemPubB64, supabase } = params;
+
+  // The keyring is bound to the user and to its epoch. Guessing an epoch does
+  // not fail softly, it fails authentication and reads as a destroyed vault, so
+  // a missing one stops here with nothing allocated, wrapped or written.
+  const { ownerKeyringEpoch } = params;
+  if (ownerKeyringEpoch === null || ownerKeyringEpoch === undefined) {
+    throw new Error(
+      "Your vault keyring could not be read, so nothing was granted and nothing was changed. " +
+        "Reload the page and try again.",
+    );
+  }
+  const keyring = await unwrapKeyring(params.ownerKeyringCiphertext, vaultMek, ownerSaltB64, {
+    userId: ownerUserId,
+    keyringEpoch: ownerKeyringEpoch,
+  });
+
+  // On a keyring vault the signing secret lives inside the keyring. Without it
+  // there is nothing to sign the grant with, and an unsigned grant is never
+  // written.
+  const sigSecretB64 = keyring.sigSecretB64;
+  if (!sigSecretB64) {
+    throw new Error(
+      "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
+    );
+  }
+
+  const workspaceKeyId = await resolveWorkspaceKeyId(params.existingKeyId, supabase);
+
+  // One fresh key per grant, never reused. The projection is an allowlist of
+  // the data keys only (see projectKeyringForCoAdmin), so neither the owner's
+  // KEM secret nor the signing secret ever leaves the owner's keyring.
+  const grantId = crypto.randomUUID();
+  const cak = generateCoAdminKey();
+  const coadminKeyringCiphertextB64 = await sealCoAdminKeyring(
+    projectKeyringForCoAdmin(keyring),
+    cak,
+    { ownerUserId, grantId },
+  );
+  const wrappedCakB64 = bytesToBase64(
+    await wrapCoAdminKey(cak, base64ToBytes(targetKemPubB64)),
+  );
+
+  // The signature covers the wrapped CAK. Without the CAK the sealed keyring
+  // is inert, so it does not need a signature of its own.
+  const { signature: grantSig } = await signMemberGrant(base64ToBytes(sigSecretB64), {
+    memberUserId: targetUserId,
+    workspaceKeyId,
+    wrappedMekCiphertextB64: wrappedCakB64,
+  });
+
+  await persistCoAdminGrant({
+    ownerUserId,
+    targetUserId,
+    workspaceKeyId,
+    grantSig,
+    supabase,
+    grantId,
+    wrappedCakB64,
+    coadminKeyringCiphertextB64,
+  });
+
+  return { workspaceKeyId };
+}
+
+/**
  * Grant full co-admin access to a target user.
+ *
+ * TWO ENVELOPES. A vault that holds a keyring grants under v3, through
+ * grantCoAdminV3, and everything below the password check does not apply to it.
+ * A vault without a keyring grants under v2, which is what the rest of this
+ * comment and this function describe.
  *
  * WHERE THE KEY MATERIAL COMES FROM. The subkeys are derived from the UNLOCKED
  * MEK held by VaultContext, which is the same key the owner's own data path
@@ -510,7 +691,15 @@ export async function grantCoAdmin(params: {
   ownerKeyVersion: number;
   ownerEncMekCiphertext: string | null;
   vaultMek: CryptoKey;
-  ownerSigSecretWrapped: string;
+  /**
+   * The legacy wrapped signing secret. A vault that holds a keyring keeps its
+   * signing secret inside the keyring instead and may pass null here.
+   */
+  ownerSigSecretWrapped: string | null;
+  /** user_vault_meta.keyring_ciphertext. Present means this vault grants under v3. */
+  ownerKeyringCiphertext?: string | null;
+  /** user_vault_meta.keyring_epoch, the value the keyring ciphertext is bound to. */
+  ownerKeyringEpoch?: number | string | null;
   targetUserId: string;
   targetKemPubB64: string;
   existingKeyId: string | null;
@@ -543,6 +732,36 @@ export async function grantCoAdmin(params: {
   if (!ownerConfirmed) {
     throw new Error(
       "That vault password is not correct. Nothing was granted and nothing was changed.",
+    );
+  }
+
+  // A vault that holds a keyring grants under envelope v3. Its data keys are
+  // random keyring entries and are NOT derived from the MEK, so the v2 blob
+  // built below would hand the recipient keys that open nothing. The password
+  // was confirmed above, so this branch inherits that check, and nothing has
+  // been allocated, wrapped or written yet.
+  if (
+    typeof params.ownerKeyringCiphertext === "string" &&
+    params.ownerKeyringCiphertext.length > 0
+  ) {
+    return grantCoAdminV3({
+      ownerUserId,
+      ownerSaltB64,
+      vaultMek,
+      ownerKeyringCiphertext: params.ownerKeyringCiphertext,
+      ownerKeyringEpoch: params.ownerKeyringEpoch,
+      targetUserId,
+      targetKemPubB64,
+      existingKeyId: params.existingKeyId,
+      supabase,
+    });
+  }
+
+  // From here on this is the v2 grant, which needs the wrapped signing secret
+  // that only a vault without a keyring keeps in its own column.
+  if (!ownerSigSecretWrapped) {
+    throw new Error(
+      "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
     );
   }
 
@@ -589,20 +808,7 @@ export async function grantCoAdmin(params: {
   // four signed fields must match at verify time, so a signature over a locally
   // minted id verifies against nothing , and that would surface later as a
   // co-admin who cannot open anything, not as an error at grant time.
-  let workspaceKeyId = params.existingKeyId;
-  if (!workspaceKeyId) {
-    const { data: allocated, error: allocErr } = await supabase.rpc("allocate_workspace_key");
-    if (allocErr) {
-      throw new Error(`Failed to allocate workspace_key_id: ${formatError(allocErr)}`);
-    }
-    if (typeof allocated !== "string" || allocated.length === 0) {
-      throw new Error(
-        "allocate_workspace_key returned no workspace key id. Refusing to continue: a grant signed " +
-          "against an id the vault row does not carry would verify against nothing.",
-      );
-    }
-    workspaceKeyId = allocated;
-  }
+  const workspaceKeyId = await resolveWorkspaceKeyId(params.existingKeyId, supabase);
 
   // Step e , wrap the 64-byte blob for the recipient's KEM public key.
   const recipientPub = base64ToBytes(targetKemPubB64);
@@ -647,6 +853,97 @@ export async function grantCoAdmin(params: {
 // ------------------------------------------------------------------
 
 /**
+ * The two grant envelopes the consume path can open. Which one a row is comes
+ * from the columns it carries (see readCoAdminGrant), never from its
+ * algorithm string.
+ *
+ *   v2  wrappedCiphertextB64: the 64 byte subkey blob wrapped straight to this admin.
+ *   v3  wrappedCakB64: a per grant key wrapped to this admin, and
+ *       coadminKeyringCiphertextB64: the keyring projection sealed under it.
+ *       grantId and ownerUserId are what that sealed keyring is bound to.
+ */
+export type AdminGrantMaterial =
+  | { wrappedCiphertextB64: string }
+  | {
+      grantId: string;
+      ownerUserId: string;
+      wrappedCakB64: string;
+      coadminKeyringCiphertextB64: string;
+    };
+
+/**
+ * Everything a caller supplies to open a grant. The unlocked MEK and salt are
+ * added by the VaultContext wrapper, which is the only place that holds them.
+ *
+ * kemSecretWrapped is null on a vault that keeps its KEM secret inside a
+ * keyring, and adminKeyringCiphertext / adminKeyringEpoch are how that keyring
+ * is passed. Which of the two is used depends on the ADMIN's own vault only.
+ */
+export type AdminConsumeParams = AdminGrantMaterial & {
+  kemSecretWrapped: string | null;
+  adminKeyringCiphertext?: string | null;
+  adminKeyringEpoch?: number | string | null;
+  grantSigB64: string | null;
+  ownerSigPubB64: string;
+  granteeUserId: string;
+  ownerWorkspaceKeyId: string;
+};
+
+export type LoadAdminSubkeysParams = AdminConsumeParams & {
+  adminMek: CryptoKey;
+  adminSaltB64: string;
+};
+
+/**
+ * Read the admin's own hybrid KEM secret from whichever place their vault keeps
+ * it: inside their keyring when they have one, otherwise in the legacy wrapped
+ * column. Each failure names what is missing rather than falling through to the
+ * other source, because a fallback would hide a half migrated vault.
+ */
+async function loadOwnKemSecret(params: {
+  adminMek: CryptoKey;
+  adminSaltB64: string;
+  granteeUserId: string;
+  kemSecretWrapped: string | null;
+  adminKeyringCiphertext: string | null | undefined;
+  adminKeyringEpoch: number | string | null | undefined;
+}): Promise<Uint8Array> {
+  const { adminMek, adminSaltB64, granteeUserId, kemSecretWrapped } = params;
+
+  if (
+    typeof params.adminKeyringCiphertext === "string" &&
+    params.adminKeyringCiphertext.length > 0
+  ) {
+    if (params.adminKeyringEpoch === null || params.adminKeyringEpoch === undefined) {
+      throw new Error(
+        "Your vault keyring could not be read, so a co-admin grant cannot be opened. " +
+          "Reload the page and try again.",
+      );
+    }
+    const keyring = await unwrapKeyring(params.adminKeyringCiphertext, adminMek, adminSaltB64, {
+      userId: granteeUserId,
+      keyringEpoch: params.adminKeyringEpoch,
+    });
+    if (!keyring.kemSecretB64) {
+      throw new Error(
+        "Your vault keyring holds no post-quantum secret key, so a co-admin grant cannot be opened. " +
+          "Finish your vault setup and try again.",
+      );
+    }
+    return base64ToBytes(keyring.kemSecretB64);
+  }
+
+  if (!kemSecretWrapped) {
+    throw new Error(
+      "Your vault holds no post-quantum secret key, so a co-admin grant cannot be opened. " +
+        "Lock and unlock your vault to generate one, then try again.",
+    );
+  }
+  const wrapKey = await derivePqcSecretWrapKey(adminMek, adminSaltB64);
+  return unwrapPqcSecretKey(wrapKey, kemSecretWrapped);
+}
+
+/**
  * Load the owner's subkeys from a pre-fetched wrapped row.
  *
  * Called by the VaultContext wrapper after it fetches the relevant rows
@@ -658,18 +955,17 @@ export async function grantCoAdmin(params: {
  * @param params.adminMek              Admin's own MEK (from VaultContext).
  * @param params.adminSaltB64          Admin's own vault salt.
  */
-export async function loadAdminSubkeysDirect(params: {
-  wrappedCiphertextB64: string;
-  kemSecretWrapped: string;
-  adminMek: CryptoKey;
-  adminSaltB64: string;
-  grantSigB64: string | null;
-  ownerSigPubB64: string;
-  granteeUserId: string;
-  ownerWorkspaceKeyId: string;
-}): Promise<AdminSubkeys> {
-  const { wrappedCiphertextB64, kemSecretWrapped, adminMek, adminSaltB64,
+export async function loadAdminSubkeysDirect(
+  params: LoadAdminSubkeysParams,
+): Promise<AdminSubkeys> {
+  const { kemSecretWrapped, adminMek, adminSaltB64,
           grantSigB64, ownerSigPubB64, granteeUserId, ownerWorkspaceKeyId } = params;
+
+  // The bytes the owner's signature covers: the wrapped subkey blob on a v2
+  // grant, the wrapped co-admin key on a v3 grant. Which one comes from the
+  // shape of the material handed in, never from an algorithm string.
+  const signedWrappedB64 =
+    "wrappedCakB64" in params ? params.wrappedCakB64 : params.wrappedCiphertextB64;
 
   // Step 0 , verify the grant signature before any decryption (fail-closed).
   // Both a missing signature and an invalid signature cause an immediate throw.
@@ -688,7 +984,7 @@ export async function loadAdminSubkeysDirect(params: {
   const sigValid = await verifyMemberGrant(ownerSigPubB64, {
     memberUserId: granteeUserId,
     workspaceKeyId: ownerWorkspaceKeyId,
-    wrappedMekCiphertextB64: wrappedCiphertextB64,
+    wrappedMekCiphertextB64: signedWrappedB64,
   }, grantSigB64);
   if (!sigValid) {
     throw new Error(
@@ -696,12 +992,37 @@ export async function loadAdminSubkeysDirect(params: {
     );
   }
 
-  // Unwrap the admin's PQC secret key from their own vault.
-  const wrapKey = await derivePqcSecretWrapKey(adminMek, adminSaltB64);
-  const kemSecretBytes = await unwrapPqcSecretKey(wrapKey, kemSecretWrapped);
+  // The admin's own KEM secret. Where it is read from depends ONLY on the
+  // admin's own vault (a keyring, or the legacy wrapped column), never on which
+  // envelope the grant is: an admin on a keyring vault can be handed a v2 grant
+  // and an admin on a legacy vault can be handed a v3 one.
+  const kemSecretBytes = await loadOwnKemSecret({
+    adminMek,
+    adminSaltB64,
+    granteeUserId,
+    kemSecretWrapped,
+    adminKeyringCiphertext: params.adminKeyringCiphertext,
+    adminKeyringEpoch: params.adminKeyringEpoch,
+  });
 
-  // Unwrap the 64-byte subkey blob using the admin's PQC secret key.
-  const wrappedCiphertext = base64ToBytes(wrappedCiphertextB64);
+  // A v3 grant: unwrap the per grant co-admin key, open the sealed keyring
+  // projection it protects, and take the two data keys from that projection.
+  // The signature was verified above, so nothing here runs on an unverified
+  // grant.
+  if ("wrappedCakB64" in params) {
+    const cak = await unwrapCoAdminKey(base64ToBytes(params.wrappedCakB64), kemSecretBytes);
+    const projection = await openCoAdminKeyring(params.coadminKeyringCiphertextB64, cak, {
+      ownerUserId: params.ownerUserId,
+      grantId: params.grantId,
+    });
+    return {
+      credentialsKey: await coAdminDataKeyFor(projection, "credentials"),
+      transactionsKey: await coAdminDataKeyFor(projection, "transactions"),
+    };
+  }
+
+  // A v2 grant: unwrap the 64-byte subkey blob using the admin's PQC secret key.
+  const wrappedCiphertext = base64ToBytes(params.wrappedCiphertextB64);
   const blob = await unwrapBlob64(wrappedCiphertext, kemSecretBytes);
 
   const credentialsKey = await importAesKey(blob.slice(0, 32).buffer);
