@@ -14,6 +14,7 @@
 // Updated: Sr Dev A, 2026-08-18 -- DL-0505 Auditor fix: existence probe distinguishes unsupported_pair from before_coverage_start; per-item errors in batch preserve prior results and metering
 // Updated: Sr Dev B, 2026-08-20 -- DL-1361: surface rate_type and data_source_authority for CB-sourced composites (official_reference vs market)
 // Updated: Sr Dev B, 2026-08-21 -- DL-1361 round 2: drop OFFICIAL_CB_AUTHORITIES whitelist; any non-null composite authority is official_reference
+// Updated: CTO, 2026-09-28 -- OR-T0113 follow-up: bound the coverage probe (it had no bucket_ts predicate at all; on orbi-prod's large table the planner picked a slow index and it timed out with the same 500 it was meant to prevent). See classifyCoverage.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
 import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
@@ -69,6 +70,51 @@ export function extractCompositeAuthority(compositeVia: string | null | undefine
   // 'PEG' marks a construction method (pegged rate), not a data-source institution
   if (authority === 'PEG') return null
   return authority
+}
+
+// Coverage classification for OR-T0113 (see the two bounded probes in the request
+// handler below). Pure and exported so it can be unit tested without a live database:
+// the handler runs two bounded queries and hands the results here.
+//   atOrBefore: the coverage-probe row at or before the requested bucket, if any
+//               (`.lte('bucket_ts', bucketTs)`, ascending, limit 1).
+//   after:      only queried when atOrBefore is null -- the earliest row strictly
+//               after the requested bucket, if any (`.gt('bucket_ts', bucketTs)`,
+//               ascending, limit 1). Because it only runs once atOrBefore is known
+//               empty, the smallest row it finds IS the pair's true earliest row.
+// Three outcomes, matching the original single-unbounded-probe behavior exactly:
+//   atOrBefore present               -> covered: true, point lookup runs unchanged.
+//   atOrBefore absent, after present -> before_coverage_start (pair is ingested,
+//                                       this request predates its first bucket).
+//   both absent                      -> unsupported_pair (pair is not ingested at all).
+export interface CoverageRow { bucket_ts: string }
+
+export interface CoverageResult {
+  covered: boolean
+  errorCode?: 'unsupported_pair' | 'before_coverage_start'
+  message?: string
+}
+
+export function classifyCoverage(
+  asset: string,
+  fiat: string,
+  product: string,
+  bucketTs: string,
+  atOrBefore: CoverageRow | null,
+  after: CoverageRow | null
+): CoverageResult {
+  if (atOrBefore) return { covered: true }
+  if (after) {
+    return {
+      covered: false,
+      errorCode: 'before_coverage_start',
+      message: `${asset}/${fiat} on ${product} has no data before ${bucketTs}; coverage starts at ${after.bucket_ts}`,
+    }
+  }
+  return {
+    covered: false,
+    errorCode: 'unsupported_pair',
+    message: `No rate coverage for ${asset}/${fiat} on product ${product}`,
+  }
 }
 
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
@@ -250,17 +296,23 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     const bucketTs = ts.toISOString()
 
-    // ----- Coverage probe FIRST (OR-T0113) -----
+    // ----- Coverage probe FIRST (OR-T0113), now BOUNDED (OR-T0113 follow-up) -----
     // The point lookup below orders bucket_ts DESC and scans backward from the
     // requested instant. When that instant is before the pair's first CONFIRMED,
     // non-superseded row, the backward scan finds nothing and must heap-fetch and
     // reject every non-qualifying candidate on the way back -- measured 20-28s
     // against orbi-prod for BTC-EUR/GBP historical requests (OR-T0113), which is
     // past any statement timeout and surfaces to the caller as a 500, not a 404.
-    // This ascending, unbounded probe finds the pair's earliest qualifying row
-    // directly, so a before-coverage or unsupported-pair request is answered here
-    // without ever running the expensive backward scan.
-    const { data: coverageRow, error: coverageErr } = await supabase
+    // The first fix (2026-08-18) probed ahead of that scan, but with NO bucket_ts
+    // predicate at all -- an unbounded "find the pair's earliest row" query. On
+    // orbi-prod's 62M-row table the planner picked a costly index for that shape
+    // instead of idx_rates_lookup, which the point lookup below already uses
+    // successfully, and the unbounded scan itself timed out with the same 500 it
+    // was meant to prevent.
+    // Fix: bound every probe on bucket_ts, same as the point lookup. Two queries
+    // share this filter builder; the second only runs when the first finds
+    // nothing. classifyCoverage above documents the three possible outcomes.
+    const coverageQuery = () => supabase
       .from('exchange_rates')
       .select('bucket_ts')
       .eq('source_currency', item.asset.toUpperCase())
@@ -270,6 +322,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .eq('source_authority', 'ORBI')
       .eq('status', 'CONFIRMED')
       .is('superseded_by_id', null)
+
+    const { data: coverageRow, error: coverageErr } = await coverageQuery()
+      .lte('bucket_ts', bucketTs)
       .order('bucket_ts', { ascending: true })
       .limit(1)
       .maybeSingle()
@@ -280,27 +335,34 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return Response.json({ error: 'server_error', message: 'Database error fetching rate coverage', correlation_id: correlationId }, { status: 500 })
     }
 
-    // No coverage row at all, or the requested instant predates the earliest one --
-    // two distinct cases:
-    //   unsupported_pair: pair is not ingested at all; callers must fix asset/fiat/product.
-    //   before_coverage_start: pair IS ingested but requested time predates its first
-    //     bucket; callers should request a later timestamp.
-    // For batch requests, push a per-item error and continue so previously resolved items
-    // are not discarded and all successful items reach the usage-log insert below.
-    // Single-item requests are surfaced as HTTP 404 after the loop (see below).
-    if (!coverageRow || new Date(bucketTs).getTime() < new Date(coverageRow.bucket_ts).getTime()) {
-      const errorCode = coverageRow ? 'before_coverage_start' : 'unsupported_pair'
-      const errorMessage = coverageRow
-        ? `${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on ${product} has no data before ${bucketTs}; coverage starts at ${coverageRow.bucket_ts}`
-        : `No rate coverage for ${item.asset.toUpperCase()}/${item.fiat.toUpperCase()} on product ${product}`
+    // No row at or before the requested instant. Two distinct cases remain, same
+    // as the original single-probe version: unsupported_pair (never ingested) or
+    // before_coverage_start (ingested, just later than this request). Bound this
+    // second probe with `.gt` too, for the same index support as the first.
+    // For batch requests, push a per-item error and continue so previously resolved
+    // items are not discarded and all successful items reach the usage-log insert
+    // below. Single-item requests are surfaced as HTTP 404 after the loop (see below).
+    if (!coverageRow) {
+      const { data: afterRow, error: afterErr } = await coverageQuery()
+        .gt('bucket_ts', bucketTs)
+        .order('bucket_ts', { ascending: true })
+        .limit(1)
+        .maybeSingle()
 
+      if (afterErr) {
+        console.error(`coverage-probe DB error [${correlationId}]:`, afterErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity }))
+        void reportError(afterErr, 'v1-rate', req)
+        return Response.json({ error: 'server_error', message: 'Database error fetching rate coverage', correlation_id: correlationId }, { status: 500 })
+      }
+
+      const coverage = classifyCoverage(item.asset.toUpperCase(), item.fiat.toUpperCase(), product, bucketTs, null, afterRow)
       results.push({
         asset: item.asset.toUpperCase(),
         fiat: item.fiat.toUpperCase(),
         product,
         requested_at: item.at,
-        error: errorCode,
-        message: errorMessage,
+        error: coverage.errorCode,
+        message: coverage.message,
       })
       continue
     }
