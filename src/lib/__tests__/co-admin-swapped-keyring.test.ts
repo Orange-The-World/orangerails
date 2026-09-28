@@ -289,9 +289,9 @@ describe("a sealed keyring cannot be moved between two grants of the same owner"
     // The sealed keyring is outside the signed set on purpose: the signature
     // covers the wrapped key, and without that key the sealed keyring is
     // inert. So the signature check passes here and the refusal comes from the
-    // seal itself. Each attempt got past the signature check and opened its own
-    // wrapped key, and then the open step refused the swapped seal. Naming how
-    // each step ended is what stops a rejection from anywhere else from passing.
+    // seal itself. Naming how each step ended pins that down: every attempt
+    // opened its own wrapped key, and the open step refused the swapped seal. A
+    // rejection from anywhere else would not match.
     expect(outcomes(unwrapCoAdminKey)).toEqual(["fulfilled", "fulfilled"]);
     expect(outcomes(openCoAdminKeyring)).toEqual(["rejected", "rejected"]);
   });
