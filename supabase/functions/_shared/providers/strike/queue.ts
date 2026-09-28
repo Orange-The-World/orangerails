@@ -90,6 +90,30 @@ export function classifyDrainEventError(err: unknown): string {
   return 'PROVIDER_ERROR';
 }
 
+/**
+ * Retry `attempt` until it returns a falsy result (success) or the delay
+ * schedule is exhausted, returning the last non-null result on exhaustion.
+ *
+ * Used for the connections.update() store step after a Strike subscription
+ * create succeeds (OR-T0386): that create is a completed, unrepeatable
+ * side effect, so a transient store failure right after it must not be
+ * treated as though nothing happened. Exported so the retry behaviour
+ * itself is unit-testable without a live or mocked SupabaseClient.
+ */
+export async function retryOnError<E>(
+  attempt: () => Promise<E | null>,
+  delaysMs: number[],
+): Promise<E | null> {
+  let lastError: E | null = null;
+  for (const delayMs of delaysMs) {
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    const result = await attempt();
+    if (!result) return null;
+    lastError = result;
+  }
+  return lastError;
+}
+
 export interface DrainConnection {
   id: string;
   strike_subscription_id: string | null;
@@ -267,24 +291,13 @@ export async function drainStrikeQueue(args: {
     // docs.strike.me/api/create-subscription. 24 random bytes -> 48 hex chars,
     // safely under the limit while still 192 bits of entropy.
     const secret = generateHexSecret(24);
+    let sub: Awaited<ReturnType<typeof strikeCreateSubscription>>;
     try {
-      const sub = await strikeCreateSubscription(creds, {
+      sub = await strikeCreateSubscription(creds, {
         webhookUrl,
         secret,
         eventTypes: STRIKE_DEFAULT_EVENT_TYPES,
       });
-      const { error } = await args.serviceClient
-        .from('connections')
-        .update({
-          strike_subscription_id: sub.id,
-          strike_webhook_secret: secret,
-          strike_needs_resubscribe: false,
-          strike_subscription_checked_at: new Date().toISOString(),
-          strike_subscription_rotated_at: new Date().toISOString(),
-        })
-        .eq('id', conn.id);
-      if (error) throw error;
-      console.log(`[strike-queue] registered subscription ${sub.id} for connection ${conn.id}${staleSubscriptionId ? ' (resubscribe)' : ''}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       // Map the failure to an actionable marker on EVERY subscription-failure
@@ -311,6 +324,43 @@ export async function drainStrikeQueue(args: {
       }
       return { transactions: [], next_cursor: conn.last_sync_cursor, subscriptionError: marker };
     }
+
+    // Strike has now created a LIVE subscription (sub.id) and accepted our
+    // secret. Everything from here is storing that fact. A short bounded
+    // retry covers a transient store failure; strikeCreateSubscription has
+    // no idempotency key (checked against docs.strike.me/api/create-subscription),
+    // so retrying the CREATE instead would create a second live subscription
+    // rather than return the first one (OR-T0386).
+    const STORE_RETRY_DELAYS_MS = [0, 250, 750];
+    const storeError = await retryOnError(async () => {
+      const { error } = await args.serviceClient
+        .from('connections')
+        .update({
+          strike_subscription_id: sub.id,
+          strike_webhook_secret: secret,
+          strike_needs_resubscribe: false,
+          strike_subscription_checked_at: new Date().toISOString(),
+          strike_subscription_rotated_at: new Date().toISOString(),
+        })
+        .eq('id', conn.id);
+      return error ?? null;
+    }, STORE_RETRY_DELAYS_MS);
+
+    if (storeError) {
+      // ORPHANED: Strike has a live subscription signing with a secret we do
+      // not have on record, and we could not store either after retrying.
+      // Deliberately NOT routed through strikeSubscriptionErrorMarker: that
+      // maps STRIKE API error text (403/401/400/429) and would misreport a
+      // database failure as a Strike rejection, hiding the one fact a manual
+      // cleanup sweep needs, the orphaned subscription id.
+      console.error(
+        `[strike-queue] ORPHANED Strike subscription ${sub.id} for connection ${conn.id}: ` +
+        `created at Strike but could not be stored after ${STORE_RETRY_DELAYS_MS.length} attempts. ` +
+        `Detail: ${String((storeError as { message?: string })?.message ?? storeError).slice(0, 200)}`,
+      );
+      return { transactions: [], next_cursor: conn.last_sync_cursor, subscriptionError: 'STRIKE_SUBSCRIPTION_ORPHANED_UNSTORED' };
+    }
+    console.log(`[strike-queue] registered subscription ${sub.id} for connection ${conn.id}${staleSubscriptionId ? ' (resubscribe)' : ''}`);
   }
 
   // Step 2: drain pending events
