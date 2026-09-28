@@ -307,8 +307,17 @@ interface VaultContextValue {
    */
   loadAdminSubkeys(params: {
     ownerWorkspaceKeyId: string;
-    wrappedCiphertextB64: string;
     kemSecretWrapped: string;
+    grantSigB64: string | null;
+    ownerSigPubB64: string;
+    granteeUserId: string;
+    wrappedCiphertextB64?: string;
+    wrappedCakB64?: string;
+    coadminKeyringCiphertextB64?: string;
+    grantId?: string;
+    ownerUserId?: string;
+    adminKeyringCiphertextB64?: string | null;
+    adminKeyringEpoch?: number | string | null;
   }): Promise<AdminSubkeys>;
 
   /**
