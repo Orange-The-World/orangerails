@@ -59,6 +59,7 @@ import {
   type CredentialsPayload,
   type NormalizedTransaction,
 } from "@/lib/crypto-fields";
+import { readOwnKeyringRow } from "@/lib/vault-keyring-row";
 import {
   ensurePqcKeypairs as ensurePqcKeypairsImpl,
   carryPqcSecretsAcrossRotation,
@@ -71,6 +72,7 @@ import {
   revokeCoAdmin as revokeCoAdminImpl,
   assertSaltMatchesUnlockedVault,
   type AdminSubkeys,
+  type AdminConsumeParams,
 } from "@/lib/co-admin";
 
 // ------------------------------------------------------------------
@@ -304,12 +306,13 @@ interface VaultContextValue {
    * Load an owner's subkeys so the admin can decrypt their data.
    * The admin must already be unlocked.
    * Returns the two AES-GCM CryptoKeys for use in encrypt/decrypt operations.
+   *
+   * The grant is either a v2 subkey blob or a v3 wrapped key with a sealed
+   * keyring, and the admin's own vault may keep its KEM secret in a keyring or
+   * in the legacy wrapped column. The owner's signature over the grant is
+   * verified before anything is decrypted.
    */
-  loadAdminSubkeys(params: {
-    ownerWorkspaceKeyId: string;
-    wrappedCiphertextB64: string;
-    kemSecretWrapped: string;
-  }): Promise<AdminSubkeys>;
+  loadAdminSubkeys(params: AdminConsumeParams): Promise<AdminSubkeys>;
 
   /**
    * Compute a deterministic HMAC-SHA256 blind index for a plaintext value.
@@ -985,8 +988,27 @@ export function VaultProvider({ children }: VaultProviderProps) {
         .single();
       const meta = metaRow as Record<string, unknown> | null;
 
-      const ownerSigSecretWrapped = meta?.sig_secret_wrapped as string | undefined;
-      if (!ownerSigSecretWrapped) {
+      // A vault that keeps a keyring holds its signing secret inside it and has no
+      // legacy wrapped column, so the owner needs one or the other.
+      const ownerSigSecretWrapped = (meta?.sig_secret_wrapped as string | null | undefined) ?? null;
+      // The keyring columns are read on their own, tolerantly (see
+      // vault-keyring-row.ts), so the select above stays the pre v3 one. Only
+      // "column does not exist" reads as no keyring. Any other failure stops the
+      // grant: an owner who holds a keyring and is mistaken for one who does not
+      // would be granted under the v2 envelope, whose keys open nothing on a
+      // keyring vault.
+      const keyringRead = await readOwnKeyringRow(
+        supabase as unknown as Parameters<typeof readOwnKeyringRow>[0],
+        params.ownerUserId,
+      );
+      if (keyringRead.status === "error") {
+        throw new Error(
+          "Your vault keyring could not be read, so nothing was granted and nothing was changed. Reload the page and try again.",
+        );
+      }
+      const ownerKeyringCiphertext =
+        keyringRead.status === "ok" ? keyringRead.keyringCiphertext : null;
+      if (!ownerSigSecretWrapped && !ownerKeyringCiphertext) {
         throw new Error(
           "Owner signing key not found. Ensure PQC vault setup is complete before granting co-admin access.",
         );
@@ -1009,6 +1031,8 @@ export function VaultProvider({ children }: VaultProviderProps) {
         ownerKeyVersion: (meta?.vault_key_version as number | null) ?? 1,
         ownerEncMekCiphertext: (meta?.enc_mek_ciphertext as string | null) ?? null,
         ownerSigSecretWrapped,
+        ownerKeyringCiphertext,
+        ownerKeyringEpoch: keyringRead.status === "ok" ? keyringRead.keyringEpoch : null,
         targetUserId,
         targetKemPubB64,
         supabase: supabase as unknown as Parameters<typeof grantCoAdminImpl>[0]["supabase"],
@@ -1040,25 +1064,12 @@ export function VaultProvider({ children }: VaultProviderProps) {
   // Co-admin: load admin subkeys (consume flow).
   // ------------------------------------------------------------------
   const loadAdminSubkeys = useCallback(
-    async (params: {
-      ownerWorkspaceKeyId: string;
-      wrappedCiphertextB64: string;
-      kemSecretWrapped: string;
-      grantSigB64: string | null;
-      ownerSigPubB64: string;
-      granteeUserId: string;
-    }): Promise<AdminSubkeys> => {
+    async (params: AdminConsumeParams): Promise<AdminSubkeys> => {
       const { mek, saltB64: s } = requireUnlocked();
-      return loadAdminSubkeysDirect({
-        wrappedCiphertextB64: params.wrappedCiphertextB64,
-        kemSecretWrapped: params.kemSecretWrapped,
-        adminMek: mek,
-        adminSaltB64: s,
-        grantSigB64: params.grantSigB64,
-        ownerSigPubB64: params.ownerSigPubB64,
-        granteeUserId: params.granteeUserId,
-        ownerWorkspaceKeyId: params.ownerWorkspaceKeyId,
-      });
+      // The grant material, the admin's own keyring fields and the signature
+      // binding pass straight through. Only the unlocked MEK and salt are added
+      // here, because this is the one place that holds them.
+      return loadAdminSubkeysDirect({ ...params, adminMek: mek, adminSaltB64: s });
     },
     [saltB64],
   );

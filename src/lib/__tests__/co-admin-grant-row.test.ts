@@ -22,9 +22,14 @@ import {
   type CoAdminGrant,
 } from "../co-admin-grant-row";
 
+/** Grant ids as PostgREST returns a uuid column: lowercase and canonical. */
+const V2_GRANT_ID = "0b7d3a52-1c64-4e9f-8d21-5a6e7f8091b2";
+const V3_GRANT_ID = "6f1c1e0a-7d5b-4c1e-9a52-3b8f2d4a9c10";
+
 /** A v2 grant row as the database returns it after the migration. */
 function v2Row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    id: V2_GRANT_ID,
     wrapped_ciphertext: "d3JhcHBlZC1ibG9iLTY0",
     grant_sig: "c2ln",
     wrapped_cak: null,
@@ -36,6 +41,7 @@ function v2Row(overrides: Record<string, unknown> = {}): Record<string, unknown>
 /** A v3 grant row: no 64 byte blob, a wrapped co-admin key and a keyring. */
 function v3Row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    id: V3_GRANT_ID,
     wrapped_ciphertext: null,
     grant_sig: "c2ln",
     wrapped_cak: "d3JhcHBlZC1jYWs",
@@ -59,6 +65,7 @@ describe("readCoAdminGrant", () => {
     expect(grant).not.toBeNull();
     expect(grant?.version).toBe(3);
     if (grant?.version !== 3) throw new Error("expected a v3 grant");
+    expect(grant.grantId).toBe(V3_GRANT_ID);
     expect(grant.wrappedCakB64).toBe("d3JhcHBlZC1jYWs");
     expect(grant.coadminKeyringCiphertextB64).toBe("c2VhbGVkLWtleXJpbmc");
     expect(grant.grantSigB64).toBe("c2ln");
@@ -82,6 +89,24 @@ describe("readCoAdminGrant", () => {
   it("refuses a half written v3 row", () => {
     expect(readCoAdminGrant(v3Row({ coadmin_keyring_ciphertext: null }))).toBeNull();
     expect(readCoAdminGrant(v3Row({ wrapped_cak: null }))).toBeNull();
+  });
+
+  it("refuses a v3 row that has no usable id", () => {
+    // The sealed keyring is bound to the row id, so a v3 row without one cannot
+    // be opened. Refusing here keeps that from surfacing later as an
+    // authentication failure that looks like a wrong key.
+    expect(readCoAdminGrant(v3Row({ id: null }))).toBeNull();
+    expect(readCoAdminGrant(v3Row({ id: undefined }))).toBeNull();
+    expect(readCoAdminGrant(v3Row({ id: "" }))).toBeNull();
+    expect(readCoAdminGrant(v3Row({ id: 42 }))).toBeNull();
+  });
+
+  it("does not need an id to read a v2 row", () => {
+    // A v2 grant is not bound to its row id, so a missing id must not change
+    // how one reads.
+    const grant = readCoAdminGrant(v2Row({ id: null }));
+    expect(grant?.version).toBe(2);
+    expect(grant !== null && "grantId" in grant).toBe(false);
   });
 
   it("refuses a row carrying both envelopes at once", () => {
@@ -135,14 +160,19 @@ describe("readCoAdminGrant", () => {
 describe("CO_ADMIN_GRANT_COLUMNS", () => {
   it("asks for every column the shape rule reads", () => {
     // A select that omits wrapped_cak makes every v3 grant look like an empty
-    // row, which the reader would then correctly but uselessly refuse.
+    // row, and one that omits id makes every v3 grant unreadable, because the
+    // sealed keyring is bound to the row id. The reader would then correctly
+    // but uselessly refuse both. Compare whole column names: a substring check
+    // for "id" would also pass on any longer name that happens to contain it.
+    const selected = CO_ADMIN_GRANT_COLUMNS.split(",").map((column) => column.trim());
     for (const column of [
+      "id",
       "wrapped_ciphertext",
       "grant_sig",
       "wrapped_cak",
       "coadmin_keyring_ciphertext",
     ]) {
-      expect(CO_ADMIN_GRANT_COLUMNS).toContain(column);
+      expect(selected).toContain(column);
     }
   });
 });

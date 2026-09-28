@@ -10,7 +10,9 @@
  *   envelope v3  wrapped_cak holds the per grant co-admin key wrapped to the
  *                recipient, coadmin_keyring_ciphertext holds the sealed
  *                keyring projection, and wrapped_ciphertext is null because a
- *                v3 grant has no 64 byte blob to put there.
+ *                v3 grant has no 64 byte blob to put there. The sealed keyring
+ *                is bound to the id of the row it sits in, which is also the
+ *                grant id, so a v3 row is only usable together with its id.
  *
  * Both shapes are insertable and readable at the same time, on purpose: a
  * recipient on v3 has to be able to consume a v2 grant from an owner still on
@@ -27,7 +29,8 @@
  *
  * FAIL CLOSED. Anything that is not exactly one complete shape returns null
  * and the caller skips the workspace. That covers a row with neither shape, a
- * half written v3 row, and a row carrying both shapes at once. None of those
+ * half written v3 row, a v3 row with no id, and a row carrying both shapes at
+ * once. None of those
  * is something a writer produces, so the safe reading of one is that we do not
  * know what we are looking at, and key material is not where you guess.
  */
@@ -37,10 +40,11 @@
  *
  * Kept next to the function that interprets them so a reader cannot silently
  * select less than the shape rule needs: a select that omits wrapped_cak makes
- * every v3 grant look like an empty row.
+ * every v3 grant look like an empty row, and one that omits id makes every v3
+ * grant unreadable, because the sealed keyring is bound to the row id.
  */
 export const CO_ADMIN_GRANT_COLUMNS =
-  "wrapped_ciphertext, grant_sig, wrapped_cak, coadmin_keyring_ciphertext";
+  "id, wrapped_ciphertext, grant_sig, wrapped_cak, coadmin_keyring_ciphertext";
 
 /**
  * One co-admin grant, in whichever envelope it was written.
@@ -59,6 +63,8 @@ export type CoAdminGrant =
     }
   | {
       version: 3;
+      /** The wrapped_data_keys row id, which is the grant id the keyring is bound to. */
+      grantId: string;
       wrappedCakB64: string;
       coadminKeyringCiphertextB64: string;
       grantSigB64: string | null;
@@ -98,6 +104,7 @@ export function readCoAdminGrant(row: unknown): CoAdminGrant | null {
   const wrappedCakB64 = presentString(fields, "wrapped_cak");
   const coadminKeyringCiphertextB64 = presentString(fields, "coadmin_keyring_ciphertext");
   const grantSigB64 = presentString(fields, "grant_sig");
+  const grantId = presentString(fields, "id");
 
   // Both envelopes at once. The database permits it (the presence rule only
   // asks for at least one), no writer produces it, and choosing one of the two
@@ -112,8 +119,13 @@ export function readCoAdminGrant(row: unknown): CoAdminGrant | null {
   // A v3 grant needs both halves. The wrapped co-admin key alone opens
   // nothing, and the sealed keyring alone cannot be opened.
   if (wrappedCakB64 !== null && coadminKeyringCiphertextB64 !== null) {
+    // The sealed keyring's AAD carries the row id, so a v3 row with no id
+    // cannot be opened. Refuse it here rather than let the consume path fail
+    // later with an authentication error that reads like a wrong key.
+    if (grantId === null) return null;
     return {
       version: 3,
+      grantId,
       wrappedCakB64,
       coadminKeyringCiphertextB64,
       grantSigB64,

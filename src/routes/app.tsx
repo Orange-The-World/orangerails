@@ -8,6 +8,7 @@ import {
   clearCoAdminListEntry,
   CoAdminGrantIncompleteError,
   CoAdminRevocationIncompleteError,
+  type AdminGrantMaterial,
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
 import { formatError } from "@/lib/format-error";
@@ -21,6 +22,7 @@ import {
   type WrappedKeyClient,
 } from "@/lib/co-admin-workspace-read";
 import { readCoAdminGrant } from "@/lib/co-admin-grant-row";
+import { readOwnKeyringRow } from "@/lib/vault-keyring-row";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
 import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
@@ -123,15 +125,19 @@ interface WorkspaceOption {
   ownerUserId: string;
   ownerEmail: string;
   workspaceKeyId: string;
-  wrappedCiphertextB64: string;
+  // What loadAdminSubkeys opens: a v2 subkey blob, or a v3 wrapped key with the
+  // keyring sealed under it. readCoAdminGrant decides which from the columns the
+  // row carries.
+  grant: AdminGrantMaterial;
   // Grant-signature binding fields (DL-0619). loadAdminSubkeys verifies the
   // owner's ML-DSA-65 signature over (granteeUserId, workspaceKeyId, wrapped
-  // ciphertext) before any decryption, so all three must travel with the row.
+  // key) before any decryption, so all three must travel with the row.
   grantSigB64: string | null;
   ownerSigPubB64: string;
   granteeUserId: string;
-  // No kemSecretWrapped here , the admin's own kem_secret_wrapped is used
-  // for all workspace unwraps, stored separately in myKemSecretWrapped state.
+  // No kemSecretWrapped here , the admin's own KEM secret (a keyring, or the
+  // legacy kem_secret_wrapped column) is used for all workspace unwraps and is
+  // held separately in the myKemSecretWrapped and myKeyring states.
 }
 
 // Providers available in Phase 1. Grows as we add adapters.
@@ -215,6 +221,10 @@ export function AppHome() {
   const [workspaceKeyId, setWorkspaceKeyId] = useState<string | null>(null);
   const [vaultSalt, setVaultSalt] = useState<string | null>(null);
   const [myKemSecretWrapped, setMyKemSecretWrapped] = useState<string | null>(null);
+  // The admin's own keyring, when their vault keeps one. Where their KEM secret
+  // is read from depends on this and on myKemSecretWrapped, never on the grant.
+  const [myKeyringCiphertext, setMyKeyringCiphertext] = useState<string | null>(null);
+  const [myKeyringEpoch, setMyKeyringEpoch] = useState<number | string | null>(null);
   const [adminWorkspaces, setAdminWorkspaces] = useState<WorkspaceOption[]>([]);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceOption | null>(null);
   // Per-workspace load problems (duplicate wrapped key, read error), keyed by
@@ -313,13 +323,37 @@ export function AppHome() {
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
         const kemWrapped = ((meta as Record<string, unknown>).kem_secret_wrapped as string) ?? null;
         setMyKemSecretWrapped(kemWrapped);
+        // The keyring columns are read on their own so the select above stays the
+        // pre v3 one: a project without the column must not break the vault load.
+        // Only "column does not exist" reads as no keyring. Any other failure is
+        // surfaced here and never treated as a vault that simply has no keyring.
+        const keyringRead = await readOwnKeyringRow(
+          supabase as unknown as Parameters<typeof readOwnKeyringRow>[0],
+          session.user.id,
+        );
+        let keyringCiphertext: string | null = null;
+        if (keyringRead.status === "ok") {
+          keyringCiphertext = keyringRead.keyringCiphertext;
+          setMyKeyringCiphertext(keyringRead.keyringCiphertext);
+          setMyKeyringEpoch(keyringRead.keyringEpoch);
+        } else {
+          setMyKeyringCiphertext(null);
+          setMyKeyringEpoch(null);
+          if (keyringRead.status === "error") {
+            console.warn(`Failed to load vault keyring: ${formatError(keyringRead.error)}`);
+            setErr(`Could not load your vault keyring: ${formatError(keyringRead.error)}`);
+          }
+        }
         setVaultEncMekCiphertext(((meta as Record<string, unknown>).enc_mek_ciphertext as string) ?? null);
         setVaultVerifierCiphertext(((meta as Record<string, unknown>).vault_verifier_ciphertext as string) ?? null);
         setVaultKeyVersion(((meta as Record<string, unknown>).vault_key_version as number) ?? 1);
 
         // If PQC keys are missing (signup pre-dated the PQC rollout or an earlier
         // ensurePqcKeypairs call failed), generate them now so co-admin works.
-        if (!kemWrapped) {
+        // A vault that keeps a keyring holds its PQC keys inside it, so a missing
+        // legacy column there is not a missing key. An unreadable keyring is not
+        // a missing one either, so a failed keyring read skips this backfill.
+        if (!kemWrapped && !keyringCiphertext && keyringRead.status !== "error") {
           ensurePqcKeypairs(
             supabase as unknown as Parameters<typeof ensurePqcKeypairs>[0],
             session.user.id,
@@ -439,15 +473,23 @@ export function AppHome() {
           // same as the unverifiable grant skipped a few lines above.
           const grant = readCoAdminGrant(wdkRead.row);
           if (!grant) continue;
-          // A v3 grant is recognised here but cannot be opened yet: the per
-          // grant keyring primitive that unseals one is not wired into the
-          // consume path. Decline it rather than half handle it. See DEV-0308.
-          if (grant.version !== 2) continue;
+          // Both envelopes are opened by loadAdminSubkeys, and it verifies the
+          // owner's signature before it decrypts anything. A v3 grant also
+          // carries the owner's user id, because the keyring sealed for this
+          // grant is bound to it.
           workspaces.push({
             ownerUserId: ownerId,
             ownerEmail: ownerId, // resolved below
             workspaceKeyId: ownerKeyId,
-            wrappedCiphertextB64: grant.wrappedCiphertextB64,
+            grant:
+              grant.version === 3
+                ? {
+                    grantId: grant.grantId,
+                    ownerUserId: ownerId,
+                    wrappedCakB64: grant.wrappedCakB64,
+                    coadminKeyringCiphertextB64: grant.coadminKeyringCiphertextB64,
+                  }
+                : { wrappedCiphertextB64: grant.wrappedCiphertextB64 },
             grantSigB64: grant.grantSigB64,
             ownerSigPubB64,
             granteeUserId: session.user.id,
@@ -494,37 +536,40 @@ export function AppHome() {
   // own subkeys.
   // ------------------------------------------------------------------
 
+  // Opens one workspace grant with the admin's own KEM secret. Every caller goes
+  // through here, so none of them can pass a different shape from the others.
+  const openWorkspaceGrant = useCallback(
+    (ws: WorkspaceOption) =>
+      loadAdminSubkeys({
+        ...ws.grant,
+        ownerWorkspaceKeyId: ws.workspaceKeyId,
+        kemSecretWrapped: myKemSecretWrapped,
+        adminKeyringCiphertext: myKeyringCiphertext,
+        adminKeyringEpoch: myKeyringEpoch,
+        grantSigB64: ws.grantSigB64,
+        ownerSigPubB64: ws.ownerSigPubB64,
+        granteeUserId: ws.granteeUserId,
+      }),
+    [loadAdminSubkeys, myKemSecretWrapped, myKeyringCiphertext, myKeyringEpoch],
+  );
+
   const getActiveCredentialsKey = useCallback(async (): Promise<CryptoKey | null> => {
-    if (!activeWorkspace || !myKemSecretWrapped) return null;
+    if (!activeWorkspace || (!myKemSecretWrapped && !myKeyringCiphertext)) return null;
     const cached = adminSubkeysRef.current.get(activeWorkspace.workspaceKeyId);
     if (cached) return cached.credentialsKey;
-    const subkeys = await loadAdminSubkeys({
-      ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
-      wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
-      kemSecretWrapped: myKemSecretWrapped,
-      grantSigB64: activeWorkspace.grantSigB64,
-      ownerSigPubB64: activeWorkspace.ownerSigPubB64,
-      granteeUserId: activeWorkspace.granteeUserId,
-    });
+    const subkeys = await openWorkspaceGrant(activeWorkspace);
     adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
     return subkeys.credentialsKey;
-  }, [activeWorkspace, myKemSecretWrapped, loadAdminSubkeys]);
+  }, [activeWorkspace, myKemSecretWrapped, myKeyringCiphertext, openWorkspaceGrant]);
 
   const getActiveTransactionsKey = useCallback(async (): Promise<CryptoKey | null> => {
-    if (!activeWorkspace || !myKemSecretWrapped) return null;
+    if (!activeWorkspace || (!myKemSecretWrapped && !myKeyringCiphertext)) return null;
     const cached = adminSubkeysRef.current.get(activeWorkspace.workspaceKeyId);
     if (cached) return cached.transactionsKey;
-    const subkeys = await loadAdminSubkeys({
-      ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
-      wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
-      kemSecretWrapped: myKemSecretWrapped,
-      grantSigB64: activeWorkspace.grantSigB64,
-      ownerSigPubB64: activeWorkspace.ownerSigPubB64,
-      granteeUserId: activeWorkspace.granteeUserId,
-    });
+    const subkeys = await openWorkspaceGrant(activeWorkspace);
     adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
     return subkeys.transactionsKey;
-  }, [activeWorkspace, myKemSecretWrapped, loadAdminSubkeys]);
+  }, [activeWorkspace, myKemSecretWrapped, myKeyringCiphertext, openWorkspaceGrant]);
 
   // Load connections + decrypt recent transactions.
   // When activeWorkspace is set, only load the owner's connections and use
@@ -1118,7 +1163,7 @@ export function AppHome() {
                   const ws = adminWorkspaces.find((w) => w.workspaceKeyId === keyId) ?? null;
                   if (!ws) return;
                   try {
-                    if (!myKemSecretWrapped) {
+                    if (!myKemSecretWrapped && !myKeyringCiphertext) {
                       throw new Error(
                         "Your vault PQC keys are not set up yet. Lock and unlock your vault to generate them, then try again.",
                       );
@@ -1127,14 +1172,7 @@ export function AppHome() {
                     if (!adminSubkeysRef.current.has(ws.workspaceKeyId)) {
                       let subkeys;
                       try {
-                        subkeys = await loadAdminSubkeys({
-                          ownerWorkspaceKeyId: ws.workspaceKeyId,
-                          wrappedCiphertextB64: ws.wrappedCiphertextB64,
-                          kemSecretWrapped: myKemSecretWrapped,
-                          grantSigB64: ws.grantSigB64,
-                          ownerSigPubB64: ws.ownerSigPubB64,
-                          granteeUserId: ws.granteeUserId,
-                        });
+                        subkeys = await openWorkspaceGrant(ws);
                       } catch (unwrapErr) {
                         const name =
                           unwrapErr && typeof unwrapErr === "object" && "name" in unwrapErr
