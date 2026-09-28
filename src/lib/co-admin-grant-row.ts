@@ -40,7 +40,7 @@
  * every v3 grant look like an empty row.
  */
 export const CO_ADMIN_GRANT_COLUMNS =
-  "wrapped_ciphertext, grant_sig, wrapped_cak, coadmin_keyring_ciphertext";
+  "id, wrapped_ciphertext, grant_sig, wrapped_cak, coadmin_keyring_ciphertext";
 
 /**
  * One co-admin grant, in whichever envelope it was written.
@@ -59,6 +59,8 @@ export type CoAdminGrant =
     }
   | {
       version: 3;
+      /** wrapped_data_keys.id for this row. Part of the AAD that binds the sealed keyring. */
+      grantId: string;
       wrappedCakB64: string;
       coadminKeyringCiphertextB64: string;
       grantSigB64: string | null;
@@ -94,6 +96,7 @@ export function readCoAdminGrant(row: unknown): CoAdminGrant | null {
   if (row === null || typeof row !== "object") return null;
   const fields = row as Record<string, unknown>;
 
+  const grantId = presentString(fields, "id");
   const wrappedCiphertextB64 = presentString(fields, "wrapped_ciphertext");
   const wrappedCakB64 = presentString(fields, "wrapped_cak");
   const coadminKeyringCiphertextB64 = presentString(fields, "coadmin_keyring_ciphertext");
@@ -110,10 +113,16 @@ export function readCoAdminGrant(row: unknown): CoAdminGrant | null {
   }
 
   // A v3 grant needs both halves. The wrapped co-admin key alone opens
-  // nothing, and the sealed keyring alone cannot be opened.
+  // nothing, and the sealed keyring alone cannot be opened. It also needs its
+  // own row id: the AAD that binds the sealed keyring is {ownerUserId,
+  // grantId}, so a v3 row whose id did not come back as a usable string is
+  // exactly as unusable as one missing wrapped_cak. Fail closed rather than
+  // open a keyring unbound.
   if (wrappedCakB64 !== null && coadminKeyringCiphertextB64 !== null) {
+    if (grantId === null) return null;
     return {
       version: 3,
+      grantId,
       wrappedCakB64,
       coadminKeyringCiphertextB64,
       grantSigB64,
