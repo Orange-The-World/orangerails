@@ -312,6 +312,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // Fix: bound every probe on bucket_ts, same as the point lookup. Two queries
     // share this filter builder; the second only runs when the first finds
     // nothing. classifyCoverage above documents the three possible outcomes.
+    //
+    // Rebase note (OR-T0113): this commit carries no functional change. It
+    // exists only to force a fresh CI merge against dev after OR-T2728 (a
+    // duplicate migration version on dev, unrelated to this fix) was
+    // resolved, so the migration-uniqueness gate reflects current dev.
     const coverageQuery = () => supabase
       .from('exchange_rates')
       .select('bucket_ts')
