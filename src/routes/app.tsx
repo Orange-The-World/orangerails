@@ -524,7 +524,11 @@ export function AppHome() {
     if (cached) return cached.credentialsKey;
     const subkeys = await loadAdminSubkeys({
       ownerWorkspaceKeyId: activeWorkspace.workspaceKeyId,
-      wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64,
+      wrappedCiphertextB64: activeWorkspace.wrappedCiphertextB64 ?? undefined,
+      wrappedCakB64: activeWorkspace.wrappedCakB64 ?? undefined,
+      coadminKeyringCiphertextB64: activeWorkspace.coadminKeyringCiphertextB64 ?? undefined,
+      grantId: activeWorkspace.grantId ?? undefined,
+      ownerUserId: activeWorkspace.ownerUserId,
       kemSecretWrapped: myKemSecretWrapped,
       grantSigB64: activeWorkspace.grantSigB64,
       ownerSigPubB64: activeWorkspace.ownerSigPubB64,
