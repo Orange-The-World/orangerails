@@ -1094,7 +1094,8 @@ export async function reconcileConnectionError(
     console.warn(
       `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} updated_at ` +
         `(${conn.updated_at}) is newer than this errored event's received_at ` +
-        `(${ev.received_at}); a newer reconciliation already ran, not regressing status to error`,
+        `(${ev.received_at}); a newer reconciliation already ran, not regressing status to error ` +
+        `[OR-T2694 ordering guard]`,
     );
     return null;
   }
