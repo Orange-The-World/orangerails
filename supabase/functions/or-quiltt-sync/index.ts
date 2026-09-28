@@ -1027,17 +1027,17 @@ export async function reconcileConnectionError(
 
   // Prefer an exact quiltt_connection_id match; fall back to the legacy
   // NULL-id row only if no exact match exists -- same pattern as handleEvent.
-  let conn: { id: string } | null = null;
+  let conn: { id: string; updated_at: string | null } | null = null;
   const exactMatch = await client
     .from('connections')
-    .select('id')
+    .select('id, updated_at')
     .eq('subaccount_id', subaccountId)
     .eq('provider_type', 'quiltt')
     .eq('quiltt_connection_id', connectionId)
     .maybeSingle();
   if (exactMatch.error) return `connection lookup failed: ${exactMatch.error.message}`;
   if (exactMatch.data) {
-    conn = exactMatch.data as { id: string };
+    conn = exactMatch.data as { id: string; updated_at: string | null };
   } else {
     const legacy = await client
       .from('connections')
