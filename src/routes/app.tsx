@@ -22,6 +22,7 @@ import {
   type WrappedKeyClient,
 } from "@/lib/co-admin-workspace-read";
 import { readCoAdminGrant } from "@/lib/co-admin-grant-row";
+import { readOwnKeyringRow } from "@/lib/vault-keyring-row";
 import { logSecurityEvent } from "@/lib/audit";
 import { strikeMarkerToCopy, upstreamCodeToCopy, upstreamMarkerToCopy } from "@/lib/strike-error-copy";
 import { extractDiscoveryErrorMessage, isDiscoveryAuthFailure } from "@/lib/discovery-error";
@@ -310,7 +311,7 @@ export function AppHome() {
       // Load vault salt + workspace_key_id + co-admin list.
       const { data: meta, error: metaErr } = await (supabase as any)
         .from("user_vault_meta")
-        .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version, keyring_ciphertext, keyring_epoch")
+        .select("vault_salt, workspace_key_id, kem_secret_wrapped, enc_mek_ciphertext, vault_verifier_ciphertext, vault_key_version")
         .eq("user_id", session.user.id)
         .single();
       if (classifyRead(meta, metaErr) === "error") {
@@ -322,12 +323,27 @@ export function AppHome() {
         setWorkspaceKeyId(((meta as Record<string, unknown>).workspace_key_id as string) ?? null);
         const kemWrapped = ((meta as Record<string, unknown>).kem_secret_wrapped as string) ?? null;
         setMyKemSecretWrapped(kemWrapped);
-        const keyringCiphertext =
-          ((meta as Record<string, unknown>).keyring_ciphertext as string | null | undefined) ?? null;
-        setMyKeyringCiphertext(keyringCiphertext);
-        setMyKeyringEpoch(
-          ((meta as Record<string, unknown>).keyring_epoch as number | string | null | undefined) ?? null,
+        // The keyring columns are read on their own so the select above stays the
+        // pre v3 one: a project without the column must not break the vault load.
+        // Only "column does not exist" reads as no keyring. Any other failure is
+        // surfaced here and never treated as a vault that simply has no keyring.
+        const keyringRead = await readOwnKeyringRow(
+          supabase as unknown as Parameters<typeof readOwnKeyringRow>[0],
+          session.user.id,
         );
+        let keyringCiphertext: string | null = null;
+        if (keyringRead.status === "ok") {
+          keyringCiphertext = keyringRead.keyringCiphertext;
+          setMyKeyringCiphertext(keyringRead.keyringCiphertext);
+          setMyKeyringEpoch(keyringRead.keyringEpoch);
+        } else {
+          setMyKeyringCiphertext(null);
+          setMyKeyringEpoch(null);
+          if (keyringRead.status === "error") {
+            console.warn(`Failed to load vault keyring: ${formatError(keyringRead.error)}`);
+            setErr(`Could not load your vault keyring: ${formatError(keyringRead.error)}`);
+          }
+        }
         setVaultEncMekCiphertext(((meta as Record<string, unknown>).enc_mek_ciphertext as string) ?? null);
         setVaultVerifierCiphertext(((meta as Record<string, unknown>).vault_verifier_ciphertext as string) ?? null);
         setVaultKeyVersion(((meta as Record<string, unknown>).vault_key_version as number) ?? 1);
@@ -335,8 +351,9 @@ export function AppHome() {
         // If PQC keys are missing (signup pre-dated the PQC rollout or an earlier
         // ensurePqcKeypairs call failed), generate them now so co-admin works.
         // A vault that keeps a keyring holds its PQC keys inside it, so a missing
-        // legacy column there is not a missing key.
-        if (!kemWrapped && !keyringCiphertext) {
+        // legacy column there is not a missing key. An unreadable keyring is not
+        // a missing one either, so a failed keyring read skips this backfill.
+        if (!kemWrapped && !keyringCiphertext && keyringRead.status !== "error") {
           ensurePqcKeypairs(
             supabase as unknown as Parameters<typeof ensurePqcKeypairs>[0],
             session.user.id,
