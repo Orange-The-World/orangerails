@@ -101,6 +101,22 @@ export const VAULT_META_UNREADABLE_MESSAGE =
   "Could not load vault metadata. Reload the page and try again.";
 
 /**
+ * Shown when migrateAndPersistRotatedVault's own pre-write read of
+ * user_vault_meta (the read that decides whether a stored PQC secret would
+ * be dropped) returns zero rows with no error. This is a DIFFERENT guard
+ * from VAULT_META_UNREADABLE_MESSAGE above, which covers
+ * loadVaultMetaForRecovery's read before a recovery attempt begins; this one
+ * covers the read migrateAndPersistRotatedVault itself takes mid-rotation.
+ *
+ * This function only runs mid-rotation, which requires an existing
+ * user_vault_meta row, so zero rows here is never a legitimate answer: it
+ * is a session drop, an RLS predicate that stopped matching, or a deleted
+ * row, and it must not be read as "nothing stored, safe to proceed" (OR-T2371).
+ */
+export const VAULT_META_GUARD_UNREADABLE_MESSAGE =
+  "Could not confirm your vault's stored keys before rotating. Nothing was changed. Reload the page and try again.";
+
+/**
  * Shown when the reconciliation below the paging loops finds that this run did
  * not re-encrypt every row the table holds for this user.
  *
