@@ -5,7 +5,7 @@
 //   deno test --no-check --allow-all supabase/functions/v1-rate/resolve-coverage.test.ts
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
-import { resolveCoverage, type CoverageClient, type CoverageQuery } from './index.ts'
+import { resolveCoverage, type CoverageClient, type CoverageQuery } from './coverage.ts'
 
 type Row = { bucket_ts: string }
 type Resp = { data: Row | null; error: unknown }

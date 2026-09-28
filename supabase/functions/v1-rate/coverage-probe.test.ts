@@ -6,7 +6,7 @@
 // row strictly after it) and returns the same three outcomes the original single
 // unbounded probe produced. It does not run a query itself, so these tests do not
 // and cannot prove the two live queries are bounded on bucket_ts -- that is a
-// property of the `.lte()`/`.gt()` calls in index.ts, verified by reading the diff,
+// property of the `.lte()`/`.gt()` calls in coverage.ts, verified by reading the diff,
 // and of the acceptance check on OR-T0113 (a live authenticated call against the
 // real endpoint, run by a seat that did not write this fix).
 //
@@ -14,7 +14,7 @@
 //   deno test --no-check --allow-all supabase/functions/v1-rate/coverage-probe.test.ts
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
-import { classifyCoverage } from './index.ts'
+import { classifyCoverage } from './coverage.ts'
 
 const ASSET = 'BTC'
 const FIAT = 'EUR'

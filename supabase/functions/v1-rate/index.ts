@@ -18,6 +18,15 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
 import { wrapSentryHandler, reportError } from '../_shared/sentry.ts'
+import { classifyCoverage, resolveCoverage, type CoverageClient } from './coverage.ts'
+export { classifyCoverage, resolveCoverage } from './coverage.ts'
+export type {
+  CoverageClient,
+  CoverageParams,
+  CoverageQuery,
+  CoverageResult,
+  CoverageRow,
+} from './coverage.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -70,115 +79,6 @@ export function extractCompositeAuthority(compositeVia: string | null | undefine
   // 'PEG' marks a construction method (pegged rate), not a data-source institution
   if (authority === 'PEG') return null
   return authority
-}
-
-// Coverage classification for OR-T0113 (see the two bounded probes in the request
-// handler below). Pure and exported so it can be unit tested without a live database:
-// the handler runs two bounded queries and hands the results here.
-//   atOrBefore: the coverage-probe row at or before the requested bucket, if any
-//               (`.lte('bucket_ts', bucketTs)`, ascending, limit 1).
-//   after:      only queried when atOrBefore is null -- the earliest row strictly
-//               after the requested bucket, if any (`.gt('bucket_ts', bucketTs)`,
-//               ascending, limit 1). Because it only runs once atOrBefore is known
-//               empty, the smallest row it finds IS the pair's true earliest row.
-// Three outcomes, matching the original single-unbounded-probe behavior exactly:
-//   atOrBefore present               -> covered: true, point lookup runs unchanged.
-//   atOrBefore absent, after present -> before_coverage_start (pair is ingested,
-//                                       this request predates its first bucket).
-//   both absent                      -> unsupported_pair (pair is not ingested at all).
-export interface CoverageRow { bucket_ts: string }
-
-export interface CoverageResult {
-  covered: boolean
-  errorCode?: 'unsupported_pair' | 'before_coverage_start'
-  message?: string
-}
-
-export function classifyCoverage(
-  asset: string,
-  fiat: string,
-  product: string,
-  bucketTs: string,
-  atOrBefore: CoverageRow | null,
-  after: CoverageRow | null
-): CoverageResult {
-  if (atOrBefore) return { covered: true }
-  if (after) {
-    return {
-      covered: false,
-      errorCode: 'before_coverage_start',
-      message: `${asset}/${fiat} on ${product} has no data before ${bucketTs}; coverage starts at ${after.bucket_ts}`,
-    }
-  }
-  return {
-    covered: false,
-    errorCode: 'unsupported_pair',
-    message: `No rate coverage for ${asset}/${fiat} on product ${product}`,
-  }
-}
-
-// ----- Bounded coverage probe (OR-T0113) -----
-// The first probe finds the earliest current row at or before bucketTs. If it
-// finds nothing, the second probe finds the earliest current row after
-// bucketTs. Both shapes constrain all four leading equality columns and the
-// bucket_ts range in idx_rates_lookup; neither can wander into another pair,
-// granularity, or product. Keeping the first probe ascending also gives the
-// point lookup below a known coverage-start lower bound.
-export interface CoverageQuery {
-  eq(col: string, val: string): CoverageQuery
-  is(col: string, val: null): CoverageQuery
-  lte(col: string, val: string): CoverageQuery
-  gt(col: string, val: string): CoverageQuery
-  order(col: string, opts: { ascending: boolean }): CoverageQuery
-  limit(n: number): CoverageQuery
-  maybeSingle(): PromiseLike<{ data: CoverageRow | null; error: unknown }>
-}
-
-export interface CoverageClient {
-  from(table: string): { select(cols: string): CoverageQuery }
-}
-
-export interface CoverageParams {
-  asset: string
-  fiat: string
-  product: string
-  granularity: string
-  bucketTs: string
-}
-
-export async function resolveCoverage(
-  client: CoverageClient,
-  p: CoverageParams,
-): Promise<{ row: CoverageRow | null; error: unknown }> {
-  const scoped = () =>
-    client
-      .from('exchange_rates')
-      .select('bucket_ts')
-      .eq('source_currency', p.asset)
-      .eq('target_currency', p.fiat)
-      .eq('granularity', p.granularity)
-      .eq('product', p.product)
-      .eq('source_authority', 'ORBI')
-      .eq('status', 'CONFIRMED')
-      .is('superseded_by_id', null)
-
-  const { data: atOrBefore, error: atOrBeforeErr } = await scoped()
-    .lte('bucket_ts', p.bucketTs)
-    .order('bucket_ts', { ascending: true })
-    .limit(1)
-    .maybeSingle()
-
-  if (atOrBeforeErr) return { row: null, error: atOrBeforeErr }
-  if (atOrBefore) return { row: atOrBefore, error: null }
-
-  const { data: after, error: afterErr } = await scoped()
-    .gt('bucket_ts', p.bucketTs)
-    .order('bucket_ts', { ascending: true })
-    .limit(1)
-    .maybeSingle()
-
-  if (afterErr) return { row: null, error: afterErr }
-  return { row: after, error: null }
 }
 
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
