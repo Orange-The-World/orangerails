@@ -423,12 +423,38 @@ export async function persistCoAdminGrant(params: {
   ownerUserId: string;
   targetUserId: string;
   workspaceKeyId: string;
-  wrappedCiphertextB64: string;
+  wrappedCiphertextB64?: string;
+  grantId?: string;
+  wrappedCakB64?: string;
+  coadminKeyringCiphertextB64?: string;
   grantSig: string;
   supabase: CoAdminSupabaseLike;
 }): Promise<void> {
-  const { ownerUserId, targetUserId, workspaceKeyId, wrappedCiphertextB64, grantSig, supabase } =
-    params;
+  const {
+    ownerUserId,
+    targetUserId,
+    workspaceKeyId,
+    wrappedCiphertextB64,
+    grantId,
+    wrappedCakB64,
+    coadminKeyringCiphertextB64,
+    grantSig,
+    supabase,
+  } = params;
+
+  // v3 is decided by presence, the same rule readCoAdminGrant uses to read
+  // the row back: both halves of the sealed keyring, never the algorithm
+  // string. A v3 grant also needs its own grantId up front, because that is
+  // the id half of the AAD binding sealCoAdminKeyring already sealed under,
+  // and it must be this row's own primary key so the consume side can read
+  // it back off the same row.
+  const isV3 = typeof wrappedCakB64 === "string" && typeof coadminKeyringCiphertextB64 === "string";
+  if (isV3 && !grantId) {
+    throw new Error("A v3 co-admin grant requires a grantId to bind the sealed keyring to its own row.");
+  }
+  if (!isV3 && typeof wrappedCiphertextB64 !== "string") {
+    throw new Error("A v2 co-admin grant requires wrappedCiphertextB64.");
+  }
 
   // The record of who holds access. Deliberately first.
   const { error: adminErr } = await supabase.from("workspace_admins").insert({
@@ -439,14 +465,28 @@ export async function persistCoAdminGrant(params: {
     throw new Error(`Failed to insert workspace_admins: ${formatError(adminErr)}`);
   }
 
-  // The wrapped key. THIS is the write that grants access.
-  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert({
-    data_key_id: workspaceKeyId,
-    recipient_user_id: targetUserId,
-    wrapped_ciphertext: wrappedCiphertextB64,
-    algorithm: "hybrid-x25519-mlkem768-blob64",
-    grant_sig: grantSig,
-  });
+  // The wrapped key. THIS is the write that grants access. The row shape
+  // depends on the envelope: v3 carries the sealed keyring and the wrapped
+  // per-grant CAK under its own explicit id; v2 carries the legacy 64-byte
+  // blob wrap.
+  const wrappedRow: Record<string, unknown> = isV3
+    ? {
+        id: grantId,
+        data_key_id: workspaceKeyId,
+        recipient_user_id: targetUserId,
+        wrapped_cak: wrappedCakB64,
+        coadmin_keyring_ciphertext: coadminKeyringCiphertextB64,
+        algorithm: COADMIN_CAK_ALGORITHM,
+        grant_sig: grantSig,
+      }
+    : {
+        data_key_id: workspaceKeyId,
+        recipient_user_id: targetUserId,
+        wrapped_ciphertext: wrappedCiphertextB64,
+        algorithm: "hybrid-x25519-mlkem768-blob64",
+        grant_sig: grantSig,
+      };
+  const { error: wdkErr } = await supabase.from("wrapped_data_keys").insert(wrappedRow);
   if (wdkErr) {
     if (isUniqueViolation(wdkErr)) {
       // A row already exists at this exact (workspaceKeyId, targetUserId)
