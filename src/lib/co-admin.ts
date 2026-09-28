@@ -562,6 +562,8 @@ export async function grantCoAdmin(params: {
   targetKemPubB64: string;
   existingKeyId: string | null;
   supabase: CoAdminSupabaseLike;
+  ownerKeyringCiphertextB64?: string | null;
+  ownerKeyringEpoch?: number | string | null;
 }): Promise<GrantResult> {
   const {
     ownerUserId,
