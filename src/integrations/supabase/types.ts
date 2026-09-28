@@ -337,6 +337,7 @@ export type Database = {
           strike_needs_resubscribe: boolean
           strike_subscription_checked_at: string | null
           strike_subscription_id: string | null
+          strike_subscription_rotated_at: string | null
           strike_webhook_secret: string | null
           subaccount_id: string
           updated_at: string
@@ -360,6 +361,7 @@ export type Database = {
           strike_needs_resubscribe?: boolean
           strike_subscription_checked_at?: string | null
           strike_subscription_id?: string | null
+          strike_subscription_rotated_at?: string | null
           strike_webhook_secret?: string | null
           subaccount_id: string
           updated_at?: string
@@ -383,6 +385,7 @@ export type Database = {
           strike_needs_resubscribe?: boolean
           strike_subscription_checked_at?: string | null
           strike_subscription_id?: string | null
+          strike_subscription_rotated_at?: string | null
           strike_webhook_secret?: string | null
           subaccount_id?: string
           updated_at?: string
