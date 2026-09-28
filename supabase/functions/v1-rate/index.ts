@@ -117,6 +117,70 @@ export function classifyCoverage(
   }
 }
 
+// ----- Bounded coverage probe (OR-T0113) -----
+// The first probe finds the earliest current row at or before bucketTs. If it
+// finds nothing, the second probe finds the earliest current row after
+// bucketTs. Both shapes constrain all four leading equality columns and the
+// bucket_ts range in idx_rates_lookup; neither can wander into another pair,
+// granularity, or product. Keeping the first probe ascending also gives the
+// point lookup below a known coverage-start lower bound.
+export interface CoverageQuery {
+  eq(col: string, val: string): CoverageQuery
+  is(col: string, val: null): CoverageQuery
+  lte(col: string, val: string): CoverageQuery
+  gt(col: string, val: string): CoverageQuery
+  order(col: string, opts: { ascending: boolean }): CoverageQuery
+  limit(n: number): CoverageQuery
+  maybeSingle(): PromiseLike<{ data: CoverageRow | null; error: unknown }>
+}
+
+export interface CoverageClient {
+  from(table: string): { select(cols: string): CoverageQuery }
+}
+
+export interface CoverageParams {
+  asset: string
+  fiat: string
+  product: string
+  granularity: string
+  bucketTs: string
+}
+
+export async function resolveCoverage(
+  client: CoverageClient,
+  p: CoverageParams,
+): Promise<{ row: CoverageRow | null; error: unknown }> {
+  const scoped = () =>
+    client
+      .from('exchange_rates')
+      .select('bucket_ts')
+      .eq('source_currency', p.asset)
+      .eq('target_currency', p.fiat)
+      .eq('granularity', p.granularity)
+      .eq('product', p.product)
+      .eq('source_authority', 'ORBI')
+      .eq('status', 'CONFIRMED')
+      .is('superseded_by_id', null)
+
+  const { data: atOrBefore, error: atOrBeforeErr } = await scoped()
+    .lte('bucket_ts', p.bucketTs)
+    .order('bucket_ts', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (atOrBeforeErr) return { row: null, error: atOrBeforeErr }
+  if (atOrBefore) return { row: atOrBefore, error: null }
+
+  const { data: after, error: afterErr } = await scoped()
+    .gt('bucket_ts', p.bucketTs)
+    .order('bucket_ts', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  if (afterErr) return { row: null, error: afterErr }
+  return { row: after, error: null }
+}
+
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
 const rlMap = new Map<string, { count: number; windowStart: number }>()
 
@@ -203,6 +267,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   const rawKey = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : authHeader
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+  // Supabase's selected PostgREST builder satisfies CoverageQuery (including
+  // its PromiseLike result), but structurally comparing the entire generic
+  // SupabaseClient exceeds TypeScript's instantiation depth. Narrow only at
+  // this boundary; resolveCoverage and its mocks remain fully typed.
+  const coverageClient = supabase as unknown as CoverageClient
   const keyHash = await hashKey(rawKey)
 
   // maybeSingle, not single: with single(), PostgREST reports zero matching rows
@@ -309,30 +378,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // instead of idx_rates_lookup, which the point lookup below already uses
     // successfully, and the unbounded scan itself timed out with the same 500 it
     // was meant to prevent.
-    // Fix: bound every probe on bucket_ts, same as the point lookup. Two queries
-    // share this filter builder; the second only runs when the first finds
-    // nothing. classifyCoverage above documents the three possible outcomes.
-    //
-    // Rebase note (OR-T0113): this commit carries no functional change. It
-    // exists only to force a fresh CI merge against dev after OR-T2728 (a
-    // duplicate migration version on dev, unrelated to this fix) was
-    // resolved, so the migration-uniqueness gate reflects current dev.
-    const coverageQuery = () => supabase
-      .from('exchange_rates')
-      .select('bucket_ts')
-      .eq('source_currency', item.asset.toUpperCase())
-      .eq('target_currency', item.fiat.toUpperCase())
-      .eq('granularity', granularity)
-      .eq('product', product)
-      .eq('source_authority', 'ORBI')
-      .eq('status', 'CONFIRMED')
-      .is('superseded_by_id', null)
-
-    const { data: coverageRow, error: coverageErr } = await coverageQuery()
-      .lte('bucket_ts', bucketTs)
-      .order('bucket_ts', { ascending: true })
-      .limit(1)
-      .maybeSingle()
+    // Fix: resolveCoverage bounds every probe on bucket_ts, same as the point
+    // lookup. Its second query only runs when the first finds nothing.
+    const { row: coverageRow, error: coverageErr } = await resolveCoverage(coverageClient, {
+      asset: item.asset.toUpperCase(),
+      fiat: item.fiat.toUpperCase(),
+      product,
+      granularity,
+      bucketTs,
+    })
 
     if (coverageErr) {
       console.error(`coverage-probe DB error [${correlationId}]:`, coverageErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity }))
@@ -347,20 +401,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // For batch requests, push a per-item error and continue so previously resolved
     // items are not discarded and all successful items reach the usage-log insert
     // below. Single-item requests are surfaced as HTTP 404 after the loop (see below).
-    if (!coverageRow) {
-      const { data: afterRow, error: afterErr } = await coverageQuery()
-        .gt('bucket_ts', bucketTs)
-        .order('bucket_ts', { ascending: true })
-        .limit(1)
-        .maybeSingle()
-
-      if (afterErr) {
-        console.error(`coverage-probe DB error [${correlationId}]:`, afterErr, JSON.stringify({ asset: item.asset, fiat: item.fiat, product, granularity }))
-        void reportError(afterErr, 'v1-rate', req)
-        return Response.json({ error: 'server_error', message: 'Database error fetching rate coverage', correlation_id: correlationId }, { status: 500 })
-      }
-
-      const coverage = classifyCoverage(item.asset.toUpperCase(), item.fiat.toUpperCase(), product, bucketTs, null, afterRow)
+    const coverageRowIsAfter = coverageRow !== null &&
+      new Date(bucketTs).getTime() < new Date(coverageRow.bucket_ts).getTime()
+    if (!coverageRow || coverageRowIsAfter) {
+      const coverage = classifyCoverage(
+        item.asset.toUpperCase(),
+        item.fiat.toUpperCase(),
+        product,
+        bucketTs,
+        null,
+        coverageRow,
+      )
       results.push({
         asset: item.asset.toUpperCase(),
         fiat: item.fiat.toUpperCase(),
@@ -374,9 +425,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     // ----- Point-in-time lookup -----
     // Safe now: the coverage probe above proved a qualifying row exists at or
-    // before bucketTs, so this backward scan lands on it quickly instead of
-    // walking off the start of the pair's data.
-    // All five equality filters are required to fire idx_rates_lookup end-to-end:
+    // before bucketTs. Bound the scan at that earliest known row as well, so
+    // rejected superseded/non-confirmed rows cannot make it walk before known
+    // coverage.
+    // All four leading equality filters plus the bounded bucket_ts range are
+    // required to use idx_rates_lookup end-to-end:
     //   (source_currency, target_currency, granularity, product, bucket_ts DESC)
     // source_authority='ORBI', status='CONFIRMED', superseded_by_id IS NULL
     // ensure we return only current, authoritative rows.
@@ -398,6 +451,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       .eq('source_authority', 'ORBI')
       .eq('status', 'CONFIRMED')
       .is('superseded_by_id', null)
+      .gte('bucket_ts', coverageRow.bucket_ts)
       .lte('bucket_ts', bucketTs)
       .order('bucket_ts', { ascending: false })
       .limit(1)
