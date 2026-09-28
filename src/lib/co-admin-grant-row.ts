@@ -40,7 +40,7 @@
  * every v3 grant look like an empty row.
  */
 export const CO_ADMIN_GRANT_COLUMNS =
-  "wrapped_ciphertext, grant_sig, wrapped_cak, coadmin_keyring_ciphertext";
+  "id, wrapped_ciphertext, grant_sig, wrapped_cak, coadmin_keyring_ciphertext";
 
 /**
  * One co-admin grant, in whichever envelope it was written.
@@ -62,6 +62,11 @@ export type CoAdminGrant =
       wrappedCakB64: string;
       coadminKeyringCiphertextB64: string;
       grantSigB64: string | null;
+      // The wrapped_data_keys row id, bound into the seal and unseal AAD as
+      // grantId (construction d, OR-T0769). Required, never optional: a v3
+      // grant cannot be opened without it, so a row missing it is not a
+      // usable grant. See readCoAdminGrant.
+      grantId: string;
     };
 
 /**
@@ -94,6 +99,7 @@ export function readCoAdminGrant(row: unknown): CoAdminGrant | null {
   if (row === null || typeof row !== "object") return null;
   const fields = row as Record<string, unknown>;
 
+  const id = presentString(fields, "id");
   const wrappedCiphertextB64 = presentString(fields, "wrapped_ciphertext");
   const wrappedCakB64 = presentString(fields, "wrapped_cak");
   const coadminKeyringCiphertextB64 = presentString(fields, "coadmin_keyring_ciphertext");
@@ -109,14 +115,16 @@ export function readCoAdminGrant(row: unknown): CoAdminGrant | null {
     return { version: 2, wrappedCiphertextB64, grantSigB64 };
   }
 
-  // A v3 grant needs both halves. The wrapped co-admin key alone opens
-  // nothing, and the sealed keyring alone cannot be opened.
-  if (wrappedCakB64 !== null && coadminKeyringCiphertextB64 !== null) {
+  // A v3 grant needs both halves plus its own row id: id becomes grantId,
+  // bound into the seal time AAD, and a v3 grant with no id is not openable,
+  // so it is not a usable grant either. Fail closed rather than guess.
+  if (wrappedCakB64 !== null && coadminKeyringCiphertextB64 !== null && id !== null) {
     return {
       version: 3,
       wrappedCakB64,
       coadminKeyringCiphertextB64,
       grantSigB64,
+      grantId: id,
     };
   }
 
