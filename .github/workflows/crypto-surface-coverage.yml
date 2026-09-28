@@ -1,0 +1,42 @@
+name: Crypto surface coverage
+
+# Fails loud when a file reachable from our crypto primitives (vault.ts,
+# key-derivation.ts, and neighbours -- see
+# scripts/check-crypto-surface-coverage.mjs for the full list and the
+# algorithm) is not covered by any active high-risk ship_rules pattern.
+#
+# See OR-T2210: ship_rules classifies risk by matching a regex against a
+# file's PATH, so a new file that imports a crypto primitive is invisible
+# to the merge gate until its own path happens to contain a word the
+# pattern already looks for. This check does not classify or merge
+# anything itself; it fails loud so a human decides the fix (a new
+# ship_rules pattern, or narrowing the file).
+#
+# Reads .github/ship-rules.json, the same export merge-sweep.yml reads, so
+# there is one source of truth for what counts as high risk. If that file
+# is missing or empty this check FAILS rather than passing under no rule.
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - '.github/ship-rules.json'
+      - '.github/workflows/crypto-surface-coverage.yml'
+      - 'scripts/check-crypto-surface-coverage.mjs'
+  push:
+    branches: [dev]
+    paths:
+      - 'src/**'
+      - '.github/ship-rules.json'
+  workflow_dispatch:
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - name: Check crypto import-surface coverage
+        run: node scripts/check-crypto-surface-coverage.mjs
