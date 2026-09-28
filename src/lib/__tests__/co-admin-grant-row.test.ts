@@ -33,9 +33,12 @@ function v2Row(overrides: Record<string, unknown> = {}): Record<string, unknown>
   };
 }
 
+const GRANT_ID = "44444444-4444-4444-8444-444444444444";
+
 /** A v3 grant row: no 64 byte blob, a wrapped co-admin key and a keyring. */
 function v3Row(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    id: GRANT_ID,
     wrapped_ciphertext: null,
     grant_sig: "c2ln",
     wrapped_cak: "d3JhcHBlZC1jYWs",
@@ -62,6 +65,7 @@ describe("readCoAdminGrant", () => {
     expect(grant.wrappedCakB64).toBe("d3JhcHBlZC1jYWs");
     expect(grant.coadminKeyringCiphertextB64).toBe("c2VhbGVkLWtleXJpbmc");
     expect(grant.grantSigB64).toBe("c2ln");
+    expect(grant.grantId).toBe(GRANT_ID);
   });
 
   it("never carries a null wrapped_ciphertext forward as a string", () => {
@@ -82,6 +86,19 @@ describe("readCoAdminGrant", () => {
   it("refuses a half written v3 row", () => {
     expect(readCoAdminGrant(v3Row({ coadmin_keyring_ciphertext: null }))).toBeNull();
     expect(readCoAdminGrant(v3Row({ wrapped_cak: null }))).toBeNull();
+  });
+
+  it("refuses a v3 row that carries no row id", () => {
+    // The sealed keyring is bound to the row id, so a v3 grant without one
+    // cannot be opened. It is refused here, where the reason is nameable.
+    expect(readCoAdminGrant(v3Row({ id: null }))).toBeNull();
+    expect(readCoAdminGrant(v3Row({ id: "" }))).toBeNull();
+  });
+
+  it("still reads a v2 row that carries no row id", () => {
+    // v2 grants never bound anything to the id, so requiring it there would
+    // hide grants that work today.
+    expect(readCoAdminGrant(v2Row())?.version).toBe(2);
   });
 
   it("refuses a row carrying both envelopes at once", () => {
@@ -137,6 +154,7 @@ describe("CO_ADMIN_GRANT_COLUMNS", () => {
     // A select that omits wrapped_cak makes every v3 grant look like an empty
     // row, which the reader would then correctly but uselessly refuse.
     for (const column of [
+      "id",
       "wrapped_ciphertext",
       "grant_sig",
       "wrapped_cak",
