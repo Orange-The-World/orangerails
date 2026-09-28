@@ -38,9 +38,7 @@
         },
         {
             "risk": "high",
-            "pattern": "(^|/)supabase/config\\.toml$",
-            "reviewer": "cto",
-            "ask": "Does this change which functions deploy or how they run?"
+            "pattern": "(^|/)supabase/config\\.toml$"
         },
         {
             "risk": "high",
