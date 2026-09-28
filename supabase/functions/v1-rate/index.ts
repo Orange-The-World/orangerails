@@ -119,7 +119,7 @@ interface RateRow {
   bucket_ts: string
 }
 
-interface CoverageQuery {
+export interface CoverageQuery {
   eq(col: string, val: string): CoverageQuery
   is(col: string, val: null): CoverageQuery
   lte(col: string, val: string): CoverageQuery
@@ -129,7 +129,7 @@ interface CoverageQuery {
   maybeSingle(): Promise<{ data: RateRow | null; error: unknown }>
 }
 
-interface CoverageClient {
+export interface CoverageClient {
   from(table: string): { select(cols: string): CoverageQuery }
 }
 
