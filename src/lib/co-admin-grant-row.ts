@@ -99,6 +99,7 @@ export function readCoAdminGrant(row: unknown): CoAdminGrant | null {
   const wrappedCakB64 = presentString(fields, "wrapped_cak");
   const coadminKeyringCiphertextB64 = presentString(fields, "coadmin_keyring_ciphertext");
   const grantSigB64 = presentString(fields, "grant_sig");
+  const grantId = presentString(fields, "id");
 
   // Both envelopes at once. The database permits it (the presence rule only
   // asks for at least one), no writer produces it, and choosing one of the two
@@ -111,10 +112,14 @@ export function readCoAdminGrant(row: unknown): CoAdminGrant | null {
   }
 
   // A v3 grant needs both halves. The wrapped co-admin key alone opens
-  // nothing, and the sealed keyring alone cannot be opened.
-  if (wrappedCakB64 !== null && coadminKeyringCiphertextB64 !== null) {
+  // nothing, and the sealed keyring alone cannot be opened. It also needs its
+  // own id: that is the grantId the AAD binding was sealed under, and with no
+  // id there is no way to open it back up, so treat that the same as missing
+  // key material rather than returning a grant nothing can open.
+  if (wrappedCakB64 !== null && coadminKeyringCiphertextB64 !== null && grantId !== null) {
     return {
       version: 3,
+      grantId,
       wrappedCakB64,
       coadminKeyringCiphertextB64,
       grantSigB64,
