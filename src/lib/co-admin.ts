@@ -70,6 +70,16 @@ import { hybridEncapsulate, hybridDecapsulate, HYBRID_KEM_CIPHERTEXT_BYTES } fro
 import { unwrapPqcSecretKey } from "./pqc-lifecycle";
 import { signMemberGrant, verifyMemberGrant } from "./member-grant";
 import { formatError } from "./format-error";
+import { unwrapKeyring } from "./keyring";
+import {
+  projectKeyringForCoAdmin,
+  generateCoAdminKey,
+  sealCoAdminKeyring,
+  openCoAdminKeyring,
+  wrapCoAdminKey,
+  unwrapCoAdminKey,
+  coAdminDataKeyFor,
+} from "./co-admin-keyring";
 
 // ------------------------------------------------------------------
 // Encoding helpers
