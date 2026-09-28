@@ -561,7 +561,9 @@ export async function grantCoAdmin(params: {
   ownerKeyVersion: number;
   ownerEncMekCiphertext: string | null;
   vaultMek: CryptoKey;
-  ownerSigSecretWrapped: string;
+  ownerSigSecretWrapped?: string | null;
+  ownerKeyringCiphertextB64?: string | null;
+  ownerKeyringEpoch?: number | string | null;
   targetUserId: string;
   targetKemPubB64: string;
   existingKeyId: string | null;
@@ -576,6 +578,8 @@ export async function grantCoAdmin(params: {
     ownerEncMekCiphertext,
     vaultMek,
     ownerSigSecretWrapped,
+    ownerKeyringCiphertextB64,
+    ownerKeyringEpoch,
     targetUserId,
     targetKemPubB64,
     supabase,
