@@ -1236,6 +1236,67 @@ describe("vault recovery: the rotated meta write when its response is lost", () 
     expect(run.clearMigrationKeys).not.toHaveBeenCalled();
   });
 
+  for (const lost of LOST_SHAPES) {
+    it(`accepts a rotation whose first write landed after the read-back, when the retry matches no row (${lost})`, async () => {
+      // The first response is lost and the read-back still shows the prior row,
+      // so the write is retried. The first write then lands, as a slow request
+      // does, so the retry's compare-and-swap on the prior recovery ciphertext
+      // matches nothing and answers with no error and no row. Reading that as a
+      // failed save tells the user the vault still opens with the OLD password
+      // when the rotation actually landed.
+      const run = await rotateWithScriptedMetaClient({
+        writes: [lost, { answer: { data: [], error: null } }],
+        readBacks: [{ row: PRIOR_META_ROW }, { row: ROTATED_META_ROW }],
+      });
+
+      expect(run.failed).toBe(false);
+      expect(run.updates).toHaveLength(2);
+      // Exactly one read-back beyond the one that sent the write to its retry.
+      expect(run.readBacks).toHaveLength(2);
+      expect(run.readBacks[1]?.filters).toContainEqual({ column: "user_id", value: "user-1" });
+      expect(run.sleep).toHaveBeenCalledTimes(1);
+      // The write is proven, so the stashed subkeys are cleared exactly once.
+      expect(run.clearMigrationKeys).toHaveBeenCalledTimes(1);
+    });
+  }
+
+  it("accepts the same late landing when the zero-row answer comes on a later attempt", async () => {
+    const run = await rotateWithScriptedMetaClient({
+      writes: ["lost-throws", "lost-error-result", { answer: { data: [], error: null } }],
+      readBacks: [{ row: PRIOR_META_ROW }, { row: PRIOR_META_ROW }, { row: ROTATED_META_ROW }],
+    });
+
+    expect(run.failed).toBe(false);
+    expect(run.updates).toHaveLength(3);
+    expect(run.readBacks).toHaveLength(3);
+    expect(run.sleep).toHaveBeenCalledTimes(2);
+    expect(run.clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  const ZERO_ROW_NOT_LANDED: Array<{ name: string; readBack: ScriptedReadBack }> = [
+    { name: "the row still holds the prior values", readBack: { row: PRIOR_META_ROW } },
+    ...UNSETTLED_READ_BACKS,
+  ];
+
+  for (const { name, readBack } of ZERO_ROW_NOT_LANDED) {
+    it(`returns the zero-row answer unchanged after one read-back when ${name}`, async () => {
+      // The read-back only ever turns a zero-row answer into a success when all
+      // three rotated values are present. Anything else leaves the answer as it
+      // was, so the caller raises the same message it raised before, and the
+      // migration keys stay.
+      const run = await rotateWithScriptedMetaClient({
+        writes: ["lost-throws", { answer: { data: [], error: null } }],
+        readBacks: [{ row: PRIOR_META_ROW }, readBack],
+      });
+
+      expect(run.failed).toBe(true);
+      expect(run.message).toContain(RECOVERY_META_NOT_SAVED_MESSAGE);
+      expect(run.updates).toHaveLength(2);
+      expect(run.readBacks).toHaveLength(2);
+      expect(run.clearMigrationKeys).not.toHaveBeenCalled();
+    });
+  }
+
   it("does not read back an answer that arrived with no error and matched one row", async () => {
     const run = await rotateWithScriptedMetaClient({
       writes: [{ answer: { data: [{ user_id: "user-1" }], error: null } }],
