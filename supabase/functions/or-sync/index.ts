@@ -130,28 +130,26 @@ export function redactedUpstreamDetail(raw: string): string {
     .replace(/\b([a-z]{1,8})_[A-Za-z0-9]{6,}\b/gi, '$1_[redacted]')
     .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<uuid>')
     .replace(/[A-Za-z0-9+/]{40,}={0,2}/g, '<token>')
-    // Redact ANY standalone 6+ digit run unconditionally: long enough on its
-    // own to be an identifier (member/account/phone-like), so a keyword
-    // allowlist at this length is inherently incomplete -- the pre-existing
-    // pinned test (redact-detail.test.ts) uses "member 998877665544", and
-    // "member", "user", "customer", "wallet" and others could equally well
-    // precede a real one. Same threshold the sibling helper already uses
-    // with no keyword gate at all: redactProviderError, or-quiltt-sync/
-    // resolve.ts (`\b\d{6,}\b`).
-    .replace(/\b\d{6,}\b/g, '[redacted]')
-    // Below 6 digits, only redact a digit run when an account/card/reference
-    // keyword sits within 20 non-digit characters before it. A blanket \d{4,} match here
-    // used to strip every 4+ digit number in the line, including HTTP status
-    // codes, retry-after seconds, amounts and timestamps that carry no PII at
-    // all (QA, OR-T0362, 2026-08-28: "over-redaction destroys the diagnostic
-    // is a failure of this ticket, not a success").
+    // Keyword-gated pass runs FIRST (OR-T0362 / OR-C2021). It must claim an
+    // unevenly-grouped number (e.g. "123-4567890") in full, WHILE the
+    // keyword is still next to it, before anything else can split it.
     //
     // The captured digit run includes internal spaces and hyphens so a value
-    // written as several groups (1234-5678-9012-3456) is matched and redacted
-    // WHOLE. An earlier attempt stopped after the first group: the global
-    // pass then needed another keyword before it would match again, so every
-    // later group survived untouched. That completeness gap is what this
-    // version fixes.
+    // written as several groups (1234-5678-9012-3456, or 123-4567890) is
+    // matched and redacted WHOLE. An earlier attempt stopped after the first
+    // group: the global pass then needed another keyword before it would
+    // match again, so every later group survived untouched. That
+    // completeness gap is what a previous version of this fix addressed.
+    //
+    // Running this pass AFTER the unconditional 6+ digit strip reopened the
+    // same class of bug from the other end: the unconditional pass, run
+    // first, matched a long sub-group (e.g. the 7-digit "4567890" half of
+    // "123-4567890") on its own -- a hyphen is a word boundary -- leaving
+    // the connected short sub-group ("123", 3 digits) stranded below this
+    // pass's 4-digit floor once the string had already been fragmented by
+    // "[redacted]". OR-C2021 repro: redactedUpstreamDetail('Account
+    // 123-4567890 declined') left "123" in plaintext. Running this pass
+    // first means it always sees the number intact.
     .replace(
       /\b(account|acct|card|reference|ref)\b([^0-9]{0,20})(\d(?:[\d\s-]*\d)?)/gi,
       (whole: string, keyword: string, gap: string, digits: string): string => {
@@ -159,6 +157,21 @@ export function redactedUpstreamDetail(raw: string): string {
         return digitCount >= 4 ? `${keyword}${gap}[redacted]` : whole;
       },
     )
+    // Redact ANY remaining standalone 6+ digit run unconditionally: long
+    // enough on its own to be an identifier (member/account/phone-like), so
+    // a keyword allowlist at this length is inherently incomplete -- the
+    // pre-existing pinned test (redact-detail.test.ts) uses "member
+    // 998877665544", and "member", "user", "customer", "wallet" and others
+    // could equally well precede a real one. Same threshold the sibling
+    // helper already uses with no keyword gate at all: redactProviderError,
+    // or-quiltt-sync/resolve.ts (`\b\d{6,}\b`). Running second means it can
+    // only ever see whatever digits the keyword pass above left behind, so
+    // it cannot re-fragment a number the keyword pass already claimed whole;
+    // below 6 digits with no keyword nearby (HTTP status codes, retry-after
+    // seconds, amounts, timestamps) is intentionally left untouched (QA,
+    // OR-T0362, 2026-08-28: "over-redaction destroys the diagnostic is a
+    // failure of this ticket, not a success").
+    .replace(/\b\d{6,}\b/g, '[redacted]')
     .slice(0, 300);
 }
 
