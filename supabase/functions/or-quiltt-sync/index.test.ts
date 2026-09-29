@@ -185,6 +185,58 @@ Deno.test('retireConnRace: sets retirement_reason without the max-attempts prefi
   assertEquals('processed_at' in (patch ?? {}), true, 'must set processed_at so the row leaves the pending batch');
 });
 
+// ── OR-T0256: shared chainable mock builder ───────────────────────────
+//
+// The hand-rolled Supabase mocks below only implement the query-builder
+// methods each test happens to call today. Twice already (see this
+// ticket's history) a production change added a call the mock did not implement (a new .in()),
+// and the failure surfaced as a TypeError in an UNRELATED, already-passing
+// test rather than anywhere near the real change.
+//
+// chainable() wraps a mock object in a Proxy so any method NOT explicitly
+// defined returns the same live chain instead of throwing. Every method a
+// test DOES define still behaves exactly as written; this only changes
+// what happens for a chain call nobody anticipated. It also auto-wraps
+// whatever an existing method returns (recursively), so wrapping just the
+// outermost client is enough -- individual chain/ch objects nested inside
+// from() do not need to be touched.
+// deno-lint-ignore no-explicit-any
+function chainable<T extends object>(target: T): T {
+  // deno-lint-ignore no-explicit-any
+  let proxy: any;
+  // deno-lint-ignore no-explicit-any
+  const handler: ProxyHandler<any> = {
+    get(obj, prop, receiver) {
+      if (typeof prop === 'symbol') return Reflect.get(obj, prop, receiver);
+      if (!(prop in obj)) {
+        // Never synthesize `.then`. If we did, an unfinished mock chain
+        // would become a thenable whose promise never settles, so
+        // `await chain.someUnimplementedCall()` would hang forever instead
+        // of either throwing (the old, loud failure mode) or resolving to
+        // the chain itself (plain-object await semantics, unaffected by
+        // this wrapper). undefined here keeps `await proxy` behaving like
+        // `await` on a normal, non-thenable object.
+        if (prop === 'then') return undefined;
+        // Unimplemented chain method (e.g. a new .in() or .not()): swallow
+        // the call and stay chainable instead of "X is not a function".
+        return (..._args: unknown[]) => proxy;
+      }
+      const value = obj[prop];
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        const result = value.apply(receiver, args);
+        // Never wrap a live Promise -- terminal calls must resolve untouched.
+        if (result && typeof result === 'object' && !(result instanceof Promise)) {
+          return chainable(result);
+        }
+        return result;
+      };
+    },
+  };
+  proxy = new Proxy(target as Record<string, unknown>, handler);
+  return proxy as T;
+}
+
 // ── fetchPendingBatch: batch query filter ─────────────────────────────
 //
 // This test is the regression guard for Auditor requirement 2.
@@ -195,7 +247,7 @@ Deno.test('retireConnRace: sets retirement_reason without the max-attempts prefi
 Deno.test('fetchPendingBatch: filters processed_at AND opk_deferred_at as null', async () => {
   const isFilters: Array<[string, unknown]> = [];
 
-  const mockClient = {
+  const mockClient = chainable({
     from(_table: string) {
       const chain = {
         select(_cols: string) { return chain; },
@@ -210,7 +262,7 @@ Deno.test('fetchPendingBatch: filters processed_at AND opk_deferred_at as null',
       };
       return chain;
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   await fetchPendingBatch(mockClient as any, 20);
@@ -227,7 +279,7 @@ Deno.test('fetchPendingBatch: filters processed_at AND opk_deferred_at as null',
 // ── handleEvent: deferred return when opk_public is null ─────────────
 
 Deno.test('handleEvent: returns deferred when subaccount has no opk_public', async () => {
-  const mockClient = {
+  const mockClient = chainable({
     from(table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -249,7 +301,7 @@ Deno.test('handleEvent: returns deferred when subaccount has no opk_public', asy
       };
       return chain;
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-1',
@@ -277,7 +329,7 @@ Deno.test('handleEvent: returns deferred when subaccount has no opk_public', asy
 Deno.test('handleEvent: dispatches errored event, reconciles connection to error, returns processed', async () => {
   let updateCalled = false;
 
-  const mockClient = {
+  const mockClient = chainable({
     from(table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -308,7 +360,7 @@ Deno.test('handleEvent: dispatches errored event, reconciles connection to error
       };
       return chain;
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-err-1',
@@ -505,7 +557,7 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred rows 
   };
 
   // Build a simpler mock: step-1 promise returns empty.
-  const simpleMock = {
+  const simpleMock = chainable({
     from(_table: string) {
       return {
         select() { return this; },
@@ -525,7 +577,7 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred rows 
         },
       };
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   const result = await reDriveReadyDeferrals(simpleMock as any);
@@ -541,7 +593,7 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred subac
   let updateCalled = false;
   let callCount    = 0;
 
-  const mockClient = {
+  const mockClient = chainable({
     from(table: string) {
       callCount++;
       const call = callCount;
@@ -585,7 +637,7 @@ Deno.test('reDriveReadyDeferrals: returns { reDriven: 0 } when no deferred subac
       // unexpected table
       return chain;
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   const result = await reDriveReadyDeferrals(mockClient as any);
@@ -600,7 +652,7 @@ Deno.test('reDriveReadyDeferrals: clears opk_deferred_at for OPK-ready subaccoun
   let inFilter: string[] = [];
   let callSeq = 0;
 
-  const mockClient = {
+  const mockClient = chainable({
     from(table: string) {
       callSeq++;
       const seq = callSeq;
@@ -652,7 +704,7 @@ Deno.test('reDriveReadyDeferrals: clears opk_deferred_at for OPK-ready subaccoun
       }
       return { select() { return this; }, is() { return this; }, not() { return Promise.resolve({ data: [], error: null }); } };
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   const result = await reDriveReadyDeferrals(mockClient as any);
@@ -677,7 +729,7 @@ Deno.test('reDriveReadyDeferrals: clears opk_deferred_at for OPK-ready subaccoun
 });
 
 Deno.test('reDriveReadyDeferrals: returns error string when first query fails, does not throw', async () => {
-  const mockClient = {
+  const mockClient = chainable({
     from(_table: string) {
       return {
         select() { return this; },
@@ -689,7 +741,7 @@ Deno.test('reDriveReadyDeferrals: returns error string when first query fails, d
         },
       };
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   const result = await reDriveReadyDeferrals(mockClient as any);
@@ -712,7 +764,7 @@ Deno.test('reDriveReadyDeferrals: re-drives sink platform subaccounts with no op
   let callSeq = 0;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(table: string) {
       callSeq++;
       const seq = callSeq;
@@ -778,7 +830,7 @@ Deno.test('reDriveReadyDeferrals: re-drives sink platform subaccounts with no op
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, is() { return this as any; }, not() { return Promise.resolve({ data: [], error: null }); } };
     },
-  };
+  });
 
   const result = await reDriveReadyDeferrals(mockClient);
   assertEquals(result.reDriven, 1, 'reDriven must be 1: the sink event is cleared');
@@ -813,7 +865,7 @@ function makeQuilttSyncMock(opts: {
   opkPublic?: string;
 }): { client: any; inserted: string[]; cleanup: () => void } {
   const inserted: string[] = [];
-  const client = {
+  const client = chainable({
     from(table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -878,7 +930,7 @@ function makeQuilttSyncMock(opts: {
     rpc(_name: string) {
       return Promise.resolve({ data: 'stubtoken', error: null });
     },
-  };
+  });
   const origFetch = (globalThis as any).fetch;
   // Patch global fetch for Quiltt GraphQL calls.
   // When source_wallets is empty the code does a GetAccounts pre-fetch (DL-0741)
@@ -1014,7 +1066,7 @@ Deno.test('DL-0442 account filter: source_wallets DB error -- handleEvent errors
 Deno.test('markDeferred: updates opk_deferred_at field on the correct row', async () => {
   const updates: Array<{ patch: Record<string, unknown>; id: string }> = [];
 
-  const mockClient = {
+  const mockClient = chainable({
     from(_table: string) {
       let pendingPatch: Record<string, unknown> | null = null;
       // deno-lint-ignore no-explicit-any
@@ -1033,7 +1085,7 @@ Deno.test('markDeferred: updates opk_deferred_at field on the correct row', asyn
       };
       return chain;
     },
-  };
+  });
 
   // deno-lint-ignore no-explicit-any
   await markDeferred(mockClient as any, 'evt-xyz');
@@ -1073,7 +1125,7 @@ Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as succe
   let connectionsCallCount = 0;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(table: string) {
       if (table === 'connections') {
         connectionsCallCount++;
@@ -1119,7 +1171,7 @@ Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as succe
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, eq() { return this as any; } };
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-sink-23505',
@@ -1140,7 +1192,7 @@ Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as succe
 
 Deno.test('handleEventSinkDelivery: non-23505 insert error surfaces as error string', async () => {
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(table: string) {
       if (table === 'connections') {
         return {
@@ -1156,7 +1208,7 @@ Deno.test('handleEventSinkDelivery: non-23505 insert error surfaces as error str
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, eq() { return this as any; } };
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-sink-dberr',
@@ -1241,7 +1293,7 @@ Deno.test('DL-1445: errored subtypes map to the catalog, unknown subtypes still 
 function errorReconcileClient(sinkFormat: string | null) {
   const captured: { patch?: Record<string, unknown> } = {};
   // deno-lint-ignore no-explicit-any
-  const client: any = {
+  const client: any = chainable({
     from(table: string) {
       if (table === 'platforms') {
         // deno-lint-ignore no-explicit-any
@@ -1268,7 +1320,7 @@ function errorReconcileClient(sinkFormat: string | null) {
       };
       return chain;
     },
-  };
+  });
   return { client, captured };
 }
 
@@ -1323,7 +1375,7 @@ Deno.test('DL-1445 follow-up: a platforms read failure must not stop the status 
   let captured: Record<string, unknown> | undefined;
 
   // deno-lint-ignore no-explicit-any
-  const client: any = {
+  const client: any = chainable({
     from(table: string) {
       if (table === 'platforms') {
         // deno-lint-ignore no-explicit-any
@@ -1351,7 +1403,7 @@ Deno.test('DL-1445 follow-up: a platforms read failure must not stop the status 
       };
       return chain;
     },
-  };
+  });
 
   const err = await reconcileConnectionError(client, erroredEvent, 'sub-1');
 
@@ -1380,7 +1432,7 @@ Deno.test('DL-1409: sink delivery inserts an ACTIVE connection, never pending', 
   let insertedStatus: string | undefined;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(table: string) {
       if (table === 'connections') {
         return {
@@ -1410,7 +1462,7 @@ Deno.test('DL-1409: sink delivery inserts an ACTIVE connection, never pending', 
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, eq() { return this as any; } };
     },
-  };
+  });
 
   const ev = {
     event_id:      'evt-dl1409',
@@ -1434,7 +1486,7 @@ Deno.test('DL-1409: a successful Quiltt sync clears pending as well as error', a
   let statusFilter: string[] | undefined;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(_table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -1452,7 +1504,7 @@ Deno.test('DL-1409: a successful Quiltt sync clears pending as well as error', a
       };
       return chain;
     },
-  };
+  });
 
   const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-1', 'sub-1');
 
@@ -1740,7 +1792,7 @@ Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending'
   let lookupCalls = 0;
 
   // deno-lint-ignore no-explicit-any
-  const mockClient: any = {
+  const mockClient: any = chainable({
     from(_table: string) {
       // deno-lint-ignore no-explicit-any
       const chain: any = {
@@ -1767,7 +1819,7 @@ Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending'
       };
       return chain;
     },
-  };
+  });
 
   const err = await reconcileConnectionSuccess(mockClient, 'quiltt-conn-unknown', 'sub-1');
 
