@@ -256,6 +256,30 @@ export async function storeTransactionsAtomic(
 }
 
 /**
+ * OR-T2457: The handler's exact write call site, exported for handler-level
+ * test coverage. The handler calls this instead of storeTransactionsAtomic
+ * directly; tests import it and call it with a fake service client that
+ * implements ONLY rpc() (not .from() for writes). Changing the body to use
+ * .from().upsert() causes that fake client to throw, turning both
+ * handler-level tests in index.test.ts red. Removing this export causes an
+ * import failure that turns every test in that file red.
+ */
+// deno-lint-ignore no-explicit-any
+export async function invokeBatchWrite(
+  serviceClient: any,
+  params: {
+    connection_id: string;
+    platform_id: string;
+    scan_generation: string;
+    rows: unknown[];
+    cursor_advance: number;
+    sync_at: string;
+  },
+): Promise<{ http_status: 200 | 404 | 409; inserted: number } | { rpc_error: string }> {
+  return storeTransactionsAtomic(serviceClient, params);
+}
+
+/**
  * Response cursor derivation (DL-0419). Returns the effective stored cursor
  * AFTER this call, derived only from stored state, never raised by the client
  * scan tip (body.last_block_scanned). Advances only when new rows landed and
@@ -507,7 +531,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // UPDATE), re-checks scan_generation, and returns 409 without inserting
     // anything if they differ -- closing the TOCTOU race the two-step JS
     // sequence (separate upsert + cursor UPDATE) could not close.
-    const atomicResult = await storeTransactionsAtomic(ctx.serviceClient, {
+    const atomicResult = await invokeBatchWrite(ctx.serviceClient, {
       connection_id:   body.connection_id!,
       platform_id:     callerPlatformId,
       scan_generation: body.scan_generation!,
