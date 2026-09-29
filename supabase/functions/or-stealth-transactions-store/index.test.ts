@@ -30,6 +30,7 @@ import {
   isValidAppUserId,
   UUID_RE,
   storeTransactionsAtomic,
+  invokeBatchWrite,
 } from './index.ts';
 
 // ── DL-0608: cuid app_user_id must pass validation ────────────────────
@@ -565,5 +566,90 @@ Deno.test(
     assert(!UUID_RE.test('not-a-uuid'), 'non-uuid string must fail UUID_RE -> 400 guard fires');
     assert(UUID_RE.test(VALID_GEN), 'a well-formed uuid must pass UUID_RE -> guard does not fire');
     assert(UUID_RE.test(FRESH_GEN), 'a well-formed uuid must pass UUID_RE -> guard does not fire');
+  },
+);
+
+// ── OR-T2457: handler-level fence regression ──────────────────────────────────
+//
+// These tests call invokeBatchWrite(), the EXACT function the handler calls
+// (see index.ts line ~534). Testing storeTransactionsAtomic in isolation does
+// not cover the handler call site: if the handler stops calling
+// storeTransactionsAtomic (and calls .from().upsert() directly), those tests
+// remain green because they import the function without going through the
+// handler. These handler-level tests close that gap:
+//
+//   - invokeBatchWrite is imported from index.ts; removing that export turns
+//     every test in this file red at import time.
+//   - changing invokeBatchWrite to call .from().upsert() instead of rpc()
+//     throws on makeAtomicFakeClient (rpc-only; no .from() for writes).
+//   - the handler calls invokeBatchWrite, not storeTransactionsAtomic directly,
+//     so these tests cover the real handler call path.
+
+Deno.test(
+  'OR-T2457 handler-level: stale scan_generation via invokeBatchWrite produces 409 and zero rows',
+  async () => {
+    // Scenario: the connection was reset (generation rotated to FRESH_GEN)
+    // while a sync was in flight. The stale sync still carries VALID_GEN.
+    // The handler must refuse without committing any rows.
+    const db = {
+      connections: [{ id: 'conn-1', scan_generation: FRESH_GEN, last_block_scanned: null as number | null }],
+      transactions: [] as Array<{ connection_id: string; txid_blind_index_hex: string }>,
+    };
+    const client = makeAtomicFakeClient(db);
+
+    const result = await invokeBatchWrite(client, {
+      connection_id:   'conn-1',
+      platform_id:     'plat-1',
+      scan_generation: VALID_GEN,   // stale: DB has FRESH_GEN
+      rows:            [makeTxRow('a'.repeat(64))],
+      cursor_advance:  500_000,
+      sync_at:         new Date().toISOString(),
+    });
+
+    assert(!('rpc_error' in result), 'rpc must not error: ' + JSON.stringify(result));
+    assertEquals(
+      (result as { http_status: number }).http_status,
+      409,
+      'stale generation must produce 409',
+    );
+    assertEquals(db.transactions.length, 0, 'stale write must commit zero rows');
+    assertEquals(
+      db.connections[0].last_block_scanned,
+      null,
+      'stale write must not advance the cursor',
+    );
+  },
+);
+
+Deno.test(
+  'OR-T2457 handler-level: fresh scan_generation via invokeBatchWrite succeeds and commits rows',
+  async () => {
+    const db = {
+      connections: [{ id: 'conn-1', scan_generation: FRESH_GEN, last_block_scanned: null as number | null }],
+      transactions: [] as Array<{ connection_id: string; txid_blind_index_hex: string }>,
+    };
+    const client = makeAtomicFakeClient(db);
+
+    const result = await invokeBatchWrite(client, {
+      connection_id:   'conn-1',
+      platform_id:     'plat-1',
+      scan_generation: FRESH_GEN,   // fresh: matches DB
+      rows:            [makeTxRow('b'.repeat(64))],
+      cursor_advance:  500_000,
+      sync_at:         new Date().toISOString(),
+    });
+
+    assert(!('rpc_error' in result), 'rpc must not error: ' + JSON.stringify(result));
+    assertEquals(
+      (result as { http_status: number }).http_status,
+      200,
+      'fresh generation must produce 200',
+    );
+    assertEquals(db.transactions.length, 1, 'fresh write must commit the row');
+    assertEquals(
+      db.connections[0].last_block_scanned,
+      500_000,
+      'fresh write must advance the cursor to cursor_advance',
+    );
   },
 );
