@@ -16,7 +16,6 @@
 import {
   assertEquals,
   assert,
-  assertNotEquals,
   assertStrictEquals,
 } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import {
@@ -29,6 +28,8 @@ import {
   isContiguousScannedHeight,
   isSealedTx,
   isValidAppUserId,
+  UUID_RE,
+  storeTransactionsAtomic,
 } from './index.ts';
 
 // ── DL-0608: cuid app_user_id must pass validation ────────────────────
@@ -427,74 +428,142 @@ Deno.test('OR-T1914: the ceiling this function exports IS the shared one, not a 
 
 // ── OR-T2457: generation fence on the transactions-store path ─────────────────
 //
-// The handler accepts scan_generation (uuid, required) and refuses:
-//   400 when the value is absent or not a UUID (same rule as envelope-update).
-//   409 when the stored scan_generation differs from the supplied one
-//       (connection was reset while this sync was running).
+// The atomicity guarantee now lives inside store_stealth_transactions_atomic(),
+// a Postgres function that runs the generation check, the INSERT and the cursor
+// patch under a single row-level lock (SELECT ... FOR UPDATE). A concurrent
+// envelope reset cannot commit stale rows: the lock prevents the race window
+// the two-step JS sequence (separate upsert + cursor UPDATE) left open.
 //
-// These tests exercise the two predicates that gate those paths. The fence
-// itself is in the HTTP handler; the test uses the same UUID_RE the handler
-// imports so a relaxation of that regex would turn both 400 cases green
-// before they should be.
+// The tests below call the REAL storeTransactionsAtomic() exported from index.ts
+// (not a paraphrase of its logic) against a fake service client, so:
+//   - removing storeTransactionsAtomic: import failure
+//   - replacing the rpc() call inside it with direct .from().upsert(): the fake
+//     client does not implement .from(), so the call throws and the tests fail
+//   - removing UUID_RE: the import above fails and every test in this file fails
 //
-// The full reset-then-stale-write end-to-end scenario (envelope replaced,
-// in-flight sync posts its cursor) is covered at the envelope-update level
-// in or-stealth-envelope-update/generation_fence.test.ts. The transactions-
-// store fence closes the same race on the upload path.
+// Honest limit: the Postgres function itself runs in the real database and is
+// not exercised here; its SQL is reviewed via the migration file
+// (20260929000000_store_stealth_transactions_atomic.sql).
 
-const UUID_RE_FOR_TEST = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const VALID_GEN   = '11111111-1111-1111-1111-111111111111';
-const STALE_GEN   = '22222222-2222-2222-2222-222222222222';
-const FRESH_GEN   = '33333333-3333-3333-3333-333333333333';
+const VALID_GEN = '11111111-1111-1111-1111-111111111111';
+const FRESH_GEN = '33333333-3333-3333-3333-333333333333';
 
-Deno.test('OR-T2457: scan_generation is required and must be a uuid (400 path)', () => {
-  // These are the three shapes that trigger the 400 guard in the handler:
-  //   if (!body.scan_generation || !UUID_RE.test(body.scan_generation))
-  // undefined and '' are caught by the falsy branch (!body.scan_generation);
-  // non-uuid strings are caught by the regex branch. Asserting !undefined or
-  // !'' directly triggers TS2873 (always-falsy operand) -- test the regex
-  // branch instead, which exercises the only non-trivial path.
-  assert(
-    !UUID_RE_FOR_TEST.test('not-a-uuid'),
-    'non-uuid string fails UUID_RE -> 400 guard fires',
-  );
-  assert(
-    UUID_RE_FOR_TEST.test(VALID_GEN),
-    'a well-formed uuid passes UUID_RE -> guard does not fire',
-  );
-});
+function makeTxRow(blindHex: string): Record<string, unknown> {
+  return {
+    connection_id: 'conn-1',
+    sealed_record: { version: 1, algorithm: 'AES-256-GCM', iv_b64: 'aWQ=', ciphertext_b64: 'Y2k=' },
+    occurred_at: '2024-01-01',
+    block_height: 500_000,
+    txid_blind_index_hex: blindHex,
+    block_hash: null,
+  };
+}
 
-Deno.test('OR-T2457: a stale scan_generation (stored != supplied) triggers 409, a matching one does not', () => {
-  // The handler reads scan_generation from the ownership row and compares:
-  //   if ((ownerRow.scan_generation as string) !== body.scan_generation)
-  // This test reproduces the comparison predicate directly.
-  //
-  // Scenario: a sync started under VALID_GEN, the connection was reset
-  // (envelope replaced) to FRESH_GEN, and the in-flight sync is now
-  // uploading transactions still carrying VALID_GEN.
-  const storedAfterReset  = FRESH_GEN;  // what the reset wrote
-  const suppliedByStale   = VALID_GEN;  // what the pre-reset sync carries
+// deno-lint-ignore no-explicit-any
+function makeAtomicFakeClient(db: {
+  connections: Array<{ id: string; scan_generation: string; last_block_scanned: number | null }>;
+  transactions: Array<{ connection_id: string; txid_blind_index_hex: string }>;
+}): any {
+  return {
+    rpc(fnName: string, params: Record<string, unknown>) {
+      if (fnName !== 'store_stealth_transactions_atomic') {
+        return Promise.reject(new Error('unexpected rpc: ' + fnName));
+      }
+      const conn = db.connections.find((c) => c.id === params['p_connection_id']);
+      if (!conn) return Promise.resolve({ data: { http_status: 404, inserted: 0 }, error: null });
+      if (conn.scan_generation !== params['p_generation']) {
+        // Generation mismatch: no rows committed, mirroring the Postgres function.
+        return Promise.resolve({ data: { http_status: 409, inserted: 0 }, error: null });
+      }
+      const rows = params['p_rows'] as Array<{ txid_blind_index_hex: string }>;
+      let cnt = 0;
+      for (const row of rows) {
+        const dup = db.transactions.some(
+          (t) => t.connection_id === conn.id && t.txid_blind_index_hex === row.txid_blind_index_hex,
+        );
+        if (!dup) {
+          db.transactions.push({ connection_id: conn.id, txid_blind_index_hex: row.txid_blind_index_hex });
+          cnt++;
+        }
+      }
+      const advance = params['p_cursor_advance'] as number;
+      if (cnt > 0 && advance > (conn.last_block_scanned ?? -1)) conn.last_block_scanned = advance;
+      return Promise.resolve({ data: { http_status: 200, inserted: cnt }, error: null });
+    },
+  };
+}
 
-  assertNotEquals(
-    storedAfterReset,
-    suppliedByStale,
-    'stored and supplied differ after a reset -> 409 condition is true',
-  );
+Deno.test(
+  'OR-T2457: stale scan_generation produces 409 and commits zero rows (handler-level)',
+  async () => {
+    // Scenario: the connection was reset (generation rotated to FRESH_GEN)
+    // while a sync was in flight.  The stale sync still carries VALID_GEN.
+    // The fence must refuse without committing any rows.
+    const db = {
+      connections: [{ id: 'conn-1', scan_generation: FRESH_GEN, last_block_scanned: null as number | null }],
+      transactions: [] as Array<{ connection_id: string; txid_blind_index_hex: string }>,
+    };
+    const client = makeAtomicFakeClient(db);
 
-  // A sync that genuinely started after the reset carries the new generation;
-  // the fence must not block it.
-  const suppliedByFresh = FRESH_GEN;
-  assertEquals(
-    storedAfterReset,
-    suppliedByFresh,
-    'stored and supplied match for a post-reset sync -> 409 condition is false, write proceeds',
-  );
+    const result = await storeTransactionsAtomic(client, {
+      connection_id:   'conn-1',
+      platform_id:     'plat-1',
+      scan_generation: VALID_GEN,
+      rows:            [makeTxRow('a'.repeat(64))],
+      cursor_advance:  500_000,
+      sync_at:         new Date().toISOString(),
+    });
 
-  // A stale generation heading to the WRONG token (impossible in practice
-  // but tests that the predicate is directional, not just "any mismatch").
-  assertNotEquals(
-    STALE_GEN,
-    VALID_GEN,
-    'STALE_GEN and VALID_GEN differ -> fence fires for this case too',
-  );
-});
+    assert(!('rpc_error' in result), 'rpc must not error: ' + JSON.stringify(result));
+    assertEquals(
+      (result as { http_status: number }).http_status,
+      409,
+      'stale generation must produce 409',
+    );
+    assertEquals(db.transactions.length, 0, 'stale write must commit zero rows');
+    assertEquals(
+      db.connections[0].last_block_scanned,
+      null,
+      'stale write must not advance the cursor',
+    );
+  },
+);
+
+Deno.test(
+  'OR-T2457: fresh scan_generation succeeds and commits the rows (handler-level)',
+  async () => {
+    const db = {
+      connections: [{ id: 'conn-1', scan_generation: FRESH_GEN, last_block_scanned: null as number | null }],
+      transactions: [] as Array<{ connection_id: string; txid_blind_index_hex: string }>,
+    };
+    const client = makeAtomicFakeClient(db);
+
+    const result = await storeTransactionsAtomic(client, {
+      connection_id:   'conn-1',
+      platform_id:     'plat-1',
+      scan_generation: FRESH_GEN,
+      rows:            [makeTxRow('a'.repeat(64))],
+      cursor_advance:  500_000,
+      sync_at:         new Date().toISOString(),
+    });
+
+    assert(!('rpc_error' in result), 'rpc must not error: ' + JSON.stringify(result));
+    assertEquals(
+      (result as { http_status: number }).http_status,
+      200,
+      'fresh generation must succeed',
+    );
+    assertEquals(db.transactions.length, 1, 'fresh write must commit the row');
+  },
+);
+
+Deno.test(
+  'OR-T2457: scan_generation uuid check uses the real UUID_RE from the handler',
+  () => {
+    // Importing UUID_RE directly (not a local copy) means removing or relaxing
+    // the regex in the handler turns this test red at import time.
+    assert(!UUID_RE.test('not-a-uuid'), 'non-uuid string must fail UUID_RE -> 400 guard fires');
+    assert(UUID_RE.test(VALID_GEN), 'a well-formed uuid must pass UUID_RE -> guard does not fire');
+    assert(UUID_RE.test(FRESH_GEN), 'a well-formed uuid must pass UUID_RE -> guard does not fire');
+  },
+);
