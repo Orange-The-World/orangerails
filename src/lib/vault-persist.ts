@@ -487,6 +487,11 @@ export interface RotateVaultArgs {
   migrateCredentialsCiphertext: (ciphertext: string) => Promise<string>;
   migrateTransactionCiphertext: (ciphertext: string) => Promise<string>;
   clearMigrationKeys: () => void;
+  /**
+   * Waits between attempts at the final meta write. Injectable so a test does
+   * not sit through real delays. Defaults to a real timer.
+   */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** The user_vault_meta columns a vault recovery needs before it can begin. */
@@ -562,6 +567,121 @@ function raiseRotationFailure(cause: unknown, rowsAlreadyWritten: boolean): neve
 }
 
 /**
+ * How many times the final meta write is attempted when its response keeps
+ * getting lost, and how long to wait between attempts. Four attempts a second
+ * apart bound the wait at three seconds, which rides out a dropped connection
+ * or a brief gateway error without leaving the user waiting long while the only
+ * copy of the new MEK sits in the page.
+ */
+export const META_WRITE_ATTEMPTS = 4;
+export const META_WRITE_RETRY_MS = 1000;
+
+function realSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+type MetaReadBack = "landed" | "not-landed" | "unknown";
+
+/**
+ * Reads the user_vault_meta row back and judges it against the write that just
+ * failed to answer. Landed only when the recovery ciphertext, the verifier and
+ * the key version all hold the rotated values. Not landed only when the row
+ * still carries the prior recovery ciphertext. Anything else, including a read
+ * that errors, returns no row or throws, is unknown, and the caller must not
+ * guess.
+ */
+async function readBackRotatedMeta(
+  supabase: VaultPersistClient,
+  userId: string,
+  priorRecoveryCiphertext: string,
+  rotatedMeta: Record<string, unknown>,
+): Promise<MetaReadBack> {
+  try {
+    const { data, error } = await supabase
+      .from("user_vault_meta")
+      .select("recovery_ciphertext, vault_verifier_ciphertext, vault_key_version")
+      .eq("user_id", userId)
+      .single();
+    if (error || !data) return "unknown";
+    const row = data as Record<string, unknown>;
+    if (
+      row.recovery_ciphertext === rotatedMeta.recovery_ciphertext &&
+      row.vault_verifier_ciphertext === rotatedMeta.vault_verifier_ciphertext &&
+      row.vault_key_version === rotatedMeta.vault_key_version
+    ) {
+      return "landed";
+    }
+    if (row.recovery_ciphertext === priorRecoveryCiphertext) return "not-landed";
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+interface MetaWriteArgs {
+  supabase: VaultPersistClient;
+  userId: string;
+  priorRecoveryCiphertext: string;
+  rotatedMeta: Record<string, unknown>;
+  rowsAlreadyWritten: boolean;
+  sleep: (ms: number) => Promise<void>;
+}
+
+/**
+ * Writes the rotated meta, and does not take a lost response for a failed
+ * write. The statement is compare-and-swap on the prior recovery ciphertext, so
+ * a blind second attempt after a write that DID land matches zero rows and would
+ * report the recovery as failed when it succeeded. So an attempt that throws, or
+ * comes back with an error and no row, is read back first:
+ *
+ *   landed      the write happened. Return a one row result so the caller's
+ *               checks pass exactly as they do for a normal success.
+ *   not landed  it did not. Wait and try again, up to META_WRITE_ATTEMPTS.
+ *   unknown     the read cannot settle it. Raise the original failure, the same
+ *               one this path raised before, and do not retry.
+ *
+ * An answer that carries no error, one row or a zero row compare-and-swap miss,
+ * is trusted and returned untouched for the caller to judge.
+ *
+ * This retries only this one statement. It does not make the row migration
+ * above retryable: see the note on the meta write in
+ * migrateAndPersistRotatedVault, and OR-T1023.
+ */
+async function writeVaultMetaRetryingLostResponses(
+  args: MetaWriteArgs,
+): Promise<{ data: unknown; error: unknown }> {
+  const { supabase, userId, priorRecoveryCiphertext, rotatedMeta, rowsAlreadyWritten, sleep } =
+    args;
+  let lastFailure: unknown;
+  for (let attempt = 1; attempt <= META_WRITE_ATTEMPTS; attempt++) {
+    let failure: unknown;
+    try {
+      const result: { data: unknown; error: unknown } = await supabase
+        .from("user_vault_meta")
+        .update(rotatedMeta)
+        .eq("user_id", userId)
+        .eq("recovery_ciphertext", priorRecoveryCiphertext)
+        .select("user_id");
+      if (!result.error) return result;
+      failure = result.error;
+    } catch (cause) {
+      failure = cause;
+    }
+    lastFailure = failure;
+    const readBack = await readBackRotatedMeta(
+      supabase,
+      userId,
+      priorRecoveryCiphertext,
+      rotatedMeta,
+    );
+    if (readBack === "landed") return { data: [{ user_id: userId }], error: null };
+    if (readBack === "unknown") raiseRotationFailure(failure, rowsAlreadyWritten);
+    if (attempt < META_WRITE_ATTEMPTS) await sleep(META_WRITE_RETRY_MS);
+  }
+  return raiseRotationFailure(lastFailure, rowsAlreadyWritten);
+}
+
+/**
  * Re-encrypt every ciphertext this user owns under the new MEK, then persist
  * the rotated vault meta, then zero the old key material.
  *
@@ -582,6 +702,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     migrateCredentialsCiphertext,
     migrateTransactionCiphertext,
     clearMigrationKeys,
+    sleep = realSleep,
   } = args;
 
   // Refuse before anything irreversible happens if a stored PQC secret would
@@ -942,17 +1063,19 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
     rotatedMeta.sig_public_key = null;
   }
 
-  let metaUpdateResult: { data: unknown; error: unknown };
-  try {
-    metaUpdateResult = await supabase
-      .from("user_vault_meta")
-      .update(rotatedMeta)
-      .eq("user_id", userId)
-      .eq("recovery_ciphertext", priorRecoveryCiphertext)
-      .select("user_id");
-  } catch (cause) {
-    raiseRotationFailure(cause, anyRowWritten);
-  }
+  // A thrown update, or an error with no row, does not prove the write failed:
+  // the response can be lost after the row changed. The helper reads the row
+  // back before it decides anything. An answer with no error, one row or a zero
+  // row compare-and-swap miss, comes back untouched and is judged by the checks
+  // below exactly as it always was.
+  const metaUpdateResult = await writeVaultMetaRetryingLostResponses({
+    supabase,
+    userId,
+    priorRecoveryCiphertext,
+    rotatedMeta,
+    rowsAlreadyWritten: anyRowWritten,
+    sleep,
+  });
   const { data: updatedRows, error: updateErr } = metaUpdateResult;
   if (updateErr) raiseRotationFailure(updateErr, anyRowWritten);
   if (!updatedRows || (updatedRows as unknown[]).length !== 1) {
