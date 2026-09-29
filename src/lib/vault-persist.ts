@@ -640,8 +640,15 @@ interface MetaWriteArgs {
  *   unknown     the read cannot settle it. Raise the original failure, the same
  *               one this path raised before, and do not retry.
  *
- * An answer that carries no error, one row or a zero row compare-and-swap miss,
- * is trusted and returned untouched for the caller to judge.
+ * An answer that carries no error and one row is trusted and returned
+ * untouched. A no error answer with no row is returned untouched on the first
+ * attempt, because no earlier write of ours exists that could have landed. On
+ * attempt 2 or later it is read back once first: an earlier attempt's write may
+ * have landed after its own read-back and before this retry, which makes this
+ * compare-and-swap miss although the rotation is saved. Only a read-back that
+ * shows all three rotated values turns it into a one row success. Anything
+ * else returns the zero-row answer untouched for the caller to judge exactly as
+ * it always did.
  *
  * This retries only this one statement. It does not make the row migration
  * above retryable: see the note on the meta write in
@@ -662,7 +669,24 @@ async function writeVaultMetaRetryingLostResponses(
         .eq("user_id", userId)
         .eq("recovery_ciphertext", priorRecoveryCiphertext)
         .select("user_id");
-      if (!result.error) return result;
+      if (!result.error) {
+        // A no-row answer on a retry can mean an earlier attempt's write landed
+        // after its own read-back, so this compare-and-swap found the prior
+        // ciphertext already gone. Judge it by one read-back before it is read
+        // as a failed save (OR-T2743). Attempt 1 has no earlier write of ours
+        // to have landed, so it is returned as it always was.
+        const answeredNoRow = !Array.isArray(result.data) || result.data.length === 0;
+        if (attempt >= 2 && answeredNoRow) {
+          const lateReadBack = await readBackRotatedMeta(
+            supabase,
+            userId,
+            priorRecoveryCiphertext,
+            rotatedMeta,
+          );
+          if (lateReadBack === "landed") return { data: [{ user_id: userId }], error: null };
+        }
+        return result;
+      }
       failure = result.error;
     } catch (cause) {
       failure = cause;
@@ -1065,9 +1089,10 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
 
   // A thrown update, or an error with no row, does not prove the write failed:
   // the response can be lost after the row changed. The helper reads the row
-  // back before it decides anything. An answer with no error, one row or a zero
-  // row compare-and-swap miss, comes back untouched and is judged by the checks
-  // below exactly as it always was.
+  // back before it decides anything. An answer with no error comes back for
+  // the checks below to judge exactly as it always was, with one exception: a
+  // zero-row answer on a retry is read back once first, because an earlier
+  // attempt's write may have landed late (OR-T2743).
   const metaUpdateResult = await writeVaultMetaRetryingLostResponses({
     supabase,
     userId,
