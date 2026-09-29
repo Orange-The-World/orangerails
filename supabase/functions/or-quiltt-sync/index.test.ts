@@ -332,8 +332,9 @@ Deno.test('handleEvent: dispatches errored event, reconciles connection to error
 // at its original queue position (received_at never changes on retry), so it
 // can be dispatched AFTER a newer successful event for the same connection
 // already ran reconcileConnectionSuccess and flipped it to 'active'. These
-// tests are the regression guard: they fail if the updated_at/received_at
-// comparison is removed.
+// tests are the regression guard: they fail if the newer-success inbox
+// lookup is removed. The guard compares event to event, never the row
+// updated_at; the stateful scenarios live in ordering-guard.test.ts.
 
 Deno.test('reconcileConnectionError: does not regress status when a newer success already reconciled the connection', async () => {
   let connectionsUpdateCalled = false;
@@ -347,6 +348,18 @@ Deno.test('reconcileConnectionError: does not regress status when a newer succes
         is()     { return chain; },
         order()  { return chain; },
         limit()  { return chain; },
+        like()   { return chain; },
+        not()    { return chain; },
+        gt()     { return chain; },
+        // The ordering lookup awaits the chain after .limit(1). A newer, processed
+        // success event for this connection exists in the inbox.
+        // deno-lint-ignore no-explicit-any
+        then(res: any, rej: any) {
+          const out = table === 'quiltt_webhook_inbox'
+            ? { data: [{ event_id: 'evt-newer-success' }], error: null }
+            : { data: null, error: null };
+          return Promise.resolve(out).then(res, rej);
+        },
         update(_patch: unknown) {
           if (table === 'connections') connectionsUpdateCalled = true;
           return chain;
@@ -404,6 +417,14 @@ Deno.test('reconcileConnectionError: still flips status to error in the ordinary
         is()     { return chain; },
         order()  { return chain; },
         limit()  { return chain; },
+        like()   { return chain; },
+        not()    { return chain; },
+        gt()     { return chain; },
+        // No newer processed success event exists in the inbox.
+        // deno-lint-ignore no-explicit-any
+        then(res: any, rej: any) {
+          return Promise.resolve({ data: [], error: null }).then(res, rej);
+        },
         update(_patch: unknown) {
           if (table === 'connections') connectionsUpdateCalled = true;
           return chain;

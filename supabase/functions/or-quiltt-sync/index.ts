@@ -1086,18 +1086,22 @@ export async function reconcileConnectionError(
   // newer than this event's received_at, a fresher reconciliation has
   // already run: skip the write and mark this event processed as-is (return
   // null), rather than regress a connection a newer success already fixed.
-  if (
-    ev.received_at &&
-    conn.updated_at &&
-    new Date(conn.updated_at).getTime() > new Date(ev.received_at).getTime()
-  ) {
-    console.warn(
-      `[or-quiltt-sync] event ${ev.event_id}: connection ${conn.id} updated_at ` +
-        `(${conn.updated_at}) is newer than this errored event's received_at ` +
-        `(${ev.received_at}); a newer reconciliation already ran, not regressing status to error ` +
-        `[OR-T2694 ordering guard]`,
-    );
-    return null;
+  //
+  // The decision compares EVENT to EVENT. It deliberately does not use the
+  // connections row updated_at: a trigger rewrites it on every update, so a
+  // success reconcile earlier in the same drain batch would make a genuine,
+  // newer errored event look stale.
+  if (ev.received_at) {
+    const newer = await findNewerProcessedSuccess(client, ev, subaccountId, connectionId);
+    if (newer.error) return newer.error;
+    if (newer.eventId) {
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: a newer success event ${newer.eventId} ` +
+          `for this Quiltt connection was already processed; not regressing connection ` +
+          `${conn.id} to error [OR-T2694 ordering guard]`,
+      );
+      return null;
+    }
   }
 
   // DL-1445: record WHY, not just THAT. This block used to write status alone,
@@ -1159,6 +1163,40 @@ export async function reconcileConnectionError(
       `correlation_id: ${correlationId}, cause_recorded: ${sinkMode})`,
   );
   return null;
+}
+
+/**
+ * OR-T2694: has a NEWER success event for the same Quiltt connection already
+ * been processed? Event-to-event, no row timestamp.
+ *
+ * Keyed on the Quiltt connection id in the payload AND the subaccount, never
+ * the subaccount alone: two distinct Quiltt connections can resolve under one
+ * subaccount (OR-T2218), and a subaccount-only match would let a success on one
+ * suppress a real error on the other. The subaccount_id index narrows the scan;
+ * the received_at index only covers pending rows, so this must not be widened
+ * into a scan of processed rows by received_at alone. Retired success events
+ * are ignored: they never ran a reconcile. A lookup failure is returned so the
+ * caller retries instead of writing on unknown ordering.
+ */
+export async function findNewerProcessedSuccess(
+  client: SupabaseClient,
+  ev: PendingEvent,
+  subaccountId: string,
+  connectionId: string,
+): Promise<{ eventId: string | null; error: string | null }> {
+  const { data, error } = await client
+    .from('quiltt_webhook_inbox')
+    .select('event_id')
+    .eq('subaccount_id', subaccountId)
+    .eq('payload->record->>id', connectionId)
+    .like('event_type', 'connection.synced.successful%')
+    .not('processed_at', 'is', null)
+    .is('retirement_reason', null)
+    .gt('received_at', ev.received_at as string)
+    .limit(1);
+  if (error) return { eventId: null, error: `newer-success lookup failed: ${error.message}` };
+  const row = Array.isArray(data) ? data[0] : null;
+  return { eventId: row && typeof row.event_id === 'string' ? row.event_id : null, error: null };
 }
 
 /**
