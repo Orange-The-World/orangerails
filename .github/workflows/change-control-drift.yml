@@ -406,7 +406,7 @@ jobs:
   # The live reading. Runs after the machinery has been proven able to fail.
   # ---------------------------------------------------------------------------
   read-and-compare:
-    name: Read the live settings and compare them to the reviewed baseline
+    name: ${{ github.ref == 'refs/heads/ops/change-control-seed' && 'Read the live settings and compare (seed push, always skipped)' || 'Read the live settings and compare them to the reviewed baseline' }}
     runs-on: ubuntu-latest
     needs:
       - self-test
@@ -428,7 +428,12 @@ jobs:
     # gets read wrong. Drift is evaluated by the daily schedule, by the
     # pull_request trigger and by a manual dispatch. Nothing about a seed push
     # says the live settings match the baseline.
-    if: github.event_name != 'push' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    #
+    # OR-T1764. Excluded by REF, not by event class, matching how
+    # publish-reading below is scoped: if the push trigger list at the top of
+    # this file is ever widened to another branch, this job still runs there
+    # instead of silently going quiet on every push event.
+    if: github.ref != 'refs/heads/ops/change-control-seed' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     steps:
       - name: Checkout
         uses: actions/checkout@v7
