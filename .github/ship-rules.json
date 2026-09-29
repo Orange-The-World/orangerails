@@ -38,6 +38,10 @@
         },
         {
             "risk": "high",
+            "pattern": "(^|/)supabase/config\\.toml$"
+        },
+        {
+            "risk": "high",
             "pattern": "(lightning|btcpay|invoice|payment|payout|refund)"
         },
         {
