@@ -25,6 +25,8 @@ import {
   PASSWORD_CHANGE_CONFLICT_MESSAGE,
   PASSWORD_CHANGE_NOT_PROVEN_MESSAGE,
   RECOVERY_META_NOT_SAVED_MESSAGE,
+  META_WRITE_ATTEMPTS,
+  META_WRITE_RETRY_MS,
   CONNECTION_PAGE_SIZE,
   TRANSACTION_PAGE_SIZE,
   RECONCILE_MAX_PASSES,
@@ -932,6 +934,335 @@ describe("vault recovery: the rotated meta write", () => {
     for (const call of pagedSelects(calls, "encrypted_transactions")) {
       expect(call.filters).toContainEqual({ column: "order", value: ["id", true] });
     }
+  });
+});
+
+// A lost response is a request whose answer never reaches the caller. The shared
+// fake answers every write with a definite result, so it cannot model one. This
+// client scripts the two calls the meta write makes on user_vault_meta, the write
+// and the read-back, and hands every other call to the shared fake.
+//
+// A lost response reaches the code in one of two shapes, depending on how the
+// client is configured: the awaited call throws, or it resolves to an error
+// result that carries no row. Both are scripted and both must behave the same.
+
+interface ScriptedAnswer {
+  data: unknown;
+  error: unknown;
+}
+
+type ScriptedWrite = "lost-throws" | "lost-error-result" | { answer: ScriptedAnswer };
+
+type ScriptedReadBack = { row: Record<string, unknown> } | "no-row" | "error-result" | "throws";
+
+interface ScriptedFilter {
+  column: string;
+  value: unknown;
+}
+
+interface ScriptedWriteChain {
+  eq(column: string, value: unknown): ScriptedWriteChain;
+  select(): Promise<ScriptedAnswer>;
+}
+
+interface ScriptedReadBackChain {
+  eq(column: string, value: unknown): ScriptedReadBackChain;
+  single(): Promise<ScriptedAnswer>;
+}
+
+interface ScriptedTableApi {
+  select: (columns: string, options?: { count?: string; head?: boolean }) => unknown;
+  update: (values: Record<string, unknown>) => unknown;
+  delete: () => unknown;
+}
+
+const LOST_RESPONSE_ERROR = {
+  message: "TypeError: Failed to fetch",
+  details: "",
+  hint: "",
+  code: "",
+};
+
+// What the row holds once the write in rotateArgs has landed, and before it.
+const ROTATED_META_ROW = {
+  recovery_ciphertext: "recovery-ciphertext-v1",
+  vault_verifier_ciphertext: "verifier-v1",
+  vault_key_version: 2,
+};
+const PRIOR_META_ROW = {
+  recovery_ciphertext: "recovery-ciphertext-v0",
+  vault_verifier_ciphertext: "verifier-v0",
+  vault_key_version: 1,
+};
+
+function makeScriptedMetaClient(script: { writes: ScriptedWrite[]; readBacks: ScriptedReadBack[] }) {
+  const base = makeFakeClient(oneConnection).client as unknown as {
+    from: (table: string) => ScriptedTableApi;
+  };
+  const updates: Array<{ values: Record<string, unknown>; filters: ScriptedFilter[] }> = [];
+  const readBacks: Array<{ columns: string; filters: ScriptedFilter[] }> = [];
+
+  const client = {
+    from(table: string) {
+      const real = base.from(table);
+      if (table !== "user_vault_meta") return real;
+      return {
+        select(columns: string, selectOptions?: { count?: string; head?: boolean }) {
+          // The read-back is the only select on this table that asks for the
+          // verifier column. The guard read at the top of the rotation goes to the
+          // shared fake unchanged.
+          if (!columns.includes("vault_verifier_ciphertext")) {
+            return real.select(columns, selectOptions);
+          }
+          const filters: ScriptedFilter[] = [];
+          const index = readBacks.length;
+          readBacks.push({ columns, filters });
+          const chain: ScriptedReadBackChain = {
+            eq(column: string, value: unknown) {
+              filters.push({ column, value });
+              return chain;
+            },
+            single() {
+              const step: ScriptedReadBack | undefined = script.readBacks[index];
+              if (step === undefined) {
+                return Promise.reject(new Error(`test script has no read-back step ${index}`));
+              }
+              if (step === "throws") {
+                return Promise.reject(new Error("read-back connection reset"));
+              }
+              if (step === "error-result") {
+                return Promise.resolve({ data: null, error: { message: "read-back failed" } });
+              }
+              if (step === "no-row") return Promise.resolve({ data: null, error: null });
+              return Promise.resolve({ data: step.row, error: null });
+            },
+          };
+          return chain;
+        },
+        update(values: Record<string, unknown>) {
+          const filters: ScriptedFilter[] = [];
+          const index = updates.length;
+          updates.push({ values, filters });
+          const chain: ScriptedWriteChain = {
+            eq(column: string, value: unknown) {
+              filters.push({ column, value });
+              return chain;
+            },
+            select() {
+              const step: ScriptedWrite | undefined = script.writes[index];
+              if (step === undefined) {
+                return Promise.reject(new Error(`test script has no write step ${index}`));
+              }
+              if (step === "lost-throws") return Promise.reject(new Error("Failed to fetch"));
+              if (step === "lost-error-result") {
+                return Promise.resolve({ data: null, error: LOST_RESPONSE_ERROR });
+              }
+              return Promise.resolve(step.answer);
+            },
+          };
+          return chain;
+        },
+        delete() {
+          return real.delete();
+        },
+      };
+    },
+  };
+
+  return { client: client as unknown as VaultPersistClient, updates, readBacks };
+}
+
+async function rotateWithScriptedMetaClient(script: {
+  writes: ScriptedWrite[];
+  readBacks: ScriptedReadBack[];
+}) {
+  const scripted = makeScriptedMetaClient(script);
+  const clearMigrationKeys = vi.fn();
+  const sleep = vi.fn(() => Promise.resolve());
+  let failed = false;
+  let message = "";
+  try {
+    await migrateAndPersistRotatedVault({
+      ...rotateArgs(scripted.client, clearMigrationKeys),
+      sleep,
+    });
+  } catch (cause) {
+    failed = true;
+    message = cause instanceof Error ? cause.message : String(cause);
+  }
+  return { ...scripted, clearMigrationKeys, sleep, failed, message };
+}
+
+describe("vault recovery: the rotated meta write when its response is lost", () => {
+  const LOST_SHAPES = ["lost-throws", "lost-error-result"] as const;
+
+  for (const lost of LOST_SHAPES) {
+    it(`accepts a write that landed although its response was lost, and does not write again (${lost})`, async () => {
+      const run = await rotateWithScriptedMetaClient({
+        writes: [lost],
+        readBacks: [{ row: ROTATED_META_ROW }],
+      });
+
+      expect(run.failed).toBe(false);
+      expect(run.updates).toHaveLength(1);
+      expect(run.readBacks).toHaveLength(1);
+      expect(run.readBacks[0]?.filters).toContainEqual({ column: "user_id", value: "user-1" });
+      expect(run.readBacks[0]?.columns).toContain("recovery_ciphertext");
+      expect(run.readBacks[0]?.columns).toContain("vault_verifier_ciphertext");
+      expect(run.readBacks[0]?.columns).toContain("vault_key_version");
+      expect(run.sleep).not.toHaveBeenCalled();
+      // The write is proven, so the stashed subkeys are cleared exactly once.
+      expect(run.clearMigrationKeys).toHaveBeenCalledTimes(1);
+    });
+
+    it(`writes again when the read-back shows the row unchanged, with the same payload and guard (${lost})`, async () => {
+      const run = await rotateWithScriptedMetaClient({
+        writes: [lost, { answer: { data: [{ user_id: "user-1" }], error: null } }],
+        readBacks: [{ row: PRIOR_META_ROW }],
+      });
+
+      expect(run.failed).toBe(false);
+      expect(run.updates).toHaveLength(2);
+      // The same statement both times, so the compare-and-swap still refuses to
+      // overwrite a rotation that another session completed in the meantime.
+      expect(run.updates[1]?.values).toEqual(run.updates[0]?.values);
+      expect(run.updates[1]?.filters).toEqual(run.updates[0]?.filters);
+      expect(run.updates[1]?.filters).toContainEqual({
+        column: "recovery_ciphertext",
+        value: "recovery-ciphertext-v0",
+      });
+      expect(run.sleep).toHaveBeenCalledTimes(1);
+      expect(run.sleep).toHaveBeenCalledWith(META_WRITE_RETRY_MS);
+      expect(run.clearMigrationKeys).toHaveBeenCalledTimes(1);
+    });
+
+    it(`gives up after ${META_WRITE_ATTEMPTS} lost responses, warns the user and keeps the migration keys (${lost})`, async () => {
+      const run = await rotateWithScriptedMetaClient({
+        writes: Array.from({ length: META_WRITE_ATTEMPTS }, () => lost),
+        readBacks: Array.from({ length: META_WRITE_ATTEMPTS }, () => ({ row: PRIOR_META_ROW })),
+      });
+
+      expect(run.failed).toBe(true);
+      expect(run.message).toMatch(/Do not close or reload this page/);
+      expect(run.message).toMatch(/Failed to fetch/);
+      expect(run.message).toContain(VAULT_OPENS_WITH_OLD_PASSWORD_MESSAGE);
+      expect(run.updates).toHaveLength(META_WRITE_ATTEMPTS);
+      expect(run.readBacks).toHaveLength(META_WRITE_ATTEMPTS);
+      expect(run.sleep).toHaveBeenCalledTimes(META_WRITE_ATTEMPTS - 1);
+      // Those stashed subkeys are the only thing that can still read anything
+      // left under the old key in this session. They stay.
+      expect(run.clearMigrationKeys).not.toHaveBeenCalled();
+    });
+  }
+
+  it("keeps going while the read-back shows the row unchanged, and stops at the first answer", async () => {
+    const run = await rotateWithScriptedMetaClient({
+      writes: [
+        "lost-throws",
+        "lost-error-result",
+        { answer: { data: [{ user_id: "user-1" }], error: null } },
+      ],
+      readBacks: [{ row: PRIOR_META_ROW }, { row: PRIOR_META_ROW }],
+    });
+
+    expect(run.failed).toBe(false);
+    expect(run.updates).toHaveLength(3);
+    expect(run.readBacks).toHaveLength(2);
+    expect(run.sleep).toHaveBeenCalledTimes(2);
+    expect(run.clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("accepts a write that shows up as landed on a later read-back", async () => {
+    const run = await rotateWithScriptedMetaClient({
+      writes: ["lost-throws", "lost-throws"],
+      readBacks: [{ row: PRIOR_META_ROW }, { row: ROTATED_META_ROW }],
+    });
+
+    expect(run.failed).toBe(false);
+    expect(run.updates).toHaveLength(2);
+    expect(run.readBacks).toHaveLength(2);
+    expect(run.sleep).toHaveBeenCalledTimes(1);
+    expect(run.clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  const UNSETTLED_READ_BACKS: Array<{ name: string; readBack: ScriptedReadBack }> = [
+    { name: "the read comes back as an error", readBack: "error-result" },
+    { name: "the read throws", readBack: "throws" },
+    { name: "the row is not there", readBack: "no-row" },
+    {
+      name: "the row holds values from neither write",
+      readBack: {
+        row: {
+          recovery_ciphertext: "recovery-ciphertext-other",
+          vault_verifier_ciphertext: "verifier-other",
+          vault_key_version: 9,
+        },
+      },
+    },
+    {
+      name: "only some of the rotated values are there",
+      readBack: { row: { ...ROTATED_META_ROW, vault_verifier_ciphertext: "verifier-v0" } },
+    },
+  ];
+
+  for (const { name, readBack } of UNSETTLED_READ_BACKS) {
+    it(`raises the original failure without retrying when ${name}`, async () => {
+      const run = await rotateWithScriptedMetaClient({
+        writes: ["lost-throws"],
+        readBacks: [readBack],
+      });
+
+      expect(run.failed).toBe(true);
+      expect(run.message).toMatch(/Do not close or reload this page/);
+      expect(run.message).toMatch(/Failed to fetch/);
+      expect(run.updates).toHaveLength(1);
+      expect(run.readBacks).toHaveLength(1);
+      expect(run.sleep).not.toHaveBeenCalled();
+      expect(run.clearMigrationKeys).not.toHaveBeenCalled();
+    });
+  }
+
+  it("does not read back an answer that arrived with no error and matched no row", async () => {
+    const run = await rotateWithScriptedMetaClient({
+      writes: [{ answer: { data: [], error: null } }],
+      readBacks: [],
+    });
+
+    expect(run.failed).toBe(true);
+    expect(run.message).toContain(RECOVERY_META_NOT_SAVED_MESSAGE);
+    expect(run.updates).toHaveLength(1);
+    expect(run.readBacks).toHaveLength(0);
+    expect(run.sleep).not.toHaveBeenCalled();
+    expect(run.clearMigrationKeys).not.toHaveBeenCalled();
+  });
+
+  it("does not read back an answer that arrived with no error and matched one row", async () => {
+    const run = await rotateWithScriptedMetaClient({
+      writes: [{ answer: { data: [{ user_id: "user-1" }], error: null } }],
+      readBacks: [],
+    });
+
+    expect(run.failed).toBe(false);
+    expect(run.updates).toHaveLength(1);
+    expect(run.readBacks).toHaveLength(0);
+    expect(run.sleep).not.toHaveBeenCalled();
+    expect(run.clearMigrationKeys).toHaveBeenCalledTimes(1);
+  });
+
+  it("raises an answered refusal with its own message after the same attempts when the row is unchanged", async () => {
+    const refusal = { message: "permission denied for table user_vault_meta", code: "42501" };
+    const run = await rotateWithScriptedMetaClient({
+      writes: Array.from({ length: META_WRITE_ATTEMPTS }, () => ({
+        answer: { data: null, error: refusal },
+      })),
+      readBacks: Array.from({ length: META_WRITE_ATTEMPTS }, () => ({ row: PRIOR_META_ROW })),
+    });
+
+    expect(run.failed).toBe(true);
+    expect(run.message).toMatch(/permission denied for table user_vault_meta/);
+    expect(run.message).toMatch(/Do not close or reload this page/);
+    expect(run.updates).toHaveLength(META_WRITE_ATTEMPTS);
+    expect(run.clearMigrationKeys).not.toHaveBeenCalled();
   });
 });
 
