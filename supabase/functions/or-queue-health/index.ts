@@ -261,9 +261,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         ...lines,
         '',
         'A queue with an old undrained row means its drain is not running, or ' +
-        'is running and failing. Check whether the job exists at all before ' +
-        'checking whether it succeeded: an absent `cron.job` entry is how ' +
-        'DL-1562 went unnoticed for ten weeks.',
+        'is running and failing. The exception is a queue with a retry ceiling ' +
+        '(webhook_delivery): rows that fail until they reach it are treated as ' +
+        'given up and are not counted, so a drain that runs while every ' +
+        'delivery fails does NOT raise this alert. Check whether the job ' +
+        'exists at all before checking whether it succeeded: an absent ' +
+        '`cron.job` entry is how DL-1562 went unnoticed for ten weeks.',
         '',
         'A `could not check` line is NOT a clean bill of health. It means this ' +
         'probe learned nothing about that queue on this run.',
