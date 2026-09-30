@@ -3,21 +3,25 @@
 -- Why
 -- The rate coverage lookup asks for the first current row at or before a
 -- requested time, for one asset, one fiat, one granularity and one product.
--- The existing unique index uq_rates_pair_bucket_authority orders by
--- bucket_ts before granularity, product and authority, so the planner reads
--- it as a forward walk over the whole currency pair and filters the other
--- columns row by row. When the requested group has no earlier row, that walk
--- crosses every other group of the pair before it can answer.
+-- The unique index uq_rates_pair_bucket_authority orders by bucket_ts before
+-- granularity, product and authority, so for this lookup it can be read as a
+-- forward walk over the whole currency pair that filters the other columns
+-- row by row. When the requested group has no earlier row, that walk crosses
+-- every other group of the pair before it can answer. idx_rates_lookup
+-- already leads with the same group key, but it does not carry the three
+-- current-row filters, so they run against the heap for each row it reads,
+-- and for this lookup the planner costs the unique index walk below it.
 --
 -- What
--- A partial btree index whose leading columns are the full group key
--- (source_currency, target_currency, granularity, product), then bucket_ts,
--- limited to the rows the lookup reads: source_authority = 'ORBI',
--- status = 'CONFIRMED' and superseded_by_id IS NULL. The same lookup then
--- becomes a bounded probe into one group. The point lookup that follows it
--- (latest row at or before the requested time) reads the same index
--- backward. The predicate must stay identical to the filters in
--- supabase/functions/v1-rate, otherwise the planner cannot use the index.
+-- A partial btree index on the same group key (source_currency,
+-- target_currency, granularity, product), then bucket_ts, limited to the rows
+-- the lookup reads: source_authority = 'ORBI', status = 'CONFIRMED' and
+-- superseded_by_id IS NULL. The three filters become part of the index
+-- instead of heap filters, and the lookup only needs bucket_ts, so an index
+-- only scan is possible. The point lookup that follows it (latest row at or
+-- before the requested time) reads the same index backward. The predicate
+-- must stay identical to the filters in supabase/functions/v1-rate,
+-- otherwise the planner cannot use the index.
 --
 -- Applying
 -- CREATE INDEX CONCURRENTLY builds without blocking writes, and cannot run
