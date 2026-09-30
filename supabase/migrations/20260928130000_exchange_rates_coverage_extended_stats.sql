@@ -38,22 +38,33 @@
 -- correctly. This changes no data, drops no index, and cannot change
 -- what any query returns, only which plan is chosen.
 --
+-- Statistic kinds: ndistinct, dependencies and mcv. The mcv kind is the
+-- one that lets the planner see that one specific combination (here BTC
+-- to EUR at 1m from ORBI-M by ORBI) is rare or absent. A dependencies-only
+-- object assumes the clauses are compatible with the column correlation
+-- and can over-estimate exactly this kind of combination, which is the
+-- error being fixed. Whether this restores the idx_rates_lookup plan is
+-- unproven until it is measured after the separately approved apply.
+--
 -- Idempotent: IF NOT EXISTS guard, safe to re-run.
--- Risk: near zero. CREATE STATISTICS takes no lock beyond a normal DDL
--- catalog update; ANALYZE takes SHARE UPDATE EXCLUSIVE, which blocks
--- neither reads nor writes.
+-- Risk: low. CREATE STATISTICS and ANALYZE each take SHARE UPDATE
+-- EXCLUSIVE on the table, which blocks neither reads nor writes but does
+-- wait for a running VACUUM, ANALYZE or schema change on the same table.
+-- ANALYZE re-samples every column of the table, so other plans on this
+-- table can shift slightly; the undo restores the object, not the exact
+-- prior sample.
 --
 -- Applies cleanly to dev and orange-rails-prod via this repo's normal
--- migration pipeline. NOTE: orbi-prod (sqcventmypowhbaceufy), where the
--- production defect actually lives, is a separate Supabase project that
--- is not wired to this repo's migration ledger (verified: sb_migrations
--- returns no rows for it). Applying this statement there is a separate,
--- explicitly gated production DDL action (sb_request_write + Auditor
--- sql_approvals), not a side effect of merging this file.
+-- migration pipeline (the table and all five columns exist on both). NOTE:
+-- the ORBI production project, where the production defect actually lives,
+-- is a separate Supabase project that is not wired to this repo's
+-- migration ledger (its migration list is empty). Applying this statement
+-- there is a separate, explicitly approved production DDL action, not a
+-- side effect of merging this file.
 --
 -- Reversible: see the UNDO block at the foot of this file.
 
-create statistics if not exists exchange_rates_coverage_stats (ndistinct, dependencies)
+create statistics if not exists exchange_rates_coverage_stats (ndistinct, dependencies, mcv)
   on source_currency, target_currency, granularity, product, source_authority
   from public.exchange_rates;
 
