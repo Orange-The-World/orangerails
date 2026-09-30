@@ -61,7 +61,7 @@ export const STEALTH_PROTOCOL_VERSION = 1 as const;
  * added to it only in the release that actually bumps the protocol, per the
  * 90 day deprecation window documented in docs/Stealth-Sync.md.
  */
-export const STEALTH_SUPPORTED_PROTOCOL_VERSIONS = [1] as const;
+export const STEALTH_SUPPORTED_PROTOCOL_VERSIONS = [1, 2] as const;
 
 /**
  * Union of every version this widget build accepts. Derived from
