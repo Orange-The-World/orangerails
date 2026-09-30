@@ -76,6 +76,20 @@ export interface QueueDefinition {
    * age calculation so a deliberately abandoned row does not alert forever.
    */
   alsoTerminal: string[];
+  /**
+   * A numeric retry ceiling. A row whose `column` has reached `ceiling` is GIVEN
+   * UP, not queued: it will never be dispatched again, so its age says nothing
+   * about whether the drain is running.
+   *
+   * Not an `alsoTerminal` entry because that list is IS NULL only and a retry
+   * count is a number. Keyed on the count, not on any last_error text, because
+   * nothing branches on the error string and text is not a contract.
+   *
+   * COUPLED to the retry contract stated in migration 20260824105000
+   * (`attempts < 5`) and to idx_webhook_delivery_pending, which is partial on it.
+   * Change all three together.
+   */
+  giveUpAt?: { column: string; ceiling: number };
   coverage: QueueCoverage;
   /** What this probe cannot see about this queue. Required, on purpose. */
   blindSpots: string[];
@@ -87,6 +101,10 @@ export const QUEUES: QueueDefinition[] = [
     enqueuedAt: 'created_at',
     drainedAt: 'succeeded_at',
     alsoTerminal: [],
+    // Migration 20260824105000 retired 45 prod rows by setting attempts to 5 and
+    // leaving succeeded_at NULL on purpose. Without this ceiling the probe reads
+    // them as a permanent stall (oldest undrained 2026-06-11) and re-alerts.
+    giveUpAt: { column: 'attempts', ceiling: 5 },
     // Two hours matches the threshold or-quiltt-drain-alert already uses, so
     // the two probes agree on what "stalled" means. The dispatcher runs every
     // minute, so two hours is roughly 120 missed drains: far past noise and
@@ -95,10 +113,11 @@ export const QUEUES: QueueDefinition[] = [
     blindSpots: [
       'A delivery that returned 2xx while the consumer recorded nothing is ' +
       'stamped succeeded_at and looks perfectly drained here (DL-1565).',
-      'A row that exhausted MAX_ATTEMPTS still has succeeded_at NULL, so it ' +
-      'will alert forever rather than being reported as given up. That is ' +
-      'deliberate for now: nothing currently retires these rows, and a queue ' +
-      'that quietly discards notifications is the worse failure.',
+      'A row at the retry ceiling (attempts >= 5) is treated as given up and ' +
+      'left out of the age, so the 45 deliberately abandoned pre-cutoff rows ' +
+      'do not read as a stall. The cost: a LATER notification that exhausts ' +
+      'its retries is now also invisible to this probe. Nothing here counts ' +
+      'given-up rows or flags a new one; that needs its own signal.',
     ],
   },
   {
@@ -148,6 +167,23 @@ export const QUEUES: QueueDefinition[] = [
     ],
   },
 ];
+
+/**
+ * Narrow a query builder to the rows that are still queued.
+ *
+ * Still queued means the drain column and every terminal column are NULL and,
+ * when the queue declares a retry ceiling, the count is below it. Kept apart
+ * from the network code so a test can hand it a recording stub and see exactly
+ * which filters were applied. The builder is `any` for the same reason `client`
+ * is in index.ts: the typed PostgREST builder fights the generics here.
+ */
+// deno-lint-ignore no-explicit-any
+export function stillQueued(q: QueueDefinition, builder: any): any {
+  let query = builder.is(q.drainedAt, null);
+  for (const col of q.alsoTerminal) query = query.is(col, null);
+  if (q.giveUpAt) query = query.lt(q.giveUpAt.column, q.giveUpAt.ceiling);
+  return query;
+}
 
 /** The queues this probe actually queries. */
 export function watchedQueues(): QueueDefinition[] {
