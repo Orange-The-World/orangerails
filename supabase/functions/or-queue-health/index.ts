@@ -27,6 +27,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import {
+  applyUndrainedFilters,
   classify,
   type QueueDefinition,
   QUEUES,
@@ -89,30 +90,29 @@ function jsonResponse(body: unknown, status: number): Response {
 /**
  * Oldest still-queued row for one queue.
  *
- * "Still queued" means the drain column is NULL and every terminal column is
- * NULL. Ordering ascending and taking one row means we read one row rather
- * than counting the whole table.
+ * "Still queued" means the drain column is NULL, every terminal column is
+ * NULL, and the row has not reached its give-up ceiling (applyUndrainedFilters
+ * in queues.ts). Ordering ascending and taking one row means we read one row
+ * rather than counting the whole table.
  *
- * ON INDEXES, because an earlier version of this comment claimed one covered
- * this and that was FALSE. `idx_webhook_delivery_pending` is partial on
- * `(succeeded_at IS NULL AND attempts < 5)`. This query deliberately omits the
- * attempts clause, because a row that exhausted its retries is exactly the row
- * we must still see, so Postgres cannot use that index: a partial index is only
- * usable when the query predicate implies the index predicate. The migration in
- * this change adds an index matching THIS predicate. Check both together if you
- * ever change the filter here.
+ * ON INDEXES. A partial index is only usable when the query predicate implies
+ * the index predicate. For webhook_delivery this query filters on
+ * `succeeded_at IS NULL AND attempts < 5`, which implies both partial indexes on
+ * the table: `idx_webhook_delivery_pending` (the same predicate) and
+ * `idx_webhook_delivery_undrained` (`succeeded_at IS NULL`). Before the give-up
+ * clause the query had no attempts condition and only the second could serve
+ * it. Which one the planner picks is not checked here. Read both migrations if
+ * you ever change the filter.
  */
 async function oldestUndrained(
   // deno-lint-ignore no-explicit-any
   client: any,
   q: QueueDefinition,
 ): Promise<{ at: string | null; error?: string }> {
-  let query = client
-    .from(q.table)
-    .select(q.enqueuedAt)
-    .is(q.drainedAt, null);
-
-  for (const col of q.alsoTerminal) query = query.is(col, null);
+  const query = applyUndrainedFilters(
+    client.from(q.table).select(q.enqueuedAt),
+    q,
+  );
 
   const { data, error } = await query
     .order(q.enqueuedAt, { ascending: true })
