@@ -11,7 +11,7 @@
 //   deno test --no-check --allow-all supabase/functions/v1-rate/composite-authority.test.ts
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
-import { extractCompositeAuthority } from './index.ts'
+import { extractCompositeAuthority, rateTypeForAuthority } from './index.ts'
 
 // --- null / missing input ---
 
