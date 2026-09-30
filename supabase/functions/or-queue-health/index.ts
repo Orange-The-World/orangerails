@@ -30,6 +30,7 @@ import {
   classify,
   type QueueDefinition,
   QUEUES,
+  stillQueued,
   unmonitoredQueues,
   watchedQueues,
 } from './queues.ts';
@@ -89,30 +90,26 @@ function jsonResponse(body: unknown, status: number): Response {
 /**
  * Oldest still-queued row for one queue.
  *
- * "Still queued" means the drain column is NULL and every terminal column is
- * NULL. Ordering ascending and taking one row means we read one row rather
- * than counting the whole table.
+ * "Still queued" means the drain column is NULL, every terminal column is NULL,
+ * and, for a queue that declares a retry ceiling, the retry count is below it.
+ * Ordering ascending and taking one row means we read one row rather than
+ * counting the whole table.
  *
- * ON INDEXES, because an earlier version of this comment claimed one covered
- * this and that was FALSE. `idx_webhook_delivery_pending` is partial on
- * `(succeeded_at IS NULL AND attempts < 5)`. This query deliberately omits the
- * attempts clause, because a row that exhausted its retries is exactly the row
- * we must still see, so Postgres cannot use that index: a partial index is only
- * usable when the query predicate implies the index predicate. The migration in
- * this change adds an index matching THIS predicate. Check both together if you
- * ever change the filter here.
+ * ON INDEXES. A partial index is only usable when the query predicate implies
+ * the index predicate. `idx_webhook_delivery_pending` is partial on
+ * `(succeeded_at IS NULL AND attempts < 5)`, and for webhook_delivery this
+ * query carries both clauses (see `giveUpAt` in queues.ts), so it qualifies
+ * again. `idx_webhook_delivery_undrained` (partial on `succeeded_at IS NULL`)
+ * qualifies too. An earlier version of this query left the attempts clause out
+ * on purpose, so the pending index could not serve it. If you change the
+ * filter, check it against both indexes.
  */
 async function oldestUndrained(
   // deno-lint-ignore no-explicit-any
   client: any,
   q: QueueDefinition,
 ): Promise<{ at: string | null; error?: string }> {
-  let query = client
-    .from(q.table)
-    .select(q.enqueuedAt)
-    .is(q.drainedAt, null);
-
-  for (const col of q.alsoTerminal) query = query.is(col, null);
+  const query = stillQueued(q, client.from(q.table).select(q.enqueuedAt));
 
   const { data, error } = await query
     .order(q.enqueuedAt, { ascending: true })
