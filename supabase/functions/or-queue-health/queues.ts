@@ -115,9 +115,15 @@ export const QUEUES: QueueDefinition[] = [
       'stamped succeeded_at and looks perfectly drained here (DL-1565).',
       'A row at the retry ceiling (attempts >= 5) is treated as given up and ' +
       'left out of the age, so the 45 deliberately abandoned pre-cutoff rows ' +
-      'do not read as a stall. The cost: a LATER notification that exhausts ' +
-      'its retries is now also invisible to this probe. Nothing here counts ' +
-      'given-up rows or flags a new one; that needs its own signal.',
+      'do not read as a stall. The cost is larger than one late notification: ' +
+      'a consumer that fails every delivery while the dispatcher keeps running ' +
+      'takes each row to attempts 5 in about 30 minutes (retry waits of 2, 4, ' +
+      '8 and 16 minutes, worked out from or-webhook-dispatch, not observed), ' +
+      'well before the 2 hour threshold, so PERSISTENT CONSUMER FAILURE IS ' +
+      'UNWATCHED by this probe for this queue. A drain that is not invoked, ' +
+      'or that fails before it records an attempt, still ages a row past the ' +
+      'threshold and still fires. Nothing here counts given-up rows or flags ' +
+      'a new one; that needs its own signal.',
     ],
   },
   {
