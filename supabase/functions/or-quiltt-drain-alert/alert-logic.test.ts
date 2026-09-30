@@ -71,6 +71,18 @@ Deno.test('snapshotsMatch is false when nothing was stored', () => {
   assertEquals(snapshotsMatch(null, stallOnly(25, 60)), false);
 });
 
+Deno.test('a signal that clears and returns with the same counts reads as a repeat until the snapshot is reset', () => {
+  // 10:00 one stalled row is posted and its snapshot is stored.
+  const stored = asJsonbReturns(stallOnly(1, 60));
+  // 12:30 the stall is back with the very same counts after a quiet stretch.
+  const returned = stallOnly(1, 61);
+  // Control: with the stored snapshot left in place this is the same incident,
+  // which is what held the second post back until the 6 hour ceiling.
+  assertEquals(snapshotsMatch(stored, returned), true);
+  // A quiet run stores null (see the wiring guards below), and then it is new.
+  assertEquals(snapshotsMatch(null, returned), false);
+});
+
 Deno.test('snapshotsMatch still reports every real change', () => {
   const stored = asJsonbReturns(stallOnly(25, 60));
   // The stalled count moved.
@@ -104,6 +116,44 @@ Deno.test('projectLabel never throws and never returns an empty label', () => {
   assertEquals(projectLabel(null), 'unknown project');
   assertEquals(projectLabel(''), 'unknown project');
   assertEquals(projectLabel('not a url'), 'unknown project');
+});
+
+// The reset itself is I/O inside the Deno.serve entrypoint, which a test cannot
+// import, so it is pinned as source text, like the test after these two.
+Deno.test('a quiet run clears only the saved snapshot, never the last post time', () => {
+  const src = Deno.readTextFileSync(new URL('./index.ts', import.meta.url));
+  // Clearing last_notified_at as well would drop the 60 minute floor and let a
+  // flapping signal post on every oscillation.
+  assertEquals(
+    /\.update\(\{\s*last_signal_snapshot:\s*null\s*\}\)\s*\.eq\('id',\s*1\)\s*\.not\('last_signal_snapshot',\s*'is',\s*null\)/.test(src),
+    true,
+    'the quiet run must clear last_signal_snapshot alone, for row 1, and only while it is set',
+  );
+  assertEquals(
+    /last_notified_at:\s*null/.test(src),
+    false,
+    'no path may clear last_notified_at: that would drop the 60 minute floor',
+  );
+});
+
+Deno.test('the snapshot reset sits on the nothing-firing path and nowhere else', () => {
+  const src = Deno.readTextFileSync(new URL('./index.ts', import.meta.url));
+  const start = src.indexOf('if (alertFiring) {');
+  assertEquals(start > 0, true, 'index.ts must still branch on alertFiring');
+  const fromFiring = src.slice(start);
+  // The firing branch closes at two spaces of indent and the quiet branch follows it.
+  const quietAt = fromFiring.indexOf('\n  } else {');
+  assertEquals(quietAt > 0, true, 'the alertFiring branch must have a quiet-run else branch');
+  assertEquals(
+    fromFiring.slice(0, quietAt).includes('last_signal_snapshot: null'),
+    false,
+    'a run that is firing, or could not run a probe, must never clear the snapshot',
+  );
+  assertEquals(
+    /\.update\(\{\s*last_signal_snapshot:\s*null\s*\}\)/.test(fromFiring.slice(quietAt)),
+    true,
+    'a run with nothing firing must clear the snapshot',
+  );
 });
 
 Deno.test('index.ts uses the imported comparison and names the project in its alert', () => {
