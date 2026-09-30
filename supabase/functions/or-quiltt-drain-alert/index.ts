@@ -55,6 +55,11 @@
  *     counts). An unchanged snapshot is suppressed until the ceiling forces a repost.
  *   - Re-alert ceiling: after RE_ALERT_CEILING_HOURS since the last post, always post
  *     (even if unchanged) so a persistent stall does not go silently dark.
+ *   - Reset on a quiet run: a run in which nothing is firing and every probe ran
+ *     clears last_signal_snapshot (last_notified_at is kept, so the 60 min floor
+ *     still holds). A signal that clears and later returns with the same counts
+ *     is then a new incident and posts again once the floor has passed, instead
+ *     of being held back as a repeat until the ceiling.
  * zulip_post_sent in the report reflects whether the post actually went out.
  *
  * Env vars:
@@ -545,6 +550,26 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           stateWriteErr.message,
         );
       }
+    }
+  } else {
+    // Nothing is firing and every probe ran. Forget the snapshot of the last
+    // post, so a signal that clears and later comes back with the very same
+    // counts is a new incident and posts again, instead of being read as a
+    // repeat of the old one and held back until the re-alert ceiling.
+    // last_notified_at is deliberately left alone: the cooldown floor still
+    // bounds how often a flapping signal can post. The not-null filter makes
+    // this a no-op write on every quiet run after the first.
+    const { error: snapshotResetErr } = await client
+      .from('drain_alert_state')
+      .update({ last_signal_snapshot: null })
+      .eq('id', 1)
+      .not('last_signal_snapshot', 'is', null);
+
+    if (snapshotResetErr) {
+      console.error(
+        '[or-quiltt-drain-alert] failed to reset drain_alert_state snapshot on a quiet run:',
+        snapshotResetErr.message,
+      );
     }
   }
 
