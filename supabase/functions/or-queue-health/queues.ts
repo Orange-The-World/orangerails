@@ -76,6 +76,14 @@ export interface QueueDefinition {
    * age calculation so a deliberately abandoned row does not alert forever.
    */
   alsoTerminal: string[];
+  /**
+   * Once `column` (a retry counter) reaches `ceiling`, the drain stops picking
+   * the row up and leaves it as it is. Such a row never drains, so it is given
+   * up on rather than stalled, and it is left out of the age calculation. This
+   * probe does not report those rows at all: say so in `blindSpots`. `ceiling`
+   * must equal the drain's own retry limit, and a test compares the two.
+   */
+  giveUpAt?: { column: string; ceiling: number };
   coverage: QueueCoverage;
   /** What this probe cannot see about this queue. Required, on purpose. */
   blindSpots: string[];
@@ -87,6 +95,10 @@ export const QUEUES: QueueDefinition[] = [
     enqueuedAt: 'created_at',
     drainedAt: 'succeeded_at',
     alsoTerminal: [],
+    // or-webhook-dispatch retries a row only while attempts is below its
+    // MAX_ATTEMPTS (5) and then leaves it as it is. A test fails if this
+    // ceiling stops matching that constant.
+    giveUpAt: { column: 'attempts', ceiling: 5 },
     // Two hours matches the threshold or-quiltt-drain-alert already uses, so
     // the two probes agree on what "stalled" means. The dispatcher runs every
     // minute, so two hours is roughly 120 missed drains: far past noise and
@@ -95,10 +107,11 @@ export const QUEUES: QueueDefinition[] = [
     blindSpots: [
       'A delivery that returned 2xx while the consumer recorded nothing is ' +
       'stamped succeeded_at and looks perfectly drained here (DL-1565).',
-      'A row that exhausted MAX_ATTEMPTS still has succeeded_at NULL, so it ' +
-      'will alert forever rather than being reported as given up. That is ' +
-      'deliberate for now: nothing currently retires these rows, and a queue ' +
-      'that quietly discards notifications is the worse failure.',
+      'A row that exhausted its retries (attempts at the dispatcher ceiling) ' +
+      'is left out of the age calculation on purpose: the dispatcher stops ' +
+      'picking it up, so it will never drain and is not stalled. This probe ' +
+      'does not report those rows at all, so a queue that quietly piles them ' +
+      'up looks healthy here. Counting given-up rows is a separate check.',
     ],
   },
   {
@@ -148,6 +161,31 @@ export const QUEUES: QueueDefinition[] = [
     ],
   },
 ];
+
+/**
+ * The subset of a query builder that the "still queued" filter needs. Kept
+ * structural so a test can pass a recorder instead of a database client.
+ */
+interface UndrainedQuery<T> {
+  is(column: string, value: null): T;
+  lt(column: string, value: number): T;
+}
+
+/**
+ * Narrow a query to the rows of `q` that are still queued: the drain column is
+ * NULL, every terminal column is NULL, and the row has not reached its give-up
+ * ceiling. One place for the predicate, so the probe and the tests cannot
+ * disagree about it.
+ */
+export function applyUndrainedFilters<T extends UndrainedQuery<T>>(
+  query: T,
+  q: QueueDefinition,
+): T {
+  let out = query.is(q.drainedAt, null);
+  for (const col of q.alsoTerminal) out = out.is(col, null);
+  if (q.giveUpAt) out = out.lt(q.giveUpAt.column, q.giveUpAt.ceiling);
+  return out;
+}
 
 /** The queues this probe actually queries. */
 export function watchedQueues(): QueueDefinition[] {
