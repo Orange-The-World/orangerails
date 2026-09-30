@@ -82,7 +82,7 @@ Deno.test('control A: the PR 1681 assertions PASS on the current-order compositi
   combinedStringAssertions(currentOrder(INPUT));
 });
 
-Deno.test('control B: the PR 1681 assertions FAIL on the earlier-order composition, on the mixed-group fragment', () => {
+Deno.test('control B (EXPECTED RED): the PR 1681 assertions run directly on the earlier-order composition', () => {
   const out = earlierOrder(INPUT);
-  assertThrows(() => combinedStringAssertions(out), Error, 'acct 907-[redacted]');
+  combinedStringAssertions(out);
 });
