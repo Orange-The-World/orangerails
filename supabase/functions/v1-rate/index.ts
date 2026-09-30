@@ -81,6 +81,16 @@ export function extractCompositeAuthority(compositeVia: string | null | undefine
   return authority
 }
 
+// Authorities that are aggregators, not official sources. Rates derived from them
+// are labelled 'market'; data_source_authority still reports the authority.
+// Every other non-null authority (central banks) stays 'official_reference'.
+const NON_OFFICIAL_AUTHORITIES = new Set(['OXR'])
+
+export function rateTypeForAuthority(authority: string | null): 'official_reference' | 'market' {
+  if (authority === null) return 'market'
+  return NON_OFFICIAL_AUTHORITIES.has(authority.toUpperCase()) ? 'market' : 'official_reference'
+}
+
 // In-memory sliding-window rate limiter (resets on cold start; sufficient for v1)
 const rlMap = new Map<string, { count: number; windowStart: number }>()
 
