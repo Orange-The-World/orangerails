@@ -70,7 +70,7 @@ export const STEALTH_SUPPORTED_PROTOCOL_VERSIONS = [1] as const;
  */
 export type StealthProtocolVersion = (typeof STEALTH_SUPPORTED_PROTOCOL_VERSIONS)[number];
 
-export const STEALTH_HKDF_INFO = 'or-stealth-v1' as const;
+export const STEALTH_HKDF_INFO = 'or-stealth-v2' as const;
 
 /**
  * Default gap limit used when OR_STEALTH_INIT omits the field.
