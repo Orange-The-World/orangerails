@@ -67,6 +67,7 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
+import { projectLabel, snapshotsMatch, type SignalSnapshot } from './alert-logic.ts';
 
 const FAILURE_WINDOW_MINUTES       = 30;
 const SUCCESS_WINDOW_MINUTES       = 60;
@@ -83,26 +84,6 @@ interface DrainCronStats {
   failed_count:    number;
   total_count:     number;
   succeeded_count: number;
-}
-
-/**
- * Snapshot of the observable signal state at the time of a Zulip post.
- * Stored in drain_alert_state.last_signal_snapshot and compared on each run
- * to suppress reposts when nothing has changed (OR-T2708).
- * Serialized with JSON.stringify for equality; key order must stay stable.
- */
-interface SignalSnapshot {
-  failure_rate_firing:     boolean;
-  failure_rate:            number | null;
-  zero_completions_firing: boolean;
-  succeeded_count:         number | null;
-  stall_firing:            boolean;
-  stalled:                 number | null;
-  retired_firing:          boolean;
-  retired:                 number | null;
-  query_error:             string | null;
-  starvation_firing:       boolean;
-  unprocessed_non_deferred: number | null;
 }
 
 function buildSnapshot(
@@ -131,12 +112,6 @@ function buildSnapshot(
     unprocessed_non_deferred: unprocessedNonDeferred,
     query_error:              queryError ?? null,
   };
-}
-
-/** True when two snapshots represent the same observable signal state. */
-function snapshotsMatch(a: SignalSnapshot | null, b: SignalSnapshot): boolean {
-  if (a === null) return false;
-  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 interface HealthReport {
@@ -539,7 +514,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       }
 
       const message =
-        `:warning: **or_quiltt_sync_drain alert** @**CTO Rails** @**SRE**\n\n` +
+        `:warning: **or_quiltt_sync_drain alert (${projectLabel(Deno.env.get('SUPABASE_URL'))})** @**CTO Rails** @**SRE**\n\n` +
         parts.join('\n') +
         `\n\nChecked at: ${checkedAt}`;
 
