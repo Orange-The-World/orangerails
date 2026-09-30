@@ -244,12 +244,17 @@ jobs:
 
           # A clean run is SILENT. Only things needing a human get written down,
           # and they go to a GitHub issue rather than to chat.
-          existing=$(gh_retry gh issue list --repo "$R" --state open --limit 100 \
-                       --json number,title \
-                     | jq -r --arg t "$ISSUE_TITLE" 'map(select(.title==$t))|.[0].number // empty')
+          # Look at open AND closed issues. An open-only lookup cannot see the issue that an
+          # earlier quiet run closed, so the next escalation opened a second issue and the
+          # list of held changes forked across two issue numbers.
+          match=$(gh_retry gh issue list --repo "$R" --state all --limit 100 \
+                    --json number,title,state \
+                  | jq -r --arg t "$ISSUE_TITLE" '[.[] | select(.title==$t)] | sort_by(.number) | last // empty | "\(.number) \(.state)"')
+          existing=${match%% *}
+          existing_state=${match#* }
 
           if [ -z "$escalated" ]; then
-            [ -n "$existing" ] && gh_retry gh issue close "$existing" --repo "$R" \
+            [ "$existing_state" = "OPEN" ] && gh_retry gh issue close "$existing" --repo "$R" \
               --comment "Nothing sensitive is waiting. Merged ${merged} low-risk change(s) this run." || true
             exit 0
           fi
@@ -270,6 +275,9 @@ jobs:
           echo "${body}"
 
           if [ -n "$existing" ]; then
+            if [ "$existing_state" = "CLOSED" ]; then
+              gh_retry gh issue reopen "$existing" --repo "$R"
+            fi
             gh_retry gh issue edit "$existing" --repo "$R" --body "$body"
           else
             gh_retry gh issue create --repo "$R" --title "$ISSUE_TITLE" --body "$body"
