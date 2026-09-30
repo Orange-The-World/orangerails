@@ -287,7 +287,7 @@ export type StealthInitMessage = StealthInitWidgetMessage | StealthInitAppMessag
 
 export interface StealthReadyMessage {
   type: 'OR_STEALTH_READY';
-  /** Current preferred version. Prefer supported_protocol_versions when picking a version to speak. */
+  /** Current preferred version. Only version 1 exists today, so this is always 1. */
   protocol_version: StealthProtocolVersion;
   /**
    * Every protocol version this widget build accepts at INIT, in ascending
