@@ -74,6 +74,7 @@ import {
   type AdminSubkeys,
   type AdminConsumeParams,
 } from "@/lib/co-admin";
+import { STEALTH_HKDF_INFO } from "@/stealth/lib/postmessage";
 
 // ------------------------------------------------------------------
 // Types
@@ -926,7 +927,7 @@ export function VaultProvider({ children }: VaultProviderProps) {
         name: "HKDF",
         hash: "SHA-256",
         salt: new Uint8Array(0),
-        info: new TextEncoder().encode("or-stealth-v1"),
+        info: new TextEncoder().encode(STEALTH_HKDF_INFO),
       },
       mek,
       256,
