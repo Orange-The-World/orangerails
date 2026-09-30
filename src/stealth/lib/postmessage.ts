@@ -288,7 +288,7 @@ export interface StealthReadyMessage {
   protocol_version: StealthProtocolVersion;
   /**
    * Every protocol version this widget build accepts at INIT, in ascending
-   * order. Added additively (DEC-0304): an app that reads only
+   * order. Added additively: an app that reads only
    * protocol_version is unaffected. Read this set to pick a version both
    * sides speak with no app deploy, including after a widget rollback or a
    * stale cached copy is served.

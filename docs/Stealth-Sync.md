@@ -86,7 +86,7 @@ When the widget needs to make a network request (fetch filters, fetch a block, s
 
 Documented in `src/stealth/lib/postmessage.ts` in the orangerails repo. Stable surface for third-party integration. Versioned via `protocol_version` field; bumping it is the migration mechanism.
 
-### Protocol version support window (DEC-0304)
+### Protocol version support window
 
 The widget checks membership in a supported set, not equality with a single
 constant: `STEALTH_SUPPORTED_PROTOCOL_VERSIONS` in `postmessage.ts` lists
