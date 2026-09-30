@@ -22,6 +22,7 @@ import {
 } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import {
   ageHours,
+  applyUndrainedFilters,
   classify,
   QUEUES,
   unmonitoredQueues,
@@ -378,4 +379,55 @@ Deno.test('the scanner accepts both spellings of the timestamp type', () => {
     ['verbose_queue'],
     'TIMESTAMP WITH TIME ZONE is the same type as TIMESTAMPTZ',
   );
+});
+
+/** Records the calls applyUndrainedFilters makes, so no database is needed. */
+class CallRecorder {
+  calls: string[] = [];
+  is(column: string, value: null): this {
+    this.calls.push(`is ${column} ${value}`);
+    return this;
+  }
+  lt(column: string, value: number): this {
+    this.calls.push(`lt ${column} ${value}`);
+    return this;
+  }
+}
+
+Deno.test('a delivery row past its retry ceiling is not counted as queued', () => {
+  // or-webhook-dispatch stops retrying a row once attempts reaches its ceiling
+  // and leaves it as it is. That row never drains, so counting it reports a
+  // stall for something nothing will ever pick up again.
+  const wd = QUEUES.find((q) => q.table === 'webhook_delivery')!;
+  const recorder = new CallRecorder();
+  applyUndrainedFilters(recorder, wd);
+  assertEquals(recorder.calls, ['is succeeded_at null', 'lt attempts 5']);
+});
+
+Deno.test('a queue with no give-up ceiling gets no retry filter', () => {
+  const inbox = QUEUES.find((q) => q.table === 'quiltt_webhook_inbox')!;
+  const recorder = new CallRecorder();
+  applyUndrainedFilters(recorder, inbox);
+  assertEquals(recorder.calls, [
+    'is processed_at null',
+    'is retirement_reason null',
+  ]);
+});
+
+Deno.test('the give-up ceiling matches the dispatcher retry limit', () => {
+  // Two copies of one number. If the dispatcher's limit is raised and this one
+  // is not, rows it is still retrying are hidden from the probe. If this one is
+  // raised alone, given-up rows count as stalled again.
+  const wd = QUEUES.find((q) => q.table === 'webhook_delivery')!;
+  assert(wd.giveUpAt, 'webhook_delivery declares no give-up ceiling');
+  const source = Deno.readTextFileSync(
+    new URL('../or-webhook-dispatch/index.ts', import.meta.url),
+  );
+  const match = source.match(/const MAX_ATTEMPTS = (\d+);/);
+  assert(
+    match,
+    'could not find MAX_ATTEMPTS in or-webhook-dispatch, so the ceiling cannot ' +
+      'be checked. Fix this scan, do not relax the assertion.',
+  );
+  assertEquals(wd.giveUpAt.ceiling, Number(match[1]));
 });
