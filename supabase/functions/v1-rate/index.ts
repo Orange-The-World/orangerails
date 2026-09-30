@@ -388,7 +388,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const staleGap = gapMs > FORWARD_FILL_MAX_MS
     const fillType = staleGap ? 'gap' : resolvedTs === bucketTs ? 'exact' : 'forward_fill'
     const compositeAuth = staleGap ? null : extractCompositeAuthority(row.composite_via)
-    const rateType = staleGap ? null : (compositeAuth !== null ? 'official_reference' : 'market')
+    const rateType = staleGap ? null : rateTypeForAuthority(compositeAuth)
 
     results.push({
       asset: item.asset.toUpperCase(),
