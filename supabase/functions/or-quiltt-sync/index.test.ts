@@ -1159,11 +1159,20 @@ Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as succe
           select(_c: string) { return ch; },
           eq(_c: string, _v: unknown) { return ch; },
           maybeSingle() {
-            // No webhook_url: skip the webhook enqueue branch.
-            return Promise.resolve({ data: { webhook_url: null }, error: null });
+            // Provide a webhook_url so the test exercises the full happy path
+            // after the 23505 tolerance check -- including the webhook_delivery
+            // insert that the new strict check requires.
+            return Promise.resolve({ data: { webhook_url: 'https://example.com/hooks' }, error: null });
           },
         };
         return ch;
+      }
+      if (table === 'webhook_delivery') {
+        return {
+          insert(_row: unknown) {
+            return Promise.resolve({ data: null, error: null });
+          },
+        };
       }
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, eq() { return this as any; } };
@@ -1221,6 +1230,198 @@ Deno.test('handleEventSinkDelivery: non-23505 insert error surfaces as error str
     typeof result === 'string' && result.includes('sink connection insert failed'),
     true,
     'a non-23505 insert error must surface as an error string, not be silently swallowed',
+  );
+});
+
+// ── OR-T0212: sink webhook hold tests ─────────────────────────────────────────
+//
+// For sink-mode events, 'processed' must mean a webhook_delivery row was
+// actually queued. An empty webhook_url, or a failed insert, must hold the
+// event with an explicit reason string so it can be replayed after the fault
+// is resolved.
+
+Deno.test('OR-T0212: handleEventSinkDelivery holds event with sink-no-webhook-url when platform has no webhook_url', async () => {
+  let connectionsCallCount = 0;
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(table: string) {
+      if (table === 'connections') {
+        connectionsCallCount++;
+        if (connectionsCallCount === 1) {
+          return {
+            insert(_row: unknown) {
+              return Promise.resolve({ data: null, error: null });
+            },
+          };
+        }
+        // deno-lint-ignore no-explicit-any
+        const chain: any = {
+          select(_c: string) { return chain; },
+          eq(_c: string, _v: unknown) { return chain; },
+          maybeSingle() {
+            return Promise.resolve({ data: { id: 'conn-or-nourl' }, error: null });
+          },
+        };
+        return chain;
+      }
+      if (table === 'platforms') {
+        // deno-lint-ignore no-explicit-any
+        const ch: any = {
+          select(_c: string) { return ch; },
+          eq(_c: string, _v: unknown) { return ch; },
+          maybeSingle() {
+            return Promise.resolve({ data: { webhook_url: null }, error: null });
+          },
+        };
+        return ch;
+      }
+      // deno-lint-ignore no-explicit-any
+      return { select() { return this as any; }, eq() { return this as any; } };
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-sink-nourl',
+    event_type:    'connection.synced.successful.initial',
+    payload:       { record: { id: 'quiltt-conn-nourl' } },
+    platform_id:   'plat-no-url',
+    subaccount_id: 'sub-sink',
+    attempts:      0,
+  };
+
+  const result = await handleEventSinkDelivery(mockClient, ev, 'quiltt-conn-nourl', 'plat-no-url', 'sub-sink');
+  assertEquals(
+    result,
+    'sink-no-webhook-url',
+    'sink event must be held with sink-no-webhook-url when platform has no webhook_url (OR-T0212)',
+  );
+});
+
+Deno.test('OR-T0212: handleEventSinkDelivery holds event when webhook_delivery insert fails', async () => {
+  let connectionsCallCount = 0;
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(table: string) {
+      if (table === 'connections') {
+        connectionsCallCount++;
+        if (connectionsCallCount === 1) {
+          return {
+            insert(_row: unknown) {
+              return Promise.resolve({ data: null, error: null });
+            },
+          };
+        }
+        // deno-lint-ignore no-explicit-any
+        const chain: any = {
+          select(_c: string) { return chain; },
+          eq(_c: string, _v: unknown) { return chain; },
+          maybeSingle() {
+            return Promise.resolve({ data: { id: 'conn-or-whfail' }, error: null });
+          },
+        };
+        return chain;
+      }
+      if (table === 'platforms') {
+        // deno-lint-ignore no-explicit-any
+        const ch: any = {
+          select(_c: string) { return ch; },
+          eq(_c: string, _v: unknown) { return ch; },
+          maybeSingle() {
+            return Promise.resolve({ data: { webhook_url: 'https://example.com/hooks' }, error: null });
+          },
+        };
+        return ch;
+      }
+      if (table === 'webhook_delivery') {
+        return {
+          insert(_row: unknown) {
+            return Promise.resolve({ data: null, error: { message: 'connection refused' } });
+          },
+        };
+      }
+      // deno-lint-ignore no-explicit-any
+      return { select() { return this as any; }, eq() { return this as any; } };
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-sink-whfail',
+    event_type:    'connection.synced.successful.initial',
+    payload:       { record: { id: 'quiltt-conn-whfail' } },
+    platform_id:   'plat-sink',
+    subaccount_id: 'sub-sink',
+    attempts:      0,
+  };
+
+  const result = await handleEventSinkDelivery(mockClient, ev, 'quiltt-conn-whfail', 'plat-sink', 'sub-sink');
+  assertEquals(
+    typeof result === 'string' && result !== 'processed',
+    true,
+    'sink event must be held (not marked processed) when webhook_delivery insert fails (OR-T0212)',
+  );
+});
+
+Deno.test('OR-T0212: handleEventSinkDelivery returns processed when webhook_url set and insert succeeds', async () => {
+  let connectionsCallCount = 0;
+  // deno-lint-ignore no-explicit-any
+  const mockClient: any = {
+    from(table: string) {
+      if (table === 'connections') {
+        connectionsCallCount++;
+        if (connectionsCallCount === 1) {
+          return {
+            insert(_row: unknown) {
+              return Promise.resolve({ data: null, error: null });
+            },
+          };
+        }
+        // deno-lint-ignore no-explicit-any
+        const chain: any = {
+          select(_c: string) { return chain; },
+          eq(_c: string, _v: unknown) { return chain; },
+          maybeSingle() {
+            return Promise.resolve({ data: { id: 'conn-or-ok' }, error: null });
+          },
+        };
+        return chain;
+      }
+      if (table === 'platforms') {
+        // deno-lint-ignore no-explicit-any
+        const ch: any = {
+          select(_c: string) { return ch; },
+          eq(_c: string, _v: unknown) { return ch; },
+          maybeSingle() {
+            return Promise.resolve({ data: { webhook_url: 'https://example.com/hooks' }, error: null });
+          },
+        };
+        return ch;
+      }
+      if (table === 'webhook_delivery') {
+        return {
+          insert(_row: unknown) {
+            return Promise.resolve({ data: null, error: null });
+          },
+        };
+      }
+      // deno-lint-ignore no-explicit-any
+      return { select() { return this as any; }, eq() { return this as any; } };
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-sink-ok',
+    event_type:    'connection.synced.successful.initial',
+    payload:       { record: { id: 'quiltt-conn-ok' } },
+    platform_id:   'plat-sink',
+    subaccount_id: 'sub-sink',
+    attempts:      0,
+  };
+
+  const result = await handleEventSinkDelivery(mockClient, ev, 'quiltt-conn-ok', 'plat-sink', 'sub-sink');
+  assertEquals(
+    result,
+    'processed',
+    'sink event must return processed when webhook_url is set and webhook_delivery insert succeeds (OR-T0212)',
   );
 });
 
