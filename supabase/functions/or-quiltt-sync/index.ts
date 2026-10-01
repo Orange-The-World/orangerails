@@ -986,46 +986,50 @@ export async function handleEventSinkDelivery(
     return `sink connection lookup failed after upsert: ${connLookupErr?.message ?? 'not found'}`;
   }
 
-  // Step 3: best-effort webhook enqueue. Failure must not block inbox event consumption.
-  try {
-    const { data: platRow } = await client
-      .from('platforms')
-      .select('webhook_url')
-      .eq('id', platformId)
-      .maybeSingle();
-    const url = platRow?.webhook_url;
-    if (typeof url === 'string' && url.length > 0) {
-      await client.from('webhook_delivery').insert({
-        platform_id:   platformId,
-        subaccount_id: subaccountId,
-        event_type:    'sync.completed',
-        // Zero is the honest value here, not a placeholder. Sink delivery
-        // means we pulled no rows ourselves: the whole point of the webhook
-        // is to tell the consumer to come and call or-sync. The OPK path
-        // reports a real row count because it did pull rows.
-        payload: buildSyncCompletedPayload({
-          subaccountId,
-          connectionId: connRow.id,
-          syncedCount:  0,
-          provider:     'quiltt',
-        }),
-      });
-    } else {
-      // OR-T2729: this branch used to do nothing. No webhook_url on the
-      // platform means the integrator is never told a sync is ready, and
-      // nothing else records that, so a platform can sit at zero
-      // transactions for months with no signal anywhere. Log it so the
-      // gap is visible instead of hiding.
-      console.warn(
-        `[or-quiltt-sync] event ${ev.event_id}: sink webhook enqueue skipped, ` +
-          `platform ${platformId} has no webhook_url configured`,
-      );
-    }
-  } catch (whErr) {
-    console.error(
-      `[or-quiltt-sync] event ${ev.event_id}: sink webhook enqueue failed for ` +
-        `platform ${platformId}: ${whErr instanceof Error ? whErr.message : String(whErr)}`,
+  // Step 3: webhook enqueue. For sink-mode events, 'processed' means a
+  // sync.completed webhook_delivery row was actually queued -- not
+  // best-effort. If the platform has no webhook_url, or the insert
+  // fails, hold the event with an explicit reason so it can be replayed
+  // once the platform is configured or the insert fault is resolved.
+  // (OR-T0212 step 1; prod read step 8 confirmed events marked processed
+  // with no integrator delivery.)
+  const { data: platRow, error: platLookupErr } = await client
+    .from('platforms')
+    .select('webhook_url')
+    .eq('id', platformId)
+    .maybeSingle();
+  if (platLookupErr) {
+    return `sink webhook: platform lookup failed: ${platLookupErr.message}`;
+  }
+  const webhookUrl = platRow?.webhook_url;
+  if (typeof webhookUrl !== 'string' || webhookUrl.length === 0) {
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: sink webhook held, ` +
+        `platform ${platformId} has no webhook_url configured`,
     );
+    return 'sink-no-webhook-url';
+  }
+  const { error: whInsertErr } = await client.from('webhook_delivery').insert({
+    platform_id:   platformId,
+    subaccount_id: subaccountId,
+    event_type:    'sync.completed',
+    // Zero is the honest value here, not a placeholder. Sink delivery
+    // means we pulled no rows ourselves: the whole point of the webhook
+    // is to tell the consumer to come and call or-sync. The OPK path
+    // reports a real row count because it did pull rows.
+    payload: buildSyncCompletedPayload({
+      subaccountId,
+      connectionId: connRow.id,
+      syncedCount:  0,
+      provider:     'quiltt',
+    }),
+  });
+  if (whInsertErr) {
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: sink webhook_delivery insert failed ` +
+        `(platform=${platformId}): ${whInsertErr.message}`,
+    );
+    return `sink webhook: delivery insert failed: ${whInsertErr.message}`;
   }
 
   console.log(
