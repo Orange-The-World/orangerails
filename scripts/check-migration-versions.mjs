@@ -58,12 +58,24 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const MIGRATIONS_DIR = "supabase/migrations";
+
+/**
+ * The first thing an operator wants to know when the collision check is red is whether
+ * anything reached a database. Nothing did, in either caller: a pull request run applies
+ * nothing, and on a push the deploy workflow's apply-migrations job needs the job that runs
+ * this script (OR-T1189). The step the deploy job used to run inline said so, and moving that
+ * job onto this shared script dropped the sentence (OR-T1166). It lives here once so the
+ * collision summary and the unreadable directory summary cannot drift apart.
+ */
+const NOTHING_APPLIED =
+  "Nothing has been applied by this run: a pull request run applies nothing, and on a push " +
+  "the apply job needs this check to pass before it starts. Push again once it is fixed.";
 
 /**
  * Append a GitHub Actions step summary block, if GITHUB_STEP_SUMMARY is set. Never throws:
@@ -214,7 +226,7 @@ const CASES = [
  * End to end cases. These run THIS SCRIPT, as CI runs it, against a throwaway tree.
  *
  * The cases above prove the comparison is right. They do not prove the thing CI invokes can
- * fail: the enumeration, the exit codes, and the two hard-failure paths all live outside
+ * fail: the enumeration, the exit codes, and the hard-failure paths all live outside
  * verdict(), and those are precisely where a check decays into a green tick over nothing. A
  * gate nobody has watched go red is not evidence, so this watches it, on every run, rather
  * than once in a ticket that ages.
@@ -238,6 +250,7 @@ const END_TO_END = [
       "Duplicate migration version(s)",
       "20260831120000_a.sql",
       "20260831120000_b.sql",
+      "Nothing has been applied by this run",
     ],
   },
   {
@@ -261,12 +274,32 @@ const END_TO_END = [
     expectOutput: "does not exist",
     expectSummary: ["could not run"],
   },
+  {
+    name: "a migrations path that exists but cannot be listed exits 1 and says why in the summary",
+    files: [],
+    migrationsIsAFile: true,
+    expectStatus: 1,
+    expectOutput: "could not read",
+    expectSummary: [
+      "could not read the migrations directory",
+      "UNKNOWN",
+      "Nothing has been applied by this run",
+    ],
+  },
 ];
 
-function runInTempTree(files, createDir) {
+function runInTempTree(files, createDir, migrationsIsAFile) {
   const root = mkdtempSync(join(tmpdir(), "migration-version-gate-"));
   try {
-    if (createDir) {
+    if (migrationsIsAFile) {
+      // The path exists, so the missing directory branch is not taken, but it cannot be
+      // listed (ENOTDIR). That reaches the listing failure path on any platform and for any
+      // user, which a permissions trick would not.
+      mkdirSync(join(root, dirname(MIGRATIONS_DIR)), { recursive: true });
+      writeFileSync(
+        join(root, MIGRATIONS_DIR),
+        "-- self-test fixture: a file where the directory belongs\n");
+    } else if (createDir) {
       mkdirSync(join(root, MIGRATIONS_DIR), { recursive: true });
       for (const name of files) {
         writeFileSync(join(root, MIGRATIONS_DIR, name), "-- self-test fixture, never applied\n");
@@ -320,7 +353,7 @@ function selftest() {
 
   for (const testCase of END_TO_END) {
     const { status, output, summary } = runInTempTree(
-      testCase.files, testCase.createDir !== false);
+      testCase.files, testCase.createDir !== false, testCase.migrationsIsAFile === true);
     if (status !== testCase.expectStatus) {
       failed += 1;
       console.error(
@@ -354,8 +387,9 @@ function selftest() {
     "migration version self-test OK: " + total + " cases pass (" + CASES.length +
     " over the comparison, " + END_TO_END.length + " running this script for real in a " +
     "throwaway tree). The gate was watched exiting 1 on a collision, on an empty migrations " +
-    "directory and on a missing one, and exiting 0 on a clean tree. Each failing run's GitHub " +
-    "step summary was read back, and on a collision it named every colliding file.");
+    "directory, on a missing one and on one it could not list, and exiting 0 on a clean " +
+    "tree. Each failing run's GitHub step summary was read back, and on a collision it named " +
+    "every colliding file.");
 }
 
 /* ------------------------------------------------------------------------ main ------ */
@@ -378,6 +412,11 @@ if (process.argv.includes("--selftest")) {
   try {
     names = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql"));
   } catch (err) {
+    writeStepSummary(
+      "## :rotating_light: Migration version check could not read the migrations directory\n\n" +
+      "`" + MIGRATIONS_DIR + "` exists but could not be listed (`" + err.message + "`). The " +
+      "migration set is UNKNOWN, which is not the same fact as unique, so this is reported as " +
+      "a failure rather than a silent pass.\n\n" + NOTHING_APPLIED + "\n");
     console.error(
       "::error::could not read " + MIGRATIONS_DIR + " (" + err.message + "). The migration set " +
       "is UNKNOWN, which is not the same fact as unique.");
@@ -410,7 +449,7 @@ if (process.argv.includes("--selftest")) {
     summary +=
       "`supabase_migrations.schema_migrations` stores one row per version, so at most one " +
       "of these can ever be tracked and the rest are reported as applied whether they ran " +
-      "or not. Rename the later file to an unused timestamp.\n";
+      "or not. Rename the later file to an unused timestamp.\n\n" + NOTHING_APPLIED + "\n";
     writeStepSummary(summary);
 
     console.error("duplicate migration version(s) found:");
