@@ -321,6 +321,19 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         }
       }
       if (!subaccount_id || !platform_id) {
+        // Errored-event fallback: even with no mapping row a connection.synced.errored.*
+        // event must flip the OR connection to error so the UI reflects Quiltt's view.
+        // Attempt a global quiltt_connection_id lookup (provider_type=quiltt only); if
+        // exactly one row matches, flip it. Retire with mapping-missing either way.
+        // OR-T0212 step 5.
+        if (ev.event_type.startsWith('connection.synced.errored')) {
+          const connIdForFlip = typeof ev.payload?.record?.id === 'string'
+            ? ev.payload.record.id
+            : null;
+          if (connIdForFlip) {
+            await flipConnectionToErrorByConnectionId(client, ev, connIdForFlip);
+          }
+        }
         // Still no mapping; mark attempted but not processed (try next cycle)
         await bumpAttempts(client, ev, 'mapping-missing');
         skipped++;
@@ -1182,6 +1195,59 @@ export async function reconcileConnectionError(
       `correlation_id: ${correlationId}, cause_recorded: ${sinkMode})`,
   );
   return null;
+}
+
+/**
+ * Errored-event fallback for events that arrive with no mapping row (OR-T0212 step 5).
+ * When a connection.synced.errored.* event has no subaccount_id in the inbox, the main
+ * drain loop cannot call reconcileConnectionError. This function finds the OR connection
+ * by quiltt_connection_id alone (no subaccount filter) and flips it to error if exactly
+ * one row matches. Zero or multiple matches are skipped safely. The event is retired as
+ * mapping-missing by the caller regardless of this function's outcome.
+ */
+export async function flipConnectionToErrorByConnectionId(
+  client: SupabaseClient,
+  ev: PendingEvent,
+  quilttConnectionId: string,
+): Promise<void> {
+  const { data: rows, error: lookupErr } = await client
+    .from('connections')
+    .select('id')
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', quilttConnectionId);
+  if (lookupErr) {
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: mapping-missing errored fallback lookup failed: ` +
+        lookupErr.message,
+    );
+    return;
+  }
+  if (!rows || rows.length !== 1) {
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: mapping-missing errored fallback skipped ` +
+        `(found ${rows?.length ?? 0} connection row(s) for quiltt_connection_id ` +
+        `${quilttConnectionId})`,
+    );
+    return;
+  }
+  const code          = upstreamCodeForErroredEvent(ev.event_type);
+  const correlationId = randomCorrelationId();
+  const { error: updateErr } = await client
+    .from('connections')
+    .update({ status: 'error', updated_at: new Date().toISOString() })
+    .eq('id', rows[0].id);
+  if (updateErr) {
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: mapping-missing errored fallback update failed: ` +
+        updateErr.message,
+    );
+    return;
+  }
+  console.log(
+    `[or-quiltt-sync] event ${ev.event_id}: connection ${rows[0].id} flipped to error via ` +
+      `quiltt_connection_id-only lookup (no mapping row; code: ${code}, ` +
+      `correlation_id: ${correlationId})`,
+  );
 }
 
 /**
