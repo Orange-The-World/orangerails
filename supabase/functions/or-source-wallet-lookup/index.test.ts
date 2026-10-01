@@ -6,12 +6,12 @@
  *
  * Without the m flag, JavaScript's `$` matches only at the very end of the
  * input, so UUID_RE alone already rejects a UUID followed by a newline; the
- * UUID_LENGTH === 36 guard beside it is an explicit bound, not a patch. What
- * was NOT
- * covered before this file existed (confirmed via gh_get_file 404 on this
- * path, 2026-09-14) is that the HTTP layer actually enforces it: a green
- * predicate test proves the pattern is exact, not that a caller sending a
- * trailing-newline id receives a real 400. validateSourceWalletIdOrResponse
+ * UUID_LENGTH === 36 guard beside it is an explicit bound, not a patch.
+ *
+ * What was NOT covered before this file existed (confirmed via gh_get_file 404
+ * on this path, 2026-09-14) is that the HTTP layer actually enforces it: a
+ * green predicate test proves the pattern is exact, not that a caller sending
+ * a trailing-newline id receives a real 400. validateSourceWalletIdOrResponse
  * IS the code path the handler calls, unchanged, so driving it here and
  * asserting on its Response is asserting on the real status a caller gets.
  */
