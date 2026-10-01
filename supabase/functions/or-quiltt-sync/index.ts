@@ -1275,17 +1275,31 @@ export async function flipConnectionToErrorByConnectionId(
     status:     'error',
     updated_at: new Date().toISOString(),
   };
-  const { data: subRow } = await client
+  const { data: subRow, error: subRowErr } = await client
     .from('subaccounts')
     .select('platform_id')
     .eq('id', row.subaccount_id)
     .maybeSingle();
+  if (subRowErr) {
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: subaccounts lookup failed for ` +
+        `subaccount ${row.subaccount_id}, treating as non-sink so no cause will be ` +
+        `recorded: ${subRowErr.message}`,
+    );
+  }
   if (subRow?.platform_id) {
-    const { data: platRow } = await client
+    const { data: platRow, error: platRowErr } = await client
       .from('platforms')
       .select('sink_format')
       .eq('id', subRow.platform_id)
       .maybeSingle();
+    if (platRowErr) {
+      console.error(
+        `[or-quiltt-sync] event ${ev.event_id}: platforms lookup failed for ` +
+          `platform ${subRow.platform_id}, treating as non-sink so no cause will be ` +
+          `recorded: ${platRowErr.message}`,
+      );
+    }
     const sinkMode = typeof platRow?.sink_format === 'string' && platRow.sink_format.length > 0;
     if (sinkMode) {
       connPatch.encrypted_last_error = `${code}:${correlationId}`;
