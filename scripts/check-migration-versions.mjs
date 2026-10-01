@@ -39,9 +39,10 @@
  * Uniqueness is the cheaper half and is deliberately not held back for the other one. It also
  * reads the tree, not a database: a version recorded in a ledger by hand is not visible here.
  *
- * IT CANNOT PASS BY LOOKING AT NOTHING. A missing directory and an enumeration of zero .sql
- * files are both hard failures. A check that reports OK when it examined nothing is the exact
- * shape of control this repo keeps finding and removing, so this one refuses to be that.
+ * IT CANNOT PASS BY LOOKING AT NOTHING. A missing directory, a directory that cannot be listed
+ * and an enumeration of zero .sql files are all hard failures. A check that reports OK when it
+ * examined nothing is the exact shape of control this repo keeps finding and removing, so this
+ * one refuses to be that.
  *
  * Run `node scripts/check-migration-versions.mjs --selftest` to exercise the logic itself. CI
  * runs the self test BEFORE the check, so a broken comparison fails as a broken comparison
@@ -58,7 +59,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -238,6 +239,8 @@ const END_TO_END = [
       "Duplicate migration version(s)",
       "20260831120000_a.sql",
       "20260831120000_b.sql",
+      "push again",
+      "No migration has been applied by this run",
     ],
   },
   {
@@ -261,12 +264,30 @@ const END_TO_END = [
     expectOutput: "does not exist",
     expectSummary: ["could not run"],
   },
+  {
+    // supabase/migrations exists but is a regular file, so existsSync passes and readdirSync
+    // throws. This reaches the unreadable-directory path without chmod, which does nothing when
+    // the self test runs as root.
+    name: "a migrations path that exists but cannot be listed exits 1 and says so in the summary",
+    files: [],
+    asFile: true,
+    expectStatus: 1,
+    expectOutput: "could not read",
+    expectSummary: [
+      "could not read the migrations directory",
+      "No migration has been applied by this run",
+    ],
+  },
 ];
 
-function runInTempTree(files, createDir) {
+function runInTempTree(files, createDir, asFile = false) {
   const root = mkdtempSync(join(tmpdir(), "migration-version-gate-"));
   try {
-    if (createDir) {
+    if (asFile) {
+      mkdirSync(dirname(join(root, MIGRATIONS_DIR)), { recursive: true });
+      writeFileSync(
+        join(root, MIGRATIONS_DIR), "-- self-test fixture: a file where a directory belongs\n");
+    } else if (createDir) {
       mkdirSync(join(root, MIGRATIONS_DIR), { recursive: true });
       for (const name of files) {
         writeFileSync(join(root, MIGRATIONS_DIR, name), "-- self-test fixture, never applied\n");
@@ -320,7 +341,7 @@ function selftest() {
 
   for (const testCase of END_TO_END) {
     const { status, output, summary } = runInTempTree(
-      testCase.files, testCase.createDir !== false);
+      testCase.files, testCase.createDir !== false, testCase.asFile === true);
     if (status !== testCase.expectStatus) {
       failed += 1;
       console.error(
@@ -354,8 +375,9 @@ function selftest() {
     "migration version self-test OK: " + total + " cases pass (" + CASES.length +
     " over the comparison, " + END_TO_END.length + " running this script for real in a " +
     "throwaway tree). The gate was watched exiting 1 on a collision, on an empty migrations " +
-    "directory and on a missing one, and exiting 0 on a clean tree. Each failing run's GitHub " +
-    "step summary was read back, and on a collision it named every colliding file.");
+    "directory, on a missing one and on one that exists but cannot be listed, and exiting 0 on " +
+    "a clean tree. Each failing run's GitHub step summary was read back, and on a collision it " +
+    "named every colliding file.");
 }
 
 /* ------------------------------------------------------------------------ main ------ */
@@ -378,6 +400,11 @@ if (process.argv.includes("--selftest")) {
   try {
     names = readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith(".sql"));
   } catch (err) {
+    writeStepSummary(
+      "## :rotating_light: Migration version check could not read the migrations directory\n\n" +
+      "`" + MIGRATIONS_DIR + "` exists but could not be listed (`" + err.message + "`). The " +
+      "migration set is UNKNOWN, which is not the same fact as unique, so this is treated as a " +
+      "failure and not a pass. No migration has been applied by this run.\n");
     console.error(
       "::error::could not read " + MIGRATIONS_DIR + " (" + err.message + "). The migration set " +
       "is UNKNOWN, which is not the same fact as unique.");
@@ -410,7 +437,8 @@ if (process.argv.includes("--selftest")) {
     summary +=
       "`supabase_migrations.schema_migrations` stores one row per version, so at most one " +
       "of these can ever be tracked and the rest are reported as applied whether they ran " +
-      "or not. Rename the later file to an unused timestamp.\n";
+      "or not. Rename the later file to an unused timestamp and push again. No migration " +
+      "has been applied by this run.\n";
     writeStepSummary(summary);
 
     console.error("duplicate migration version(s) found:");
