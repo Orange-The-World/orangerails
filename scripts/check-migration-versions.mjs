@@ -230,7 +230,7 @@ const CASES = [
  */
 const END_TO_END = [
   {
-    name: "a real tree with a collision exits 1, says so, and names every colliding file in the step summary",
+    name: "a real tree with a collision exits 1 and names every colliding file in the summary",
     files: ["20260831120000_a.sql", "20260831120000_b.sql"],
     expectStatus: 1,
     expectOutput: "duplicate migration version",
