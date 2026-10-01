@@ -326,13 +326,9 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         // Attempt a global quiltt_connection_id lookup (provider_type=quiltt only); if
         // exactly one row matches, flip it. Retire with mapping-missing either way.
         // OR-T0212 step 5.
-        if (ev.event_type.startsWith('connection.synced.errored')) {
-          const connIdForFlip = typeof ev.payload?.record?.id === 'string'
-            ? ev.payload.record.id
-            : null;
-          if (connIdForFlip) {
-            await flipConnectionToErrorByConnectionId(client, ev, connIdForFlip);
-          }
+        const connIdForFlip = connectionIdForErroredMappingMiss(ev);
+        if (connIdForFlip) {
+          await flipConnectionToErrorByConnectionId(client, ev, connIdForFlip);
         }
         // Still no mapping; mark attempted but not processed (try next cycle)
         await bumpAttempts(client, ev, 'mapping-missing');
@@ -1198,6 +1194,17 @@ export async function reconcileConnectionError(
 }
 
 /**
+ * Returns the Quiltt connection id to flip for a no-mapping errored event,
+ * or null if the event type is not errored or the id is not a plain string.
+ * Extracted so the call-site conditions (errored-only, string id) are testable
+ * in isolation (OR-T0212 step 5).
+ */
+export function connectionIdForErroredMappingMiss(ev: PendingEvent): string | null {
+  if (!ev.event_type.startsWith('connection.synced.errored')) return null;
+  return typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
+}
+
+/**
  * Errored-event fallback for events that arrive with no mapping row (OR-T0212 step 5).
  * When a connection.synced.errored.* event has no subaccount_id in the inbox, the main
  * drain loop cannot call reconcileConnectionError. This function finds the OR connection
@@ -1212,7 +1219,7 @@ export async function flipConnectionToErrorByConnectionId(
 ): Promise<void> {
   const { data: rows, error: lookupErr } = await client
     .from('connections')
-    .select('id')
+    .select('id, subaccount_id')
     .eq('provider_type', 'quiltt')
     .eq('quiltt_connection_id', quilttConnectionId);
   if (lookupErr) {
@@ -1226,16 +1233,61 @@ export async function flipConnectionToErrorByConnectionId(
     console.warn(
       `[or-quiltt-sync] event ${ev.event_id}: mapping-missing errored fallback skipped ` +
         `(found ${rows?.length ?? 0} connection row(s) for quiltt_connection_id ` +
-        `${quilttConnectionId})`,
+        `${redactProviderId(quilttConnectionId)})`,
     );
     return;
   }
+  const row = rows[0];
+  // OR-T2694 ordering guard: if a newer success was already processed for this
+  // connection, skip the write to avoid regressing a connection a success already fixed.
+  if (ev.received_at && row.subaccount_id) {
+    const newer = await findNewerProcessedSuccess(client, ev, row.subaccount_id, quilttConnectionId);
+    if (newer.error) {
+      console.error(
+        `[or-quiltt-sync] event ${ev.event_id}: mapping-missing errored fallback ordering check failed: ` +
+          newer.error,
+      );
+      return;
+    }
+    if (newer.eventId) {
+      console.warn(
+        `[or-quiltt-sync] event ${ev.event_id}: a newer success event ${newer.eventId} ` +
+          `for this Quiltt connection was already processed; not regressing connection ` +
+          `${row.id} to error [OR-T2694 ordering guard]`,
+      );
+      return;
+    }
+  }
   const code          = upstreamCodeForErroredEvent(ev.event_type);
   const correlationId = randomCorrelationId();
+  // DL-1445: store CODE:correlation on sink platforms, same as reconcileConnectionError.
+  // ev.platform_id is null in the no-mapping path; look up via the subaccount's platform.
+  const connPatch: Record<string, unknown> = {
+    status:     'error',
+    updated_at: new Date().toISOString(),
+  };
+  if (row.subaccount_id) {
+    const { data: subRow } = await client
+      .from('subaccounts')
+      .select('platform_id')
+      .eq('id', row.subaccount_id)
+      .maybeSingle();
+    if (subRow?.platform_id) {
+      const { data: platRow } = await client
+        .from('platforms')
+        .select('sink_format')
+        .eq('id', subRow.platform_id)
+        .maybeSingle();
+      const sinkMode = typeof platRow?.sink_format === 'string' && platRow.sink_format.length > 0;
+      if (sinkMode) {
+        connPatch.encrypted_last_error = `${code}:${correlationId}`;
+      }
+    }
+  }
   const { error: updateErr } = await client
     .from('connections')
-    .update({ status: 'error', updated_at: new Date().toISOString() })
-    .eq('id', rows[0].id);
+    .update(connPatch)
+    .eq('id', row.id);
   if (updateErr) {
     console.error(
       `[or-quiltt-sync] event ${ev.event_id}: mapping-missing errored fallback update failed: ` +
@@ -1244,7 +1296,7 @@ export async function flipConnectionToErrorByConnectionId(
     return;
   }
   console.log(
-    `[or-quiltt-sync] event ${ev.event_id}: connection ${rows[0].id} flipped to error via ` +
+    `[or-quiltt-sync] event ${ev.event_id}: connection ${row.id} flipped to error via ` +
       `quiltt_connection_id-only lookup (no mapping row; code: ${code}, ` +
       `correlation_id: ${correlationId})`,
   );
