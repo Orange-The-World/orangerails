@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { claimRetiredEventForReplay, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+import { claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── explicit retired-event replay (OR-T0128) ────────────────────────
 
@@ -2022,4 +2022,97 @@ Deno.test('flipConnectionToErrorByConnectionId: skips when lookup returns an err
   await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-xyz');
 
   assertEquals(updateCalled, false, 'update must not be called when the lookup errors');
+});
+
+// ── connectionIdForErroredMappingMiss call-site gate (OR-T0212 step 5) ───────
+
+Deno.test('connectionIdForErroredMappingMiss: returns quiltt connection id for errored event with string record.id', () => {
+  const ev = erroredPendingEvent();
+  // deno-lint-ignore no-explicit-any
+  const result = connectionIdForErroredMappingMiss(ev as any);
+  assertEquals(result, 'qconn-xyz');
+});
+
+Deno.test('connectionIdForErroredMappingMiss: returns null for a non-errored event type', () => {
+  const ev = erroredPendingEvent({ event_type: 'connection.synced.successful.initial' });
+  // deno-lint-ignore no-explicit-any
+  const result = connectionIdForErroredMappingMiss(ev as any);
+  assertEquals(result, null, 'must not call fallback for non-errored events');
+});
+
+Deno.test('connectionIdForErroredMappingMiss: returns null when record.id is not a string', () => {
+  const ev = erroredPendingEvent({ payload: { record: { id: 12345 } } });
+  // deno-lint-ignore no-explicit-any
+  const result = connectionIdForErroredMappingMiss(ev as any);
+  assertEquals(result, null, 'must not call fallback when record.id is not a plain string');
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: lookup asserts provider_type=quiltt and quiltt_connection_id filters', async () => {
+  const eqCalls: Array<[string, unknown]> = [];
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(col: string, val: unknown) { eqCalls.push([col, val]); return chain; },
+        then(resolve: (v: { data: Array<{id: string; subaccount_id: string | null}>; error: null }) => unknown) {
+          return resolve({ data: [], error: null }); // zero rows: skip update, but eq calls recorded
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-filter-check');
+
+  assertEquals(
+    eqCalls.some(([col, val]) => col === 'provider_type' && val === 'quiltt'),
+    true,
+    'lookup must filter on provider_type=quiltt',
+  );
+  assertEquals(
+    eqCalls.some(([col, val]) => col === 'quiltt_connection_id' && val === 'qconn-filter-check'),
+    true,
+    'lookup must filter on quiltt_connection_id',
+  );
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: skips when a newer processed success event exists (OR-T2694 flip-flop guard)', async () => {
+  let updateCalled = false;
+  const conn = { id: 'conn-flipflop', subaccount_id: 'sub-flipflop' };
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        like(_col: string, _pat: unknown) { return chain; },
+        not(_col: string, _op: string, _val: unknown) { return chain; },
+        is(_col: string, _val: unknown) { return chain; },
+        gt(_col: string, _val: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() { return Promise.resolve({ data: null, error: null }); },
+        update(_patch: unknown) { updateCalled = true; return chain; },
+        then(resolve: (v: unknown) => unknown) {
+          if (table === 'connections') {
+            return resolve({ data: [conn], error: null });
+          }
+          if (table === 'quiltt_webhook_inbox') {
+            // Simulate a newer processed success event: ordering guard fires, no update
+            return resolve({ data: [{ event_id: 'newer-success-evt' }], error: null });
+          }
+          return resolve({ data: [], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-flipflop');
+
+  assertEquals(updateCalled, false, 'update must not be called when a newer success event was already processed');
 });
