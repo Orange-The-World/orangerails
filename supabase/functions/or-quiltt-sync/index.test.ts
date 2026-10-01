@@ -1921,7 +1921,10 @@ Deno.test('flipConnectionToErrorByConnectionId: skips when connection has no sub
 
 Deno.test('flipConnectionToErrorByConnectionId: writes encrypted_last_error on sink platform (DL-1445)', async () => {
   const conn = { id: 'or-conn-sink', subaccount_id: 'sub-sink' };
-  let actualPatch: Record<string, unknown> | null = null;
+  // Use a wrapper object so TypeScript does not narrow the value to null after
+  // the await (TS does not narrow object-property types as aggressively as let
+  // variables, avoiding TS2339/TS2352 on the post-await assertions).
+  const patchSpy = { value: null as Record<string, unknown> | null };
 
   // deno-lint-ignore no-explicit-any
   const client: any = {
@@ -1941,11 +1944,11 @@ Deno.test('flipConnectionToErrorByConnectionId: writes encrypted_last_error on s
           return Promise.resolve({ data: null, error: null });
         },
         update(patch: Record<string, unknown>) {
-          actualPatch = patch;
+          patchSpy.value = patch;
           return chain;
         },
         then(resolve: (v: unknown) => unknown) {
-          if (actualPatch) { return resolve({ error: null }); }
+          if (patchSpy.value) { return resolve({ error: null }); }
           if (table === 'connections') { return resolve({ data: [conn], error: null }); }
           return resolve({ data: [], error: null }); // quiltt_webhook_inbox: no newer success
         },
@@ -1958,8 +1961,8 @@ Deno.test('flipConnectionToErrorByConnectionId: writes encrypted_last_error on s
   // deno-lint-ignore no-explicit-any
   await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-sink');
 
-  assertEquals(actualPatch?.status, 'error', 'status must be set to error');
-  const errValue = actualPatch?.encrypted_last_error as string | undefined;
+  assertEquals(patchSpy.value?.status, 'error', 'status must be set to error');
+  const errValue = patchSpy.value?.encrypted_last_error as string | undefined;
   assertEquals(
     typeof errValue === 'string' && /^UPSTREAM_AUTH_FAILED:[0-9a-f]{16}$/.test(errValue),
     true,
@@ -1969,7 +1972,8 @@ Deno.test('flipConnectionToErrorByConnectionId: writes encrypted_last_error on s
 
 Deno.test('flipConnectionToErrorByConnectionId: does not write encrypted_last_error on non-sink platform (DL-1445)', async () => {
   const conn = { id: 'or-conn-nonsink', subaccount_id: 'sub-nonsink' };
-  let actualPatch: Record<string, unknown> | null = null;
+  // Same wrapper-object pattern as the sink test above (avoids TS2339/TS2352).
+  const patchSpy = { value: null as Record<string, unknown> | null };
 
   // deno-lint-ignore no-explicit-any
   const client: any = {
@@ -1990,11 +1994,11 @@ Deno.test('flipConnectionToErrorByConnectionId: does not write encrypted_last_er
           return Promise.resolve({ data: null, error: null });
         },
         update(patch: Record<string, unknown>) {
-          actualPatch = patch;
+          patchSpy.value = patch;
           return chain;
         },
         then(resolve: (v: unknown) => unknown) {
-          if (actualPatch) { return resolve({ error: null }); }
+          if (patchSpy.value) { return resolve({ error: null }); }
           if (table === 'connections') { return resolve({ data: [conn], error: null }); }
           return resolve({ data: [], error: null }); // quiltt_webhook_inbox: no newer success
         },
@@ -2006,9 +2010,9 @@ Deno.test('flipConnectionToErrorByConnectionId: does not write encrypted_last_er
   // deno-lint-ignore no-explicit-any
   await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-nonsink');
 
-  assertEquals(actualPatch?.status, 'error', 'status must be set to error');
+  assertEquals(patchSpy.value?.status, 'error', 'status must be set to error');
   assertEquals(
-    (actualPatch as Record<string, unknown>).encrypted_last_error,
+    patchSpy.value?.encrypted_last_error,
     undefined,
     'encrypted_last_error must not be set for non-sink platforms',
   );
