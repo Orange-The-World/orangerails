@@ -372,3 +372,160 @@ describe("a recovery invalidates every co-admin grant", () => {
     expect(calls.some((c) => c.op === "delete")).toBe(false);
   });
 });
+
+/**
+ * The tests above show that a filter was asked for. The tests below show what
+ * the filter DOES, against rows that carry timestamps, because a count alone
+ * cannot tell a bounded delete from an unbounded one: both report whatever the
+ * fixture hands back. A grant made after the rotation is valid under the fresh
+ * MEK and must keep BOTH of its rows. Losing only its admin row leaves a key
+ * row that the owner's list cannot show.
+ */
+const BEFORE_ROTATION = "2026-08-28T11:00:00.000Z";
+const AFTER_ROTATION = "2026-08-28T12:30:00.000Z";
+
+type Row = Record<string, unknown>;
+
+/** The two rows one grant leaves behind: who is listed, and the key they hold. */
+function grantRows(adminUserId: string, at: string) {
+  return {
+    admin: { owner_user_id: "owner-1", admin_user_id: adminUserId, added_at: at },
+    key: { data_key_id: "workspace-key-1", recipient_user_id: adminUserId, created_at: at },
+  };
+}
+
+/**
+ * A fake client that holds real rows and APPLIES the filters it is handed, so a
+ * test can read back what is left in each table. makeFakeClient above returns
+ * the same canned rows whatever the filter says. Timestamps here are ISO 8601
+ * strings in one format, so comparing them as strings orders them as instants.
+ */
+function makeStatefulClient(initial: Record<string, Row[]>) {
+  const tables: Record<string, Row[] | undefined> = {};
+  for (const [name, rows] of Object.entries(initial)) {
+    tables[name] = rows.map((row) => ({ ...row }));
+  }
+  const calls: RecordedCall[] = [];
+
+  function chainFor(call: RecordedCall): Chain {
+    const matchers: Array<(row: Row) => boolean> = [];
+
+    function run(): QueryResult {
+      const rows = tables[call.table] ?? [];
+      const matched = rows.filter((row) => matchers.every((matches) => matches(row)));
+      if (call.op === "delete") {
+        tables[call.table] = rows.filter((row) => !matched.includes(row));
+      }
+      const columns = (call.columns ?? "")
+        .split(",")
+        .map((column) => column.trim())
+        .filter((column) => column.length > 0);
+      if (columns.length === 0) return { data: null, error: null };
+      return {
+        data: matched.map((row) => {
+          const picked: Row = {};
+          for (const column of columns) picked[column] = row[column];
+          return picked;
+        }),
+        error: null,
+      };
+    }
+
+    const chain: Chain = {
+      then(
+        onFulfilled: (value: QueryResult) => unknown,
+        onRejected?: (reason: unknown) => unknown,
+      ) {
+        return Promise.resolve(run()).then(onFulfilled, onRejected);
+      },
+      eq(column: string, value: unknown) {
+        call.filters.push({ column, value });
+        matchers.push((row) => row[column] === value);
+        return chain;
+      },
+      lte(column: string, value: unknown) {
+        call.filters.push({ column, value });
+        matchers.push((row) => {
+          const cell = row[column];
+          return typeof cell === "string" && typeof value === "string" && cell <= value;
+        });
+        return chain;
+      },
+      select(columns: string) {
+        call.columns = columns;
+        return chain;
+      },
+    };
+    return chain;
+  }
+
+  const client = {
+    from(table: string) {
+      return {
+        select(columns: string) {
+          const call: RecordedCall = { table, op: "select", columns, filters: [] };
+          calls.push(call);
+          return chainFor(call);
+        },
+        delete() {
+          const call: RecordedCall = { table, op: "delete", filters: [] };
+          calls.push(call);
+          return chainFor(call);
+        },
+      };
+    },
+  };
+
+  return { client: client as CoAdminRecoveryClient, calls, tables };
+}
+
+describe("a grant made after the rotation is left alone", () => {
+  it("bounds the admin list read and the admin delete by added_at, the same as the key delete", async () => {
+    const { client, calls } = makeFakeClient(TWO_GRANTS);
+
+    await invalidate(client, "workspace-key-1", ROTATION_COMPLETED_AT);
+
+    const bound = { column: "added_at", value: ROTATION_COMPLETED_AT };
+    const adminRead = calls.find((c) => c.table === "workspace_admins" && c.op === "select");
+    const adminDelete = calls.find((c) => c.table === "workspace_admins" && c.op === "delete");
+    expect(adminRead?.filters).toContainEqual(bound);
+    expect(adminDelete?.filters).toContainEqual(bound);
+  });
+
+  it("keeps both rows of a post-rotation grant and removes only the pre-rotation grant", async () => {
+    const before = grantRows("admin-before", BEFORE_ROTATION);
+    const after = grantRows("admin-after", AFTER_ROTATION);
+    const { client, tables } = makeStatefulClient({
+      workspace_admins: [before.admin, after.admin],
+      wrapped_data_keys: [before.key, after.key],
+    });
+
+    const result = await invalidate(client);
+
+    expect(result).toEqual({ status: "invalidated", grantsInvalidated: 1 });
+    // The newer grant keeps its admin row AND its key row. With the admin
+    // delete unbounded it took both admins and left the newer key row behind
+    // with nobody listed against it.
+    expect(tables.workspace_admins).toEqual([after.admin]);
+    expect(tables.wrapped_data_keys).toEqual([after.key]);
+  });
+
+  it("reports nothing to do, and deletes nothing, when the only grant came after the rotation", async () => {
+    const after = grantRows("admin-after", AFTER_ROTATION);
+    const { client, calls, tables } = makeStatefulClient({
+      workspace_admins: [after.admin],
+      wrapped_data_keys: [after.key],
+    });
+
+    const result = await invalidate(client);
+
+    // With the admin read unbounded, the gate counted this admin, the bounded
+    // key delete then removed nothing, and a vault with nothing stale in it was
+    // reported as a failed cleanup that told the owner to remove every contact.
+    expect(result).toEqual({ status: "none" });
+    expect(coAdminInvalidationMessage(result)).toBeNull();
+    expect(calls.some((c) => c.op === "delete")).toBe(false);
+    expect(tables.workspace_admins).toEqual([after.admin]);
+    expect(tables.wrapped_data_keys).toEqual([after.key]);
+  });
+});
