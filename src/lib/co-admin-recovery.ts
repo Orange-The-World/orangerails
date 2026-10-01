@@ -36,15 +36,21 @@
  * the old MEK and the existing grants are still correct, so destroying them
  * would be pure damage.
  *
- * THE DELETE IS SCOPED TO BEFORE THE ROTATION, not just to the workspace key
- * id. workspace_key_id is a stable row identifier, not a version counter: it
- * does not change when the MEK rotates. If the owner grants a NEW co-admin
- * from a second tab in the window between the rotation write landing and this
- * cleanup running, that grant is wrapped under the fresh MEK and is valid, but
- * it carries the same workspace_key_id as the dead pre-rotation grants. An
- * unconditional delete on that id alone would destroy it too, silently. So the
+ * THE READ AND BOTH DELETES ARE SCOPED TO BEFORE THE ROTATION, not just to the
+ * workspace key id or the owner. workspace_key_id is a stable row identifier,
+ * not a version counter: it does not change when the MEK rotates. If the owner
+ * grants a NEW co-admin from a second tab in the window between the rotation
+ * write landing and this cleanup running, that grant is wrapped under the fresh
+ * MEK and is valid, but it carries the same workspace_key_id as the dead
+ * pre-rotation grants, and its workspace_admins row carries the same
+ * owner_user_id as theirs. An unconditional delete on either of those alone
+ * would destroy it too, silently. Bounding only one of the two tables is not
+ * enough either: it would leave a grant with its key row and no admin row,
+ * which the owner's list cannot show and the notice does not mention. So the
  * caller passes rotationCompletedAt, the instant the rotation was proven, and
- * the delete only removes rows created at or before it.
+ * the admin list read that gates the cleanup, the wrapped_data_keys delete and
+ * the workspace_admins delete each only touch rows created (created_at) or
+ * added (added_at) at or before it.
  *
  * IT DOES NOT THROW. By the time it runs the recovery has already succeeded.
  * Reporting a cleanup failure as a failed recovery would tell the user
@@ -52,10 +58,12 @@
  * caller shows it.
  *
  * WHAT THE OWNER CAN AND CANNOT SEE, because it decides the shape of the code
- * below. public.wrapped_data_keys has exactly one select policy and it is
- * recipient scoped, recipient_user_id = auth.uid(). An owner is not a
+ * below. On production, public.wrapped_data_keys has exactly one select policy
+ * and it is recipient scoped, recipient_user_id = auth.uid(). An owner is not a
  * recipient of their own grants, so an owner reading that table gets zero rows
- * and NO error. Its delete policy is owner scoped, so the owner can remove the
+ * and NO error. (Another environment may carry an extra select policy, so never
+ * infer production behaviour from a read there.) Its delete policy is owner
+ * scoped, so the owner can remove the
  * rows they cannot read. public.workspace_admins is readable and deletable by
  * the owner. So: the count and the gate come from workspace_admins and from
  * what the deletes give back, never from a select on wrapped_data_keys. Gating
@@ -82,19 +90,20 @@ export interface InvalidateCoAdminGrantsArgs {
   workspaceKeyId: string | null;
   /**
    * ISO 8601 timestamp of the moment the rotated vault meta write was proven
-   * to have landed. wrapped_data_keys.created_at is compared against it: a
-   * grant created at or before this instant used the pre-rotation MEK and is
-   * dead, a grant created after it was made against the fresh MEK and is
-   * left alone. See the file header for why workspace_key_id alone cannot
-   * tell the two apart.
+   * to have landed. wrapped_data_keys.created_at and workspace_admins.added_at
+   * are both compared against it: a grant created at or before this instant
+   * used the pre-rotation MEK and is dead, a grant created after it was made
+   * against the fresh MEK and is left alone, in both tables. See the file
+   * header for why workspace_key_id alone cannot tell the two apart.
    */
   rotationCompletedAt: string;
 }
 
 export type CoAdminInvalidation =
   /**
-   * Nothing to do. Either the owner has no workspace key, or nobody is listed
-   * as holding emergency access.
+   * Nothing to do. Either the owner has no workspace key, or nobody was listed
+   * as holding emergency access as of the rotation (a grant made after it is
+   * valid and is not counted).
    */
   | { status: "none" }
   /** Grants existed and are gone. */
@@ -147,14 +156,20 @@ export async function invalidateCoAdminGrantsAfterRecovery(
 
   if (!workspaceKeyId) return { status: "none" };
 
-  // Who currently holds emergency access. This read is on workspace_admins and
-  // deliberately NOT on wrapped_data_keys: see the note at the top of the file
-  // about which of the two the owner is allowed to read. A read that always
-  // returns nothing is not a gate, it is an off switch.
+  // Who held emergency access when the rotation landed. This read is on
+  // workspace_admins and deliberately NOT on wrapped_data_keys: see the note at
+  // the top of the file about which of the two the owner is allowed to read. A
+  // read that always returns nothing is not a gate, it is an off switch.
+  //
+  // Bounded by added_at <= rotationCompletedAt, the same bound the deletes
+  // carry. Without it a grant made after the rotation is counted here, the
+  // bounded wrapped_data_keys delete then rightly leaves its key row alone, and
+  // the cleanup would report a failure for a vault with nothing stale in it.
   const { data: admins, error: adminReadErr } = await supabase
     .from("workspace_admins")
     .select("admin_user_id")
-    .eq("owner_user_id", ownerUserId);
+    .eq("owner_user_id", ownerUserId)
+    .lte("added_at", rotationCompletedAt);
   if (adminReadErr) {
     return {
       status: "failed",
@@ -200,10 +215,15 @@ export async function invalidateCoAdminGrantsAfterRecovery(
     };
   }
 
+  // Bounded by added_at for the same reason as the wrapped_data_keys delete
+  // above and the gate read: a grant made after the rotation keeps its wrapped
+  // key row, so it must keep its admin row too, or the owner's list silently
+  // drops someone who still holds a working grant.
   const { data: removedAdmins, error: adminErr } = await supabase
     .from("workspace_admins")
     .delete()
     .eq("owner_user_id", ownerUserId)
+    .lte("added_at", rotationCompletedAt)
     .select("admin_user_id");
   if (adminErr) {
     // The dangerous half succeeded: no dead key material is left. What remains
