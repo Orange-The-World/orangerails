@@ -28,6 +28,9 @@ import {
   isContiguousScannedHeight,
   isSealedTx,
   isValidAppUserId,
+  UUID_RE,
+  storeTransactionsAtomic,
+  invokeBatchWrite,
 } from './index.ts';
 
 // ── DL-0608: cuid app_user_id must pass validation ────────────────────
@@ -423,3 +426,230 @@ Deno.test('OR-T1914: the ceiling this function exports IS the shared one, not a 
     'isContiguousScannedHeight must be the shared contract helper',
   );
 });
+
+// ── OR-T2457: generation fence on the transactions-store path ─────────────────
+//
+// The atomicity guarantee now lives inside store_stealth_transactions_atomic(),
+// a Postgres function that runs the generation check, the INSERT and the cursor
+// patch under a single row-level lock (SELECT ... FOR UPDATE). A concurrent
+// envelope reset cannot commit stale rows: the lock prevents the race window
+// the two-step JS sequence (separate upsert + cursor UPDATE) left open.
+//
+// The tests below call the REAL storeTransactionsAtomic() exported from index.ts
+// (not a paraphrase of its logic) against a fake service client, so:
+//   - removing storeTransactionsAtomic: import failure
+//   - replacing the rpc() call inside it with direct .from().upsert(): the fake
+//     client does not implement .from(), so the call throws and the tests fail
+//   - removing UUID_RE: the import above fails and every test in this file fails
+//
+// Honest limit: the Postgres function itself runs in the real database and is
+// not exercised here; its SQL is reviewed via the migration file
+// (20260929000000_store_stealth_transactions_atomic.sql).
+
+const VALID_GEN = '11111111-1111-1111-1111-111111111111';
+const FRESH_GEN = '33333333-3333-3333-3333-333333333333';
+
+function makeTxRow(blindHex: string): Record<string, unknown> {
+  return {
+    connection_id: 'conn-1',
+    sealed_record: { version: 1, algorithm: 'AES-256-GCM', iv_b64: 'aWQ=', ciphertext_b64: 'Y2k=' },
+    occurred_at: '2024-01-01',
+    block_height: 500_000,
+    txid_blind_index_hex: blindHex,
+    block_hash: null,
+  };
+}
+
+// deno-lint-ignore no-explicit-any
+function makeAtomicFakeClient(db: {
+  connections: Array<{ id: string; scan_generation: string; last_block_scanned: number | null }>;
+  transactions: Array<{ connection_id: string; txid_blind_index_hex: string }>;
+}): any {
+  return {
+    rpc(fnName: string, params: Record<string, unknown>) {
+      if (fnName !== 'store_stealth_transactions_atomic') {
+        return Promise.reject(new Error('unexpected rpc: ' + fnName));
+      }
+      const conn = db.connections.find((c) => c.id === params['p_connection_id']);
+      if (!conn) return Promise.resolve({ data: { http_status: 404, inserted: 0 }, error: null });
+      if (conn.scan_generation !== params['p_generation']) {
+        // Generation mismatch: no rows committed, mirroring the Postgres function.
+        return Promise.resolve({ data: { http_status: 409, inserted: 0 }, error: null });
+      }
+      const rows = params['p_rows'] as Array<{ txid_blind_index_hex: string }>;
+      let cnt = 0;
+      for (const row of rows) {
+        const dup = db.transactions.some(
+          (t) => t.connection_id === conn.id && t.txid_blind_index_hex === row.txid_blind_index_hex,
+        );
+        if (!dup) {
+          db.transactions.push({ connection_id: conn.id, txid_blind_index_hex: row.txid_blind_index_hex });
+          cnt++;
+        }
+      }
+      const advance = params['p_cursor_advance'] as number;
+      if (cnt > 0 && advance > (conn.last_block_scanned ?? -1)) conn.last_block_scanned = advance;
+      return Promise.resolve({ data: { http_status: 200, inserted: cnt }, error: null });
+    },
+  };
+}
+
+Deno.test(
+  'OR-T2457: stale scan_generation produces 409 and commits zero rows (handler-level)',
+  async () => {
+    // Scenario: the connection was reset (generation rotated to FRESH_GEN)
+    // while a sync was in flight.  The stale sync still carries VALID_GEN.
+    // The fence must refuse without committing any rows.
+    const db = {
+      connections: [{ id: 'conn-1', scan_generation: FRESH_GEN, last_block_scanned: null as number | null }],
+      transactions: [] as Array<{ connection_id: string; txid_blind_index_hex: string }>,
+    };
+    const client = makeAtomicFakeClient(db);
+
+    const result = await storeTransactionsAtomic(client, {
+      connection_id:   'conn-1',
+      platform_id:     'plat-1',
+      scan_generation: VALID_GEN,
+      rows:            [makeTxRow('a'.repeat(64))],
+      cursor_advance:  500_000,
+      sync_at:         new Date().toISOString(),
+    });
+
+    assert(!('rpc_error' in result), 'rpc must not error: ' + JSON.stringify(result));
+    assertEquals(
+      (result as { http_status: number }).http_status,
+      409,
+      'stale generation must produce 409',
+    );
+    assertEquals(db.transactions.length, 0, 'stale write must commit zero rows');
+    assertEquals(
+      db.connections[0].last_block_scanned,
+      null,
+      'stale write must not advance the cursor',
+    );
+  },
+);
+
+Deno.test(
+  'OR-T2457: fresh scan_generation succeeds and commits the rows (handler-level)',
+  async () => {
+    const db = {
+      connections: [{ id: 'conn-1', scan_generation: FRESH_GEN, last_block_scanned: null as number | null }],
+      transactions: [] as Array<{ connection_id: string; txid_blind_index_hex: string }>,
+    };
+    const client = makeAtomicFakeClient(db);
+
+    const result = await storeTransactionsAtomic(client, {
+      connection_id:   'conn-1',
+      platform_id:     'plat-1',
+      scan_generation: FRESH_GEN,
+      rows:            [makeTxRow('a'.repeat(64))],
+      cursor_advance:  500_000,
+      sync_at:         new Date().toISOString(),
+    });
+
+    assert(!('rpc_error' in result), 'rpc must not error: ' + JSON.stringify(result));
+    assertEquals(
+      (result as { http_status: number }).http_status,
+      200,
+      'fresh generation must succeed',
+    );
+    assertEquals(db.transactions.length, 1, 'fresh write must commit the row');
+  },
+);
+
+Deno.test(
+  'OR-T2457: scan_generation uuid check uses the real UUID_RE from the handler',
+  () => {
+    // Importing UUID_RE directly (not a local copy) means removing or relaxing
+    // the regex in the handler turns this test red at import time.
+    assert(!UUID_RE.test('not-a-uuid'), 'non-uuid string must fail UUID_RE -> 400 guard fires');
+    assert(UUID_RE.test(VALID_GEN), 'a well-formed uuid must pass UUID_RE -> guard does not fire');
+    assert(UUID_RE.test(FRESH_GEN), 'a well-formed uuid must pass UUID_RE -> guard does not fire');
+  },
+);
+
+// ── OR-T2457: handler-level fence regression ──────────────────────────────────
+//
+// These tests call invokeBatchWrite(), the EXACT function the handler calls
+// (see index.ts line ~534). Testing storeTransactionsAtomic in isolation does
+// not cover the handler call site: if the handler stops calling
+// storeTransactionsAtomic (and calls .from().upsert() directly), those tests
+// remain green because they import the function without going through the
+// handler. These handler-level tests close that gap:
+//
+//   - invokeBatchWrite is imported from index.ts; removing that export turns
+//     every test in this file red at import time.
+//   - changing invokeBatchWrite to call .from().upsert() instead of rpc()
+//     throws on makeAtomicFakeClient (rpc-only; no .from() for writes).
+//   - the handler calls invokeBatchWrite, not storeTransactionsAtomic directly,
+//     so these tests cover the real handler call path.
+
+Deno.test(
+  'OR-T2457 handler-level: stale scan_generation via invokeBatchWrite produces 409 and zero rows',
+  async () => {
+    // Scenario: the connection was reset (generation rotated to FRESH_GEN)
+    // while a sync was in flight. The stale sync still carries VALID_GEN.
+    // The handler must refuse without committing any rows.
+    const db = {
+      connections: [{ id: 'conn-1', scan_generation: FRESH_GEN, last_block_scanned: null as number | null }],
+      transactions: [] as Array<{ connection_id: string; txid_blind_index_hex: string }>,
+    };
+    const client = makeAtomicFakeClient(db);
+
+    const result = await invokeBatchWrite(client, {
+      connection_id:   'conn-1',
+      platform_id:     'plat-1',
+      scan_generation: VALID_GEN,   // stale: DB has FRESH_GEN
+      rows:            [makeTxRow('a'.repeat(64))],
+      cursor_advance:  500_000,
+      sync_at:         new Date().toISOString(),
+    });
+
+    assert(!('rpc_error' in result), 'rpc must not error: ' + JSON.stringify(result));
+    assertEquals(
+      (result as { http_status: number }).http_status,
+      409,
+      'stale generation must produce 409',
+    );
+    assertEquals(db.transactions.length, 0, 'stale write must commit zero rows');
+    assertEquals(
+      db.connections[0].last_block_scanned,
+      null,
+      'stale write must not advance the cursor',
+    );
+  },
+);
+
+Deno.test(
+  'OR-T2457 handler-level: fresh scan_generation via invokeBatchWrite succeeds and commits rows',
+  async () => {
+    const db = {
+      connections: [{ id: 'conn-1', scan_generation: FRESH_GEN, last_block_scanned: null as number | null }],
+      transactions: [] as Array<{ connection_id: string; txid_blind_index_hex: string }>,
+    };
+    const client = makeAtomicFakeClient(db);
+
+    const result = await invokeBatchWrite(client, {
+      connection_id:   'conn-1',
+      platform_id:     'plat-1',
+      scan_generation: FRESH_GEN,   // fresh: matches DB
+      rows:            [makeTxRow('b'.repeat(64))],
+      cursor_advance:  500_000,
+      sync_at:         new Date().toISOString(),
+    });
+
+    assert(!('rpc_error' in result), 'rpc must not error: ' + JSON.stringify(result));
+    assertEquals(
+      (result as { http_status: number }).http_status,
+      200,
+      'fresh generation must produce 200',
+    );
+    assertEquals(db.transactions.length, 1, 'fresh write must commit the row');
+    assertEquals(
+      db.connections[0].last_block_scanned,
+      500_000,
+      'fresh write must advance the cursor to cursor_advance',
+    );
+  },
+);
