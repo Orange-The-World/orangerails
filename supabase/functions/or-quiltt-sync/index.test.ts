@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+import { SINK_NO_WEBHOOK_URL, SINK_PLATFORM_NOT_FOUND, SINK_WEBHOOK_INSERT_FAILED, claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── explicit retired-event replay (OR-T0128) ────────────────────────
 
@@ -1159,11 +1159,17 @@ Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as succe
           select(_c: string) { return ch; },
           eq(_c: string, _v: unknown) { return ch; },
           maybeSingle() {
-            // No webhook_url: skip the webhook enqueue branch.
-            return Promise.resolve({ data: { webhook_url: null }, error: null });
+            return Promise.resolve({ data: { webhook_url: 'https://example.com/webhook' }, error: null });
           },
         };
         return ch;
+      }
+      if (table === 'webhook_delivery') {
+        return {
+          insert(_row: unknown) {
+            return Promise.resolve({ data: null, error: null });
+          },
+        };
       }
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, eq() { return this as any; } };
@@ -1222,6 +1228,160 @@ Deno.test('handleEventSinkDelivery: non-23505 insert error surfaces as error str
     true,
     'a non-23505 insert error must surface as an error string, not be silently swallowed',
   );
+});
+
+// ── handleEventSinkDelivery: OR-T0212 webhook error handling ────────────────────
+//
+// Verifies that step 3 of handleEventSinkDelivery correctly surfaces errors
+// instead of silently falling through to 'processed'.
+
+function makeSinkClientWithConnections() {
+  // deno-lint-ignore no-explicit-any
+  const connChain: any = {
+    select(_c: string) { return connChain; },
+    eq(_c: string, _v: unknown) { return connChain; },
+    maybeSingle() { return Promise.resolve({ data: { id: 'conn-or-1' }, error: null }); },
+  };
+  let connectionsCallCount = 0;
+  // deno-lint-ignore no-explicit-any
+  return function makeClient(overrideTables: Record<string, () => unknown>): any {
+    return {
+      from(table: string) {
+        if (overrideTables[table]) return overrideTables[table]();
+        if (table === 'connections') {
+          connectionsCallCount++;
+          if (connectionsCallCount === 1) {
+            return {
+              insert(_r: unknown) { return Promise.resolve({ data: null, error: null }); },
+            };
+          }
+          return connChain;
+        }
+        // deno-lint-ignore no-explicit-any
+        return { select() { return this as any; }, eq() { return this as any; } };
+      },
+    };
+  };
+}
+
+Deno.test('handleEventSinkDelivery: platforms lookup error -> SINK_PLATFORM_NOT_FOUND', async () => {
+  const makeClient = makeSinkClientWithConnections();
+  const mockClient = makeClient({
+    platforms: () => ({
+      // deno-lint-ignore no-explicit-any
+      select(_c: string) { return this as any; },
+      // deno-lint-ignore no-explicit-any
+      eq(_c: string, _v: unknown) { return this as any; },
+      maybeSingle() { return Promise.resolve({ data: null, error: { code: '42P01', message: 'relation does not exist' } }); },
+    }),
+  });
+  const ev = { event_id: 'evt-platErr', event_type: 'connection.synced.successful.initial', payload: { record: { id: 'qc' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0 };
+  const result = await handleEventSinkDelivery(mockClient, ev, 'qc', 'plat-1', 'sub-1');
+  assertEquals(result, SINK_PLATFORM_NOT_FOUND, 'platforms lookup error must return SINK_PLATFORM_NOT_FOUND');
+});
+
+Deno.test('handleEventSinkDelivery: platforms row not found (null) -> SINK_PLATFORM_NOT_FOUND', async () => {
+  const makeClient = makeSinkClientWithConnections();
+  const mockClient = makeClient({
+    platforms: () => ({
+      // deno-lint-ignore no-explicit-any
+      select(_c: string) { return this as any; },
+      // deno-lint-ignore no-explicit-any
+      eq(_c: string, _v: unknown) { return this as any; },
+      maybeSingle() { return Promise.resolve({ data: null, error: null }); },
+    }),
+  });
+  const ev = { event_id: 'evt-platNull', event_type: 'connection.synced.successful.initial', payload: { record: { id: 'qc' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0 };
+  const result = await handleEventSinkDelivery(mockClient, ev, 'qc', 'plat-1', 'sub-1');
+  assertEquals(result, SINK_PLATFORM_NOT_FOUND, 'null platform row must return SINK_PLATFORM_NOT_FOUND');
+});
+
+Deno.test('handleEventSinkDelivery: webhook_url null -> SINK_NO_WEBHOOK_URL', async () => {
+  const makeClient = makeSinkClientWithConnections();
+  const mockClient = makeClient({
+    platforms: () => ({
+      // deno-lint-ignore no-explicit-any
+      select(_c: string) { return this as any; },
+      // deno-lint-ignore no-explicit-any
+      eq(_c: string, _v: unknown) { return this as any; },
+      maybeSingle() { return Promise.resolve({ data: { webhook_url: null }, error: null }); },
+    }),
+  });
+  const ev = { event_id: 'evt-noUrl', event_type: 'connection.synced.successful.initial', payload: { record: { id: 'qc' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0 };
+  const result = await handleEventSinkDelivery(mockClient, ev, 'qc', 'plat-1', 'sub-1');
+  assertEquals(result, SINK_NO_WEBHOOK_URL, 'null webhook_url must return SINK_NO_WEBHOOK_URL');
+});
+
+Deno.test('handleEventSinkDelivery: webhook_delivery insert error -> SINK_WEBHOOK_INSERT_FAILED', async () => {
+  const makeClient = makeSinkClientWithConnections();
+  const mockClient = makeClient({
+    platforms: () => ({
+      // deno-lint-ignore no-explicit-any
+      select(_c: string) { return this as any; },
+      // deno-lint-ignore no-explicit-any
+      eq(_c: string, _v: unknown) { return this as any; },
+      maybeSingle() { return Promise.resolve({ data: { webhook_url: 'https://example.com/hook' }, error: null }); },
+    }),
+    webhook_delivery: () => ({
+      insert(_r: unknown) { return Promise.resolve({ data: null, error: { code: '23503', message: 'foreign key violation' } }); },
+    }),
+  });
+  const ev = { event_id: 'evt-whErr', event_type: 'connection.synced.successful.initial', payload: { record: { id: 'qc' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0 };
+  const result = await handleEventSinkDelivery(mockClient, ev, 'qc', 'plat-1', 'sub-1');
+  assertEquals(result, SINK_WEBHOOK_INSERT_FAILED, 'webhook_delivery insert error must return SINK_WEBHOOK_INSERT_FAILED');
+});
+
+Deno.test('handleEventSinkDelivery: thrown exception -> SINK_WEBHOOK_INSERT_FAILED prefix', async () => {
+  const makeClient = makeSinkClientWithConnections();
+  const mockClient = makeClient({
+    platforms: () => ({
+      // deno-lint-ignore no-explicit-any
+      select(_c: string) { return this as any; },
+      // deno-lint-ignore no-explicit-any
+      eq(_c: string, _v: unknown) { return this as any; },
+      maybeSingle() { return Promise.resolve({ data: { webhook_url: 'https://example.com/hook' }, error: null }); },
+    }),
+    webhook_delivery: () => ({
+      insert(_r: unknown) { return Promise.reject(new Error('network timeout')); },
+    }),
+  });
+  const ev = { event_id: 'evt-whThrow', event_type: 'connection.synced.successful.initial', payload: { record: { id: 'qc' } }, platform_id: 'plat-1', subaccount_id: 'sub-1', attempts: 0 };
+  const result = await handleEventSinkDelivery(mockClient, ev, 'qc', 'plat-1', 'sub-1');
+  assertEquals(
+    typeof result === 'string' && result.startsWith(SINK_WEBHOOK_INSERT_FAILED),
+    true,
+    'a thrown exception must return a string starting with SINK_WEBHOOK_INSERT_FAILED',
+  );
+});
+
+// ── claimRetiredEventForReplay: sink reason strings are replayable (OR-T0212) ──
+
+Deno.test('claimRetiredEventForReplay: max-attempts:sink-no-webhook-url is replayable', async () => {
+  const reason = `max-attempts:${SINK_NO_WEBHOOK_URL}`;
+  const row = {
+    event_id: 'evt-replay-sink',
+    retirement_reason: reason,
+    last_error: SINK_NO_WEBHOOK_URL,
+    processed_at: '2026-01-01T00:00:00Z',
+    attempts: 25,
+  };
+  const client = replayClaimClient(row);
+  const res = await claimRetiredEventForReplay(client, 'evt-replay-sink', reason);
+  assertEquals(res.status, 'claimed', 'max-attempts:sink-no-webhook-url must be replayable');
+});
+
+Deno.test('claimRetiredEventForReplay: unrelated retirement reason still not-replayable', async () => {
+  const reason = 'max-attempts:some-other-reason';
+  const row = {
+    event_id: 'evt-noreplay',
+    retirement_reason: reason,
+    last_error: 'some-other-reason',
+    processed_at: '2026-01-01T00:00:00Z',
+    attempts: 25,
+  };
+  const client = replayClaimClient(row);
+  const res = await claimRetiredEventForReplay(client, 'evt-noreplay', reason);
+  assertEquals(res.status, 'not-replayable', 'unrelated retirement reason must remain not-replayable');
 });
 
 // ── DL-0747 accounts query shape regression guard ─────────────────────────────
