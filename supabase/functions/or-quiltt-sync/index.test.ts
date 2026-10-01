@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+import { SINK_REASON_INSERT_FAILED, SINK_REASON_NO_WEBHOOK_URL, SINK_REASON_PLATFORM_NOT_FOUND, claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── explicit retired-event replay (OR-T0128) ────────────────────────
 
@@ -1159,11 +1159,19 @@ Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as succe
           select(_c: string) { return ch; },
           eq(_c: string, _v: unknown) { return ch; },
           maybeSingle() {
-            // No webhook_url: skip the webhook enqueue branch.
-            return Promise.resolve({ data: { webhook_url: null }, error: null });
+            // Provide a webhook URL so the test runs the full happy path
+            // after the 23505-as-success fix on the connections insert.
+            return Promise.resolve({ data: { webhook_url: 'https://example.com/hook' }, error: null });
           },
         };
         return ch;
+      }
+      if (table === 'webhook_delivery') {
+        return {
+          insert(_row: unknown) {
+            return Promise.resolve({ data: null, error: null });
+          },
+        };
       }
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, eq() { return this as any; } };
