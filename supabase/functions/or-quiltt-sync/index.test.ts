@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { claimRetiredEventForReplay, fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+import { claimRetiredEventForReplay, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── explicit retired-event replay (OR-T0128) ────────────────────────
 
@@ -1827,4 +1827,199 @@ Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending'
     ['error'],
     "the legacy fallback must stay error-only: it may be resolving a different connection than the one that succeeded, and promoting pending there is not reversible by the consumer",
   );
+});
+
+// ── flipConnectionToErrorByConnectionId (OR-T0212 step 5) ───────────
+// Regression guard: errored events with no mapping row must still flip the
+// connection to error via a quiltt_connection_id-only lookup.
+
+function makeFlipClient({
+  rows,
+  lookupError,
+}: {
+  rows?: Array<{ id: string }>;
+  lookupError?: string;
+}) {
+  let updateCalled = false;
+  let updatedId: string | null = null;
+  let updatedPatch: Record<string, unknown> | null = null;
+  const predicates: Array<[string, unknown]> = [];
+
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(col: string, val: unknown) {
+          predicates.push([col, val]);
+          return chain;
+        },
+        update(patch: Record<string, unknown>) {
+          updatedPatch = patch;
+          return chain;
+        },
+        // 'select' terminal that returns the rows list (for the lookup)
+        then(resolve: (v: { data: Array<{id: string}> | null; error: { message: string } | null }) => unknown) {
+          if (lookupError) {
+            return resolve({ data: null, error: { message: lookupError } });
+          }
+          return resolve({ data: rows ?? [], error: null });
+        },
+        // 'update' terminal
+        eq(col: string, val: unknown) {
+          if (updatedPatch) {
+            // second eq call after update() -- this is the update filter
+            updateCalled = true;
+            updatedId = val as string;
+          } else {
+            predicates.push([col, val]);
+          }
+          return chain;
+        },
+      };
+      return chain;
+    },
+  };
+  return {
+    client,
+    updateCalled: () => updateCalled,
+    updatedId: () => updatedId,
+    updatedPatch: () => updatedPatch,
+    predicates: () => [...predicates],
+  };
+}
+
+function erroredPendingEvent(overrides: Record<string, unknown> = {}) {
+  return {
+    event_id: 'evt_errored_no_map',
+    event_type: 'connection.synced.errored.repairable',
+    payload: { record: { id: 'qconn-xyz' } },
+    platform_id: null,
+    subaccount_id: null,
+    attempts: 0,
+    received_at: '2026-09-30T10:00:00.000Z',
+    ...overrides,
+  };
+}
+
+Deno.test('flipConnectionToErrorByConnectionId: flips exactly-one-match to error', async () => {
+  const conn = { id: 'or-conn-123' };
+  let updateTarget: string | null = null;
+  let updatedStatus: string | null = null;
+
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      const eqClauses: Array<[string, unknown]> = [];
+      let afterUpdate = false;
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(col: string, val: unknown) {
+          if (afterUpdate) {
+            updateTarget = val as string;
+          } else {
+            eqClauses.push([col, val]);
+          }
+          return chain;
+        },
+        update(patch: Record<string, unknown>) {
+          afterUpdate = true;
+          updatedStatus = patch.status as string;
+          return chain;
+        },
+        // terminal for the SELECT (returns array, not maybeSingle)
+        then(resolve: (v: { data: Array<{id: string}>; error: null }) => unknown) {
+          return resolve({ data: [conn], error: null });
+        },
+        // terminal for the UPDATE
+        get [Symbol.toStringTag]() { return 'Promise'; },
+      };
+      // Make chain thenable for both select and update
+      chain.then = (resolve: (v: { data: Array<{id: string}>; error: null } | { error: null }) => unknown) => {
+        if (afterUpdate) return resolve({ error: null });
+        return resolve({ data: [conn], error: null });
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-xyz');
+
+  assertEquals(updatedStatus, 'error', 'connection status must be flipped to error');
+  assertEquals(updateTarget, conn.id, 'update must target the matched connection id');
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: skips when zero rows match', async () => {
+  let updateCalled = false;
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        update(_patch: Record<string, unknown>) { updateCalled = true; return chain; },
+        then(resolve: (v: { data: Array<{id: string}>; error: null }) => unknown) {
+          return resolve({ data: [], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-xyz');
+
+  assertEquals(updateCalled, false, 'update must not be called when no rows match');
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: skips when multiple rows match (ambiguous)', async () => {
+  let updateCalled = false;
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        update(_patch: Record<string, unknown>) { updateCalled = true; return chain; },
+        then(resolve: (v: { data: Array<{id: string}>; error: null }) => unknown) {
+          return resolve({ data: [{ id: 'conn-a' }, { id: 'conn-b' }], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-xyz');
+
+  assertEquals(updateCalled, false, 'update must not be called when multiple rows match');
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: skips when lookup returns an error', async () => {
+  let updateCalled = false;
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        update(_patch: Record<string, unknown>) { updateCalled = true; return chain; },
+        then(resolve: (v: { data: null; error: { message: string } }) => unknown) {
+          return resolve({ data: null, error: { message: 'db unavailable' } });
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-xyz');
+
+  assertEquals(updateCalled, false, 'update must not be called when the lookup errors');
 });
