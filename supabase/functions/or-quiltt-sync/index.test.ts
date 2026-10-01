@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { claimRetiredEventForReplay, fetchPendingBatch, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+import { claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── explicit retired-event replay (OR-T0128) ────────────────────────
 
@@ -1827,4 +1827,358 @@ Deno.test('DL-1409 review: the legacy NULL-id fallback must NOT promote pending'
     ['error'],
     "the legacy fallback must stay error-only: it may be resolving a different connection than the one that succeeded, and promoting pending there is not reversible by the consumer",
   );
+});
+
+// ── flipConnectionToErrorByConnectionId (OR-T0212 step 5) ───────────
+// Regression guard: errored events with no mapping row must still flip the
+// connection to error via a quiltt_connection_id-only lookup.
+
+
+function erroredPendingEvent(overrides: Record<string, unknown> = {}) {
+  return {
+    event_id: 'evt_errored_no_map',
+    event_type: 'connection.synced.errored.repairable',
+    payload: { record: { id: 'qconn-xyz' } },
+    platform_id: null,
+    subaccount_id: null,
+    attempts: 0,
+    received_at: '2026-09-30T10:00:00.000Z',
+    ...overrides,
+  };
+}
+
+Deno.test('flipConnectionToErrorByConnectionId: flips exactly-one-match to error', async () => {
+  const conn = { id: 'or-conn-123', subaccount_id: 'sub-123' };
+  let updateTarget: string | null = null;
+  let updatedStatus: string | null = null;
+
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      let inUpdate = false;
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(col: string, val: unknown) {
+          if (inUpdate && col === 'id') { updateTarget = val as string; }
+          return chain;
+        },
+        like(_col: string, _pat: unknown) { return chain; },
+        not(_col: string, _op: string, _val: unknown) { return chain; },
+        is(_col: string, _val: unknown) { return chain; },
+        gt(_col: string, _val: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() { return Promise.resolve({ data: null, error: null }); },
+        update(patch: Record<string, unknown>) {
+          inUpdate = true;
+          updatedStatus = patch.status as string;
+          return chain;
+        },
+        then(resolve: (v: unknown) => unknown) {
+          if (inUpdate) { return resolve({ error: null }); }
+          if (table === 'connections') {
+            return resolve({ data: [conn], error: null });
+          }
+          // quiltt_webhook_inbox findNewerProcessedSuccess: no newer success
+          return resolve({ data: [], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-xyz');
+
+  assertEquals(updatedStatus, 'error', 'connection status must be flipped to error');
+  assertEquals(updateTarget, conn.id, 'update must target the matched connection id');
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: skips when connection has no subaccount_id', async () => {
+  let updateCalled = false;
+  const conn = { id: 'or-conn-nosubaccount' }; // no subaccount_id
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        update(_patch: unknown) { updateCalled = true; return chain; },
+        then(resolve: (v: { data: Array<{id: string}>; error: null }) => unknown) {
+          return resolve({ data: [conn], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-xyz');
+
+  assertEquals(updateCalled, false, 'update must not be called when the matched connection has no subaccount_id');
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: writes encrypted_last_error on sink platform (DL-1445)', async () => {
+  const conn = { id: 'or-conn-sink', subaccount_id: 'sub-sink' };
+  // Use a wrapper object so TypeScript does not narrow the value to null after
+  // the await (TS does not narrow object-property types as aggressively as let
+  // variables, avoiding TS2339/TS2352 on the post-await assertions).
+  const patchSpy = { value: null as Record<string, unknown> | null };
+
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        like(_col: string, _pat: unknown) { return chain; },
+        not(_col: string, _op: string, _val: unknown) { return chain; },
+        is(_col: string, _val: unknown) { return chain; },
+        gt(_col: string, _val: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() {
+          if (table === 'subaccounts') return Promise.resolve({ data: { platform_id: 'plat-sink' }, error: null });
+          if (table === 'platforms') return Promise.resolve({ data: { sink_format: 'v2' }, error: null });
+          return Promise.resolve({ data: null, error: null });
+        },
+        update(patch: Record<string, unknown>) {
+          patchSpy.value = patch;
+          return chain;
+        },
+        then(resolve: (v: unknown) => unknown) {
+          if (patchSpy.value) { return resolve({ error: null }); }
+          if (table === 'connections') { return resolve({ data: [conn], error: null }); }
+          return resolve({ data: [], error: null }); // quiltt_webhook_inbox: no newer success
+        },
+      };
+      return chain;
+    },
+  };
+
+  // event_type 'connection.synced.errored.repairable' -> code UPSTREAM_AUTH_FAILED
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-sink');
+
+  assertEquals(patchSpy.value?.status, 'error', 'status must be set to error');
+  const errValue = patchSpy.value?.encrypted_last_error as string | undefined;
+  assertEquals(
+    typeof errValue === 'string' && /^UPSTREAM_AUTH_FAILED:[0-9a-f]{16}$/.test(errValue),
+    true,
+    `encrypted_last_error must match UPSTREAM_AUTH_FAILED:<16hex>, got: ${String(errValue)}`,
+  );
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: does not write encrypted_last_error on non-sink platform (DL-1445)', async () => {
+  const conn = { id: 'or-conn-nonsink', subaccount_id: 'sub-nonsink' };
+  // Same wrapper-object pattern as the sink test above (avoids TS2339/TS2352).
+  const patchSpy = { value: null as Record<string, unknown> | null };
+
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        like(_col: string, _pat: unknown) { return chain; },
+        not(_col: string, _op: string, _val: unknown) { return chain; },
+        is(_col: string, _val: unknown) { return chain; },
+        gt(_col: string, _val: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() {
+          if (table === 'subaccounts') return Promise.resolve({ data: { platform_id: 'plat-nonsink' }, error: null });
+          // non-sink: sink_format is null/empty
+          if (table === 'platforms') return Promise.resolve({ data: { sink_format: null }, error: null });
+          return Promise.resolve({ data: null, error: null });
+        },
+        update(patch: Record<string, unknown>) {
+          patchSpy.value = patch;
+          return chain;
+        },
+        then(resolve: (v: unknown) => unknown) {
+          if (patchSpy.value) { return resolve({ error: null }); }
+          if (table === 'connections') { return resolve({ data: [conn], error: null }); }
+          return resolve({ data: [], error: null }); // quiltt_webhook_inbox: no newer success
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-nonsink');
+
+  assertEquals(patchSpy.value?.status, 'error', 'status must be set to error');
+  assertEquals(
+    patchSpy.value?.encrypted_last_error,
+    undefined,
+    'encrypted_last_error must not be set for non-sink platforms',
+  );
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: skips when zero rows match', async () => {
+  let updateCalled = false;
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        update(_patch: Record<string, unknown>) { updateCalled = true; return chain; },
+        then(resolve: (v: { data: Array<{id: string}>; error: null }) => unknown) {
+          return resolve({ data: [], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-xyz');
+
+  assertEquals(updateCalled, false, 'update must not be called when no rows match');
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: skips when multiple rows match (ambiguous)', async () => {
+  let updateCalled = false;
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        update(_patch: Record<string, unknown>) { updateCalled = true; return chain; },
+        then(resolve: (v: { data: Array<{id: string}>; error: null }) => unknown) {
+          return resolve({ data: [{ id: 'conn-a' }, { id: 'conn-b' }], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-xyz');
+
+  assertEquals(updateCalled, false, 'update must not be called when multiple rows match');
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: skips when lookup returns an error', async () => {
+  let updateCalled = false;
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        update(_patch: Record<string, unknown>) { updateCalled = true; return chain; },
+        then(resolve: (v: { data: null; error: { message: string } }) => unknown) {
+          return resolve({ data: null, error: { message: 'db unavailable' } });
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-xyz');
+
+  assertEquals(updateCalled, false, 'update must not be called when the lookup errors');
+});
+
+// ── connectionIdForErroredMappingMiss call-site gate (OR-T0212 step 5) ───────
+
+Deno.test('connectionIdForErroredMappingMiss: returns quiltt connection id for errored event with string record.id', () => {
+  const ev = erroredPendingEvent();
+  // deno-lint-ignore no-explicit-any
+  const result = connectionIdForErroredMappingMiss(ev as any);
+  assertEquals(result, 'qconn-xyz');
+});
+
+Deno.test('connectionIdForErroredMappingMiss: returns null for a non-errored event type', () => {
+  const ev = erroredPendingEvent({ event_type: 'connection.synced.successful.initial' });
+  // deno-lint-ignore no-explicit-any
+  const result = connectionIdForErroredMappingMiss(ev as any);
+  assertEquals(result, null, 'must not call fallback for non-errored events');
+});
+
+Deno.test('connectionIdForErroredMappingMiss: returns null when record.id is not a string', () => {
+  const ev = erroredPendingEvent({ payload: { record: { id: 12345 } } });
+  // deno-lint-ignore no-explicit-any
+  const result = connectionIdForErroredMappingMiss(ev as any);
+  assertEquals(result, null, 'must not call fallback when record.id is not a plain string');
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: lookup asserts provider_type=quiltt and quiltt_connection_id filters', async () => {
+  const eqCalls: Array<[string, unknown]> = [];
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(col: string, val: unknown) { eqCalls.push([col, val]); return chain; },
+        then(resolve: (v: { data: Array<{id: string; subaccount_id: string | null}>; error: null }) => unknown) {
+          return resolve({ data: [], error: null }); // zero rows: skip update, but eq calls recorded
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-filter-check');
+
+  assertEquals(
+    eqCalls.some(([col, val]) => col === 'provider_type' && val === 'quiltt'),
+    true,
+    'lookup must filter on provider_type=quiltt',
+  );
+  assertEquals(
+    eqCalls.some(([col, val]) => col === 'quiltt_connection_id' && val === 'qconn-filter-check'),
+    true,
+    'lookup must filter on quiltt_connection_id',
+  );
+});
+
+Deno.test('flipConnectionToErrorByConnectionId: skips when a newer processed success event exists (OR-T2694 flip-flop guard)', async () => {
+  let updateCalled = false;
+  const conn = { id: 'conn-flipflop', subaccount_id: 'sub-flipflop' };
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        like(_col: string, _pat: unknown) { return chain; },
+        not(_col: string, _op: string, _val: unknown) { return chain; },
+        is(_col: string, _val: unknown) { return chain; },
+        gt(_col: string, _val: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() { return Promise.resolve({ data: null, error: null }); },
+        update(_patch: unknown) { updateCalled = true; return chain; },
+        then(resolve: (v: unknown) => unknown) {
+          if (table === 'connections') {
+            return resolve({ data: [conn], error: null });
+          }
+          if (table === 'quiltt_webhook_inbox') {
+            // Simulate a newer processed success event: ordering guard fires, no update
+            return resolve({ data: [{ event_id: 'newer-success-evt' }], error: null });
+          }
+          return resolve({ data: [], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+
+  // deno-lint-ignore no-explicit-any
+  await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-flipflop');
+
+  assertEquals(updateCalled, false, 'update must not be called when a newer success event was already processed');
 });
