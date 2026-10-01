@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+import { SINK_REASON_INSERT_FAILED, SINK_REASON_NO_WEBHOOK_URL, SINK_REASON_PLATFORM_NOT_FOUND, claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── explicit retired-event replay (OR-T0128) ────────────────────────
 
@@ -1159,11 +1159,19 @@ Deno.test('handleEventSinkDelivery: 23505 on connections insert treated as succe
           select(_c: string) { return ch; },
           eq(_c: string, _v: unknown) { return ch; },
           maybeSingle() {
-            // No webhook_url: skip the webhook enqueue branch.
-            return Promise.resolve({ data: { webhook_url: null }, error: null });
+            // Provide a webhook URL so the test runs the full happy path
+            // after the 23505-as-success fix on the connections insert.
+            return Promise.resolve({ data: { webhook_url: 'https://example.com/hook' }, error: null });
           },
         };
         return ch;
+      }
+      if (table === 'webhook_delivery') {
+        return {
+          insert(_row: unknown) {
+            return Promise.resolve({ data: null, error: null });
+          },
+        };
       }
       // deno-lint-ignore no-explicit-any
       return { select() { return this as any; }, eq() { return this as any; } };
@@ -2181,4 +2189,192 @@ Deno.test('flipConnectionToErrorByConnectionId: skips when a newer processed suc
   await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-flipflop');
 
   assertEquals(updateCalled, false, 'update must not be called when a newer success event was already processed');
+});
+
+// ── handleEventSinkDelivery: step 3 webhook hold (OR-T0212 step 1) ───────────
+//
+// When the platforms lookup or webhook_delivery insert fails, the function
+// returns a hold reason string instead of 'processed'. bumpAttempts routes
+// the event through MAX_ATTEMPTS=25 ticks, then retires it with a replayable
+// reason so claimRetiredEventForReplay can re-admit it once the URL is set.
+
+function sinkDeliveryClientBase(
+  connectionsInsertErr: { code: string; message: string } | null,
+  platformsMaybeSingle: () => Promise<{ data: unknown; error: unknown }>,
+  webhookDeliveryInsert: ((row: unknown) => Promise<{ data: unknown; error: unknown }>) | 'throw',
+) {
+  let connectionsCallCount = 0;
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      if (table === 'connections') {
+        connectionsCallCount++;
+        if (connectionsCallCount === 1) {
+          // First call: connections insert -- simulate 23505 (row already exists).
+          return {
+            insert(_row: unknown) {
+              return Promise.resolve({
+                data: null,
+                error: connectionsInsertErr ?? { code: '23505', message: 'unique violation' },
+              });
+            },
+          };
+        }
+        // Second call: resolve connection row id.
+        // deno-lint-ignore no-explicit-any
+        const ch: any = {
+          select(_c: string) { return ch; },
+          eq(_c: string, _v: unknown) { return ch; },
+          maybeSingle() { return Promise.resolve({ data: { id: 'conn-1' }, error: null }); },
+        };
+        return ch;
+      }
+      if (table === 'platforms') {
+        // deno-lint-ignore no-explicit-any
+        const ch: any = {
+          select(_c: string) { return ch; },
+          eq(_c: string, _v: unknown) { return ch; },
+          maybeSingle: platformsMaybeSingle,
+        };
+        return ch;
+      }
+      if (table === 'webhook_delivery') {
+        if (webhookDeliveryInsert === 'throw') {
+          return {
+            insert(_row: unknown) { throw new Error('network timeout'); },
+          };
+        }
+        return { insert: webhookDeliveryInsert };
+      }
+      // deno-lint-ignore no-explicit-any
+      return { select() { return this as any; }, eq() { return this as any; } };
+    },
+  };
+  return client;
+}
+
+function sinkEv(id: string) {
+  return {
+    event_id:      id,
+    event_type:    'connection.synced.successful.initial',
+    payload:       { record: { id: 'quiltt-conn-1' } },
+    platform_id:   'plat-1',
+    subaccount_id: 'sub-1',
+    attempts:      0,
+  };
+}
+
+Deno.test('handleEventSinkDelivery: platforms lookup DB error -> returns sink-platform-not-found string', async () => {
+  const client = sinkDeliveryClientBase(
+    null,
+    () => Promise.resolve({ data: null, error: { message: 'connection refused' } }),
+    (_row: unknown) => Promise.resolve({ data: null, error: null }),
+  );
+  const result = await handleEventSinkDelivery(client, sinkEv('evt-plat-dberr'), 'quiltt-conn-1', 'plat-1', 'sub-1');
+  assertEquals(
+    typeof result === 'string' && result.startsWith(SINK_REASON_PLATFORM_NOT_FOUND),
+    true,
+    'a DB error on the platforms lookup must return a sink-platform-not-found string',
+  );
+});
+
+Deno.test('handleEventSinkDelivery: platforms row not found (null, no error) -> returns SINK_REASON_PLATFORM_NOT_FOUND', async () => {
+  const client = sinkDeliveryClientBase(
+    null,
+    () => Promise.resolve({ data: null, error: null }),
+    (_row: unknown) => Promise.resolve({ data: null, error: null }),
+  );
+  const result = await handleEventSinkDelivery(client, sinkEv('evt-plat-null'), 'quiltt-conn-1', 'plat-1', 'sub-1');
+  assertEquals(
+    result,
+    SINK_REASON_PLATFORM_NOT_FOUND,
+    'a null platforms row with no error must return the exact SINK_REASON_PLATFORM_NOT_FOUND constant',
+  );
+});
+
+Deno.test('handleEventSinkDelivery: platform has no webhook_url -> returns SINK_REASON_NO_WEBHOOK_URL', async () => {
+  const client = sinkDeliveryClientBase(
+    null,
+    () => Promise.resolve({ data: { webhook_url: null }, error: null }),
+    (_row: unknown) => Promise.resolve({ data: null, error: null }),
+  );
+  const result = await handleEventSinkDelivery(client, sinkEv('evt-no-url'), 'quiltt-conn-1', 'plat-1', 'sub-1');
+  assertEquals(
+    result,
+    SINK_REASON_NO_WEBHOOK_URL,
+    'a platform row with null webhook_url must return SINK_REASON_NO_WEBHOOK_URL',
+  );
+});
+
+Deno.test('handleEventSinkDelivery: webhook_delivery insert returns { error } -> returns sink-webhook-insert-failed string', async () => {
+  const client = sinkDeliveryClientBase(
+    null,
+    () => Promise.resolve({ data: { webhook_url: 'https://example.com/hook' }, error: null }),
+    (_row: unknown) => Promise.resolve({ data: null, error: { message: 'quota exceeded' } }),
+  );
+  const result = await handleEventSinkDelivery(client, sinkEv('evt-wh-dberr'), 'quiltt-conn-1', 'plat-1', 'sub-1');
+  assertEquals(
+    typeof result === 'string' && result.startsWith(SINK_REASON_INSERT_FAILED),
+    true,
+    'a { error } from webhook_delivery insert must return a sink-webhook-insert-failed string (not silently swallowed)',
+  );
+});
+
+Deno.test('handleEventSinkDelivery: webhook_delivery insert throws -> returns sink-webhook-insert-failed string', async () => {
+  const client = sinkDeliveryClientBase(
+    null,
+    () => Promise.resolve({ data: { webhook_url: 'https://example.com/hook' }, error: null }),
+    'throw',
+  );
+  const result = await handleEventSinkDelivery(client, sinkEv('evt-wh-throw'), 'quiltt-conn-1', 'plat-1', 'sub-1');
+  assertEquals(
+    typeof result === 'string' && result.startsWith(SINK_REASON_INSERT_FAILED),
+    true,
+    'a thrown error on webhook_delivery insert must return a sink-webhook-insert-failed string (not swallowed)',
+  );
+});
+
+// ── claimRetiredEventForReplay: sink webhook reasons are replayable (OR-T0212) ─
+
+Deno.test('claimRetiredEventForReplay: max-attempts:sink-no-webhook-url is replayable', async () => {
+  const mock = replayClaimClient({
+    event_id:          'evt-sink-url-retired',
+    event_type:        'connection.synced.successful.initial',
+    payload:           { record: { id: 'qconn-1' } },
+    platform_id:       'plat-sink',
+    subaccount_id:     'sub-sink',
+    attempts:          25,
+    received_at:       '2026-09-01T00:00:00.000Z',
+    processed_at:      '2026-09-02T00:00:00.000Z',
+    retirement_reason: `max-attempts:${SINK_REASON_NO_WEBHOOK_URL}`,
+    last_error:        SINK_REASON_NO_WEBHOOK_URL,
+    opk_deferred_at:   null,
+  });
+
+  // deno-lint-ignore no-explicit-any
+  const result = await claimRetiredEventForReplay(mock.client as any, 'evt-sink-url-retired');
+
+  assertEquals(result.status, 'claimed', 'a row retired with max-attempts:sink-no-webhook-url must be re-admissible once the URL is set');
+  assertEquals(result.status === 'claimed' ? result.event.attempts : -1, 0, 'attempts must reset to zero for a clean retry');
+});
+
+Deno.test('claimRetiredEventForReplay: unrelated retirement reason is still not-replayable', async () => {
+  const mock = replayClaimClient({
+    event_id:          'evt-unrelated-retired',
+    event_type:        'connection.synced.successful.initial',
+    payload:           { record: { id: 'qconn-1' } },
+    platform_id:       'plat-1',
+    subaccount_id:     'sub-1',
+    attempts:          25,
+    received_at:       '2026-09-01T00:00:00.000Z',
+    processed_at:      '2026-09-02T00:00:00.000Z',
+    retirement_reason: 'max-attempts:graphql-error-quota-exceeded',
+    last_error:        'graphql-error-quota-exceeded',
+    opk_deferred_at:   null,
+  });
+
+  // deno-lint-ignore no-explicit-any
+  const result = await claimRetiredEventForReplay(mock.client as any, 'evt-unrelated-retired');
+
+  assertEquals(result.status, 'not-replayable', 'a row retired for an unrelated reason must remain not-replayable');
 });
