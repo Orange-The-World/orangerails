@@ -65,6 +65,13 @@ const CONN_RACE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const MAX_PAGES = 50;
 const REDRIVE_SWEEP_SIZE = 500;  // max rows fetched in step 1 of reDriveReadyDeferrals per tick
 
+// Shared reason strings for sink webhook delivery failures.
+// handleEventSinkDelivery returns these; claimRetiredEventForReplay checks them.
+// Defined once so the two callers cannot drift.
+export const SINK_NO_WEBHOOK_URL        = 'sink-no-webhook-url';
+export const SINK_WEBHOOK_INSERT_FAILED = 'sink-webhook-insert-failed';
+export const SINK_PLATFORM_NOT_FOUND    = 'sink-platform-not-found';
+
 // Platforms that use sink delivery instead of OPK encryption (DL-0853).
 // Positive allowlist per DEC-0092 scope: extending to a new platform requires
 // a new founder ruling naming that slug. bitbooks-v3 is NOT in this list:
@@ -934,7 +941,11 @@ export async function handleEvent(
  *   2. Enqueues a sync.completed webhook so the integrator knows to call
  *      or-sync for the data.
  *
- * Returns 'processed' so the inbox event is consumed and not retried.
+ * Returns 'processed' on success. Returns an error string (one of SINK_NO_WEBHOOK_URL,
+ * SINK_WEBHOOK_INSERT_FAILED, SINK_PLATFORM_NOT_FOUND, or a thrown-exception message
+ * prefixed with SINK_WEBHOOK_INSERT_FAILED) when the webhook cannot be enqueued, so
+ * bumpAttempts records the reason and claimRetiredEventForReplay can re-admit the event
+ * once the prerequisite (a configured webhook URL) is in place.
  */
 export async function handleEventSinkDelivery(
   client: SupabaseClient,
@@ -986,46 +997,40 @@ export async function handleEventSinkDelivery(
     return `sink connection lookup failed after upsert: ${connLookupErr?.message ?? 'not found'}`;
   }
 
-  // Step 3: best-effort webhook enqueue. Failure must not block inbox event consumption.
+  // Step 3: enqueue a webhook_delivery row so the integrator knows to call or-sync.
+  // A missing platform, empty URL, or DB error returns a reason string so bumpAttempts
+  // records it and the event can be replayed (claimRetiredEventForReplay) once the
+  // platform/URL is configured or the transient error clears. After MAX_ATTEMPTS = 25
+  // the row dead-letters with the reason in retirement_reason.
+  // Not best-effort: silently swallowing a failure here leaves the integrator with no
+  // signal that a sync is ready (OR-T2729 root cause).
   try {
-    const { data: platRow } = await client
+    const { data: platRow, error: platLookupErr } = await client
       .from('platforms')
       .select('webhook_url')
       .eq('id', platformId)
       .maybeSingle();
-    const url = platRow?.webhook_url;
-    if (typeof url === 'string' && url.length > 0) {
-      await client.from('webhook_delivery').insert({
-        platform_id:   platformId,
-        subaccount_id: subaccountId,
-        event_type:    'sync.completed',
-        // Zero is the honest value here, not a placeholder. Sink delivery
-        // means we pulled no rows ourselves: the whole point of the webhook
-        // is to tell the consumer to come and call or-sync. The OPK path
-        // reports a real row count because it did pull rows.
-        payload: buildSyncCompletedPayload({
-          subaccountId,
-          connectionId: connRow.id,
-          syncedCount:  0,
-          provider:     'quiltt',
-        }),
-      });
-    } else {
-      // OR-T2729: this branch used to do nothing. No webhook_url on the
-      // platform means the integrator is never told a sync is ready, and
-      // nothing else records that, so a platform can sit at zero
-      // transactions for months with no signal anywhere. Log it so the
-      // gap is visible instead of hiding.
-      console.warn(
-        `[or-quiltt-sync] event ${ev.event_id}: sink webhook enqueue skipped, ` +
-          `platform ${platformId} has no webhook_url configured`,
-      );
-    }
-  } catch (whErr) {
-    console.error(
-      `[or-quiltt-sync] event ${ev.event_id}: sink webhook enqueue failed for ` +
-        `platform ${platformId}: ${whErr instanceof Error ? whErr.message : String(whErr)}`,
-    );
+    if (platLookupErr || !platRow) return SINK_PLATFORM_NOT_FOUND;
+    const url = platRow.webhook_url;
+    if (typeof url !== 'string' || url.length === 0) return SINK_NO_WEBHOOK_URL;
+    const { error: whInsertErr } = await client.from('webhook_delivery').insert({
+      platform_id:   platformId,
+      subaccount_id: subaccountId,
+      event_type:    'sync.completed',
+      // Zero is the honest value here, not a placeholder. Sink delivery
+      // means we pulled no rows ourselves: the whole point of the webhook
+      // is to tell the consumer to come and call or-sync. The OPK path
+      // reports a real row count because it did pull rows.
+      payload: buildSyncCompletedPayload({
+        subaccountId,
+        connectionId: connRow.id,
+        syncedCount:  0,
+        provider:     'quiltt',
+      }),
+    });
+    if (whInsertErr) return SINK_WEBHOOK_INSERT_FAILED;
+  } catch (e) {
+    return `${SINK_WEBHOOK_INSERT_FAILED}: ${e instanceof Error ? e.message : String(e)}`;
   }
 
   console.log(
@@ -1681,7 +1686,10 @@ export async function claimRetiredEventForReplay(
     retirementEvidence.includes('connection not yet created') ||
     retirementEvidence.includes('connection row not yet created') ||
     retirementEvidence.includes('connection row never created') ||
-    retirementEvidence.includes('deferred-conn-race');
+    retirementEvidence.includes('deferred-conn-race') ||
+    retirementEvidence.includes(SINK_NO_WEBHOOK_URL) ||
+    retirementEvidence.includes(SINK_WEBHOOK_INSERT_FAILED) ||
+    retirementEvidence.includes(SINK_PLATFORM_NOT_FOUND);
   if (!replayable) return { status: 'not-replayable', event: null };
 
   const { data: claimed, error: claimErr } = await client
