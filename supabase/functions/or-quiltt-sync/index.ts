@@ -324,7 +324,7 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         // Errored-event fallback: even with no mapping row a connection.synced.errored.*
         // event must flip the OR connection to error so the UI reflects Quiltt's view.
         // Attempt a global quiltt_connection_id lookup (provider_type=quiltt only); if
-        // exactly one row matches, flip it. Retire with mapping-missing either way.
+        // exactly one row matches, flip it. Bump attempts as mapping-missing either way.
         // OR-T0212 step 5.
         const connIdForFlip = connectionIdForErroredMappingMiss(ev);
         if (connIdForFlip) {
@@ -1209,7 +1209,7 @@ export function connectionIdForErroredMappingMiss(ev: PendingEvent): string | nu
  * When a connection.synced.errored.* event has no subaccount_id in the inbox, the main
  * drain loop cannot call reconcileConnectionError. This function finds the OR connection
  * by quiltt_connection_id alone (no subaccount filter) and flips it to error if exactly
- * one row matches. Zero or multiple matches are skipped safely. The event is retired as
+ * one row matches. Zero or multiple matches are skipped safely. The event is bumped as
  * mapping-missing by the caller regardless of this function's outcome.
  */
 export async function flipConnectionToErrorByConnectionId(
@@ -1238,9 +1238,17 @@ export async function flipConnectionToErrorByConnectionId(
     return;
   }
   const row = rows[0];
-  // OR-T2694 ordering guard: if a newer success was already processed for this
-  // connection, skip the write to avoid regressing a connection a success already fixed.
-  if (ev.received_at && row.subaccount_id) {
+  // OR-T2694 ordering guard. A connection with no subaccount_id cannot be ordered
+  // against inbox events (findNewerProcessedSuccess requires subaccount_id). Skip
+  // the flip rather than writing status=error without verifying ordering.
+  if (!row.subaccount_id) {
+    console.warn(
+      `[or-quiltt-sync] event ${ev.event_id}: mapping-missing errored fallback: ` +
+        `connection ${row.id} has no subaccount_id; ordering check cannot run, skipping flip`,
+    );
+    return;
+  }
+  if (ev.received_at) {
     const newer = await findNewerProcessedSuccess(client, ev, row.subaccount_id, quilttConnectionId);
     if (newer.error) {
       console.error(
@@ -1262,26 +1270,25 @@ export async function flipConnectionToErrorByConnectionId(
   const correlationId = randomCorrelationId();
   // DL-1445: store CODE:correlation on sink platforms, same as reconcileConnectionError.
   // ev.platform_id is null in the no-mapping path; look up via the subaccount's platform.
+  // row.subaccount_id is guaranteed non-null (we returned early above if absent).
   const connPatch: Record<string, unknown> = {
     status:     'error',
     updated_at: new Date().toISOString(),
   };
-  if (row.subaccount_id) {
-    const { data: subRow } = await client
-      .from('subaccounts')
-      .select('platform_id')
-      .eq('id', row.subaccount_id)
+  const { data: subRow } = await client
+    .from('subaccounts')
+    .select('platform_id')
+    .eq('id', row.subaccount_id)
+    .maybeSingle();
+  if (subRow?.platform_id) {
+    const { data: platRow } = await client
+      .from('platforms')
+      .select('sink_format')
+      .eq('id', subRow.platform_id)
       .maybeSingle();
-    if (subRow?.platform_id) {
-      const { data: platRow } = await client
-        .from('platforms')
-        .select('sink_format')
-        .eq('id', subRow.platform_id)
-        .maybeSingle();
-      const sinkMode = typeof platRow?.sink_format === 'string' && platRow.sink_format.length > 0;
-      if (sinkMode) {
-        connPatch.encrypted_last_error = `${code}:${correlationId}`;
-      }
+    const sinkMode = typeof platRow?.sink_format === 'string' && platRow.sink_format.length > 0;
+    if (sinkMode) {
+      connPatch.encrypted_last_error = `${code}:${correlationId}`;
     }
   }
   const { error: updateErr } = await client
