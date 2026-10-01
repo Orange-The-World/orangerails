@@ -67,13 +67,13 @@ export const UUID_LENGTH = 36;
 /**
  * True only for a canonical UUID, and for nothing else.
  *
- * WHY THE LENGTH CHECK IS NOT REDUNDANT. JavaScript has no end-of-string
- * anchor. Without the m flag, `$` matches at the end of the string OR
- * immediately before a final newline, so the pattern above accepts a
- * 37-character value that is a UUID followed by "\n". The length check is what
- * makes this exact. It is deliberately a length check rather than a lookahead:
- * the next person to copy this can see what it does without first knowing that
- * rule about `$`.
+ * ABOUT THE LENGTH CHECK. It is an explicit, cheap bound kept beside the
+ * pattern so the exact shape is visible at the call site. It is not covering a
+ * gap in the pattern: without the m flag, `$` matches only at the very end of
+ * the input (ECMA-262), so UUID_RE alone already rejects a UUID followed by a
+ * newline. Perl and Python differ, since a bare `$` there also matches before a
+ * final newline, which is where the belief that JavaScript behaves the same
+ * way comes from. Do not add the m flag to UUID_RE: that would change this.
  */
 export function isUuid(v: unknown): v is string {
   return typeof v === 'string' && v.length === UUID_LENGTH && UUID_RE.test(v);
@@ -86,14 +86,13 @@ const MAX_LIMIT = 1000;
  * Lowercase 64-char hex, same shape or-stealth-transactions-store enforces on
  * write and the same shape the column comment documents.
  *
- * This regex is HALF of the injection guard, and on its own it is one
- * character wider than it looks. The cursor predicate below is a PostgREST
+ * This regex is the injection guard. The cursor predicate below is a PostgREST
  * filter STRING, so a value carrying `,` `.` `(` or `)` would be parsed as
  * filter syntax rather than as data, and hex admits none of those characters.
- * What hex does not exclude here is a trailing newline: see isUuid above for
- * why `$` is not an end-of-string anchor. Validate through isBlindIndexHex,
- * which adds the length check that makes the shape exact, and do not loosen
- * either half to a generic string check.
+ * Without the m flag `$` matches only at the very end of the input, so a
+ * trailing newline is rejected too (see isUuid above). Validate through
+ * isBlindIndexHex, which adds an explicit length bound beside the pattern, and
+ * do not loosen either to a generic string check.
  */
 const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
 
@@ -101,8 +100,8 @@ const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
 export const BLIND_INDEX_HEX_LENGTH = 64;
 
 /**
- * True only for exactly 64 lowercase hex characters. The length check is what
- * makes that "exactly", for the reason given on isUuid.
+ * True only for exactly 64 lowercase hex characters. The length check is an
+ * explicit bound beside the pattern, not a patch for it (see isUuid).
  */
 export function isBlindIndexHex(v: unknown): v is string {
   return (

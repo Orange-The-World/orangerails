@@ -39,9 +39,9 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 /**
  * Length of a canonical UUID in its hyphenated 8-4-4-4-12 form, checked beside
- * the pattern because JavaScript has no end-of-string anchor: without the m
- * flag `$` matches at the end of the string OR immediately before a final
- * newline, so UUID_RE alone accepts a UUID with a trailing "\n".
+ * the pattern as an explicit bound. It is not covering a gap in UUID_RE:
+ * without the m flag `$` matches only at the very end of the input, so the
+ * pattern alone already rejects a UUID followed by a newline.
  */
 const UUID_LENGTH = 36;
 
@@ -53,8 +53,7 @@ const UUID_LENGTH = 36;
  * test can drive this ONE implementation and assert on the real Response
  * status a caller would receive -- not just on UUID_RE in isolation, which
  * proves the pattern is exact but not that the HTTP layer enforces it
- * (OR-T1144, same reasoning as or-stealth-transactions-list's
- * validateCursorOrResponse).
+ * (OR-T1144).
  */
 export function validateSourceWalletIdOrResponse(
   body: { source_wallet_id?: string },
