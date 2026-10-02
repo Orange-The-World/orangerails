@@ -117,7 +117,9 @@ Red-tier pairs will return `fill_type: gap` for most historical timestamps. Alwa
 
 ## Testing note
 
-The `exchange_rates` table exists on two Supabase projects: the ORBI production project, and this app's own production project. Only the ORBI copy is served; the copy on this app's production project is a retired leftover from an earlier build phase with no reader. There is no dev replica of either. Integration tests must target the ORBI prod project. Unit tests should mock the Supabase client.
+The `exchange_rates` table exists on two Supabase projects: the ORBI production project, and this app's own production project. Only the ORBI copy is meant to be served; the copy on this app's production project was meant to be a retired leftover from an earlier build phase with no reader. There is no dev replica of either. Integration tests must target the ORBI prod project. Unit tests should mock the Supabase client.
+
+**Not true right now, 2026-09-15:** a live customer-facing page reads this app's own production copy directly (about 236 anon PostgREST GETs/day for BTC/USD ORBI-M 1m), not the ORBI copy. The page has not been identified yet. See OR-T2609, which is the fix to find it and move it onto this API so the claim above becomes true again. Until that ticket closes, do not assume the app-production copy is unread.
 
 ## Minting a new API key (@DBA only)
 
