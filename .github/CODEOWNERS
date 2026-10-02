@@ -28,3 +28,9 @@
 
 # GitHub workflows + community health files.
 /.github/                       @Orange-The-World
+
+# Workflow definitions. A change here can change what CI is allowed to do, so
+# the reviewing account signs it specifically. This line must stay BELOW the
+# /.github/ entry above: CODEOWNERS resolves by LAST match, so putting it first
+# would make it inert.
+/.github/workflows/             @Making-the-World-Orange

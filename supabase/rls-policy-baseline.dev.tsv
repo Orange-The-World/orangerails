@@ -49,7 +49,7 @@ public	user_app_grants	Users can insert own grants	INSERT	{authenticated}	d41d8c
 public	user_app_grants	Users can read own grants	SELECT	{authenticated}	3a807491e0a912fbfbee0ffa087b82f6	d41d8cd98f00b204e9800998ecf8427e
 public	user_app_grants	Users can update own grants	UPDATE	{authenticated}	3a807491e0a912fbfbee0ffa087b82f6	d41d8cd98f00b204e9800998ecf8427e
 public	user_vault_keyring_watermark	user_vault_keyring_watermark_select_own	SELECT	{authenticated}	3a807491e0a912fbfbee0ffa087b82f6	d41d8cd98f00b204e9800998ecf8427e
-public	user_vault_meta	Users can insert own vault metadata	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	3a807491e0a912fbfbee0ffa087b82f6
+public	user_vault_meta	Users can insert own vault metadata	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	f21874ff47cbbb0d73e778e6f713b706
 public	user_vault_meta	Users can read own vault metadata	SELECT	{authenticated}	3a807491e0a912fbfbee0ffa087b82f6	d41d8cd98f00b204e9800998ecf8427e
 public	user_vault_meta	Users can update own vault metadata	UPDATE	{authenticated}	3a807491e0a912fbfbee0ffa087b82f6	d41d8cd98f00b204e9800998ecf8427e
 public	user_vault_meta	co-admins can read owner vault meta	SELECT	{authenticated}	cc48084dd5f6d4b234d6d5cb6bf3934b	d41d8cd98f00b204e9800998ecf8427e
