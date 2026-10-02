@@ -127,6 +127,23 @@ export async function resolveQuilttConfigForPlatform(
   };
 }
 
+export async function readConfiguredSinkFormatForPlatform(
+  service: SupabaseClient,
+  platformId: string,
+): Promise<string | null> {
+  const { data, error } = await service
+    .from('platforms')
+    .select('sink_format')
+    .eq('id', platformId)
+    .maybeSingle<{ sink_format: string | null }>();
+
+  if (error) {
+    throw new Error(`platforms.sink_format lookup failed: ${error.message}`);
+  }
+
+  return data?.sink_format ?? null;
+}
+
 /**
  * Resolve the platform's `sink_format` for or-sync (with body.format fallback
  * for legacy callers like V2 that pre-date the multi-tenant refactor).
@@ -141,15 +158,7 @@ export async function resolveSinkFormatForPlatform(
   platformId: string,
   bodyFormatFallback?: string | null,
 ): Promise<string | null> {
-  const { data, error } = await service
-    .from('platforms')
-    .select('sink_format')
-    .eq('id', platformId)
-    .maybeSingle<{ sink_format: string | null }>();
-
-  if (error) {
-    throw new Error(`platforms.sink_format lookup failed: ${error.message}`);
-  }
-
-  return data?.sink_format ?? bodyFormatFallback ?? null;
+  return (await readConfiguredSinkFormatForPlatform(service, platformId)) ??
+    bodyFormatFallback ??
+    null;
 }

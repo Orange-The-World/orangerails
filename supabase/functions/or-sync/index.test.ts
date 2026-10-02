@@ -20,11 +20,57 @@
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { mergeStrikeTransactions, batchHttpStatus, throwOnDbError, handleConnectionError, redactedUpstreamDetail } from './index.ts';
+import {
+  mergeStrikeTransactions,
+  batchHttpStatus,
+  throwOnDbError,
+  handleConnectionError,
+  redactedUpstreamDetail,
+  resolveSinkFormatRequest,
+} from './index.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 
 const WALLET_A = 'wallet-aaaa';
 const WALLET_B = 'wallet-bbbb';
+
+// ── Sink-format tenancy boundary (OR-T1157) ───────────────────────────────
+
+Deno.test('sink format: NULL configured sink preserves body.format', () => {
+  assertEquals(
+    resolveSinkFormatRequest('bitbooks-v2', null, true),
+    { format: 'bitbooks-v2' },
+  );
+});
+
+Deno.test('sink format: matching configured and requested formats are a no-op', () => {
+  assertEquals(
+    resolveSinkFormatRequest('bitbooks-v2', 'bitbooks-v2', true),
+    { format: 'bitbooks-v2' },
+  );
+});
+
+Deno.test('sink format: configured mismatch is refused while enforcement is enabled', () => {
+  const resolution = resolveSinkFormatRequest('bitbooks-v2', 'orange-world-v1', true);
+  assertEquals(resolution.format, 'bitbooks-v2');
+  assertEquals(
+    resolution.error,
+    'Requested format bitbooks-v2 does not match configured sink format orange-world-v1',
+  );
+});
+
+Deno.test('sink format: enforcement switch leaves a mismatched caller on body.format when disabled', () => {
+  assertEquals(
+    resolveSinkFormatRequest('bitbooks-v2', 'orange-world-v1', false),
+    { format: 'bitbooks-v2' },
+  );
+});
+
+Deno.test('sink format: omitted body.format resolves to the configured sink', () => {
+  assertEquals(
+    resolveSinkFormatRequest(undefined, 'bitbooks-v2', false),
+    { format: 'bitbooks-v2' },
+  );
+});
 
 function tx(
   id: string,
