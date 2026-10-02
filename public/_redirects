@@ -30,6 +30,18 @@
 # that can never match but looks load-bearing misleads the next reader.
 https://docs.orangerails.com/* https://connect.orangerails.com/docs/:splat 302
 
+# --- /docs/* soft-404 fix (OR-T0422) ---
+# An unscoped SPA catch-all (below) means any unknown /docs/* slug
+# returns 200 with the bare app shell instead of a real 404, which
+# poisons link checks that rely on status codes. These three routes
+# are the only ones that actually exist under src/routes/docs; every
+# other /docs/* path should be a real 404, not a fake 200. This block
+# MUST stay above the blanket catch-all: first match wins.
+/docs /index.html 200
+/docs/xpub-export /index.html 200
+/docs/strike-csv /index.html 200
+/docs/* /404.html 404
+
 # SPA deep-link fallback. MUST be the last rule so the specific rules
 # above match first. Cloudflare Pages serves any real static asset
 # (JS/CSS/images, index.html) before consulting _redirects, so this
