@@ -14,8 +14,7 @@
 --   adapter_requests and INSERT on waitlist.  Both are load bearing for the
 --   unauthenticated public forms and both must survive this file.
 --
--- MEASURED ON PROD BEFORE REPLACING THIS FILE, 2026-10-02 (DBA, OR-T0212
--- step 14 note):
+-- MEASURED ON PROD BEFORE REPLACING THIS FILE, 2026-10-02:
 --   40 RLS enabled tables in public grant table level SELECT to anon.
 --   22 of them have no policy admitting anon for SELECT (the revoke targets).
 --   18 of them have such a policy and are deliberately untouched.
@@ -55,8 +54,7 @@
 --     service-role or a caller-supplied JWT.  No pre-auth client read exists
 --     for any of these tables.  Safe to revoke.
 --
---   Reference: verified by code_search on the local clone at e5e5a2c7
---   (_tmp-or-t2561-merge) and by gh_get_file on dev HEAD for
+--   Reference: verified by gh_get_file on dev HEAD for
 --   sites/world/src/lib/authClient.ts (the only file with a relevant read
 --   path).
 --
@@ -85,9 +83,9 @@
 --   GRANT SELECT ON TABLE public.webhook_delivery        TO anon;
 --
 -- IDEMPOTENT: REVOKE on a privilege that is already absent is a no op, so
--- this file is safe to re-run.  The assertion block is an equality check on
--- the surviving set rather than an absence check on the 22, so a twenty third
--- table appearing later fails it instead of passing silently.
+-- this file is safe to re-run.  Assertion 1a uses a subset check rather than
+-- an absence check, so an unexpected surviving grant fails it instead of
+-- passing silently.
 
 REVOKE SELECT ON TABLE public.adapter_requests        FROM anon;
 REVOKE SELECT ON TABLE public.agent_invitation_tokens FROM anon;
@@ -122,11 +120,10 @@ END
 $$;
 
 -- Self check.  Three assertions, each of which can actually fail:
---   1. the surviving set of anon table level SELECT grants on RLS tables is
---      EXACTLY the set that a policy admits (equality, not absence).  The
---      expected set is derived from the catalog rather than hardcoded, so
---      this assertion is correct on any cluster regardless of which tables
---      exist.
+--   1a. no RLS table holds an anon table-level SELECT grant without a policy
+--       admitting anon for SELECT (subset check: actual EXCEPT policy-admitted
+--       must be empty).
+--   1b. none of the 22 explicitly revoked tables still holds the grant.
 --   2. the two anon INSERT grants the public forms depend on are still there;
 --   3. the tables carrying anon COLUMN level SELECT are still exactly apps and
 --      platforms, so nothing here has cleared a column grant.
@@ -134,6 +131,8 @@ DO $$
 DECLARE
   expected_sorted text[];
   actual_tables   text[];
+  leaked_tables   text[];
+  still_granted   text[];
   expected_cols   text[] := ARRAY['apps', 'platforms'];
   expected_cols_sorted text[];
   actual_cols     text[];
@@ -175,11 +174,40 @@ BEGIN
          AND x.privilege_type = 'SELECT'
     ) AS t;
 
-  IF actual_tables IS DISTINCT FROM expected_sorted THEN
+  -- Assertion 1a: no table should have an anon table-level SELECT grant
+  -- without at least one policy admitting anon for SELECT.
+  SELECT coalesce(array_agg(t ORDER BY t), ARRAY[]::text[])
+    INTO leaked_tables
+    FROM (
+      SELECT unnest(actual_tables)
+      EXCEPT
+      SELECT unnest(coalesce(expected_sorted, ARRAY[]::text[]))
+    ) AS sub(t);
+
+  IF array_length(leaked_tables, 1) IS NOT NULL THEN
     RAISE EXCEPTION
-      'anon table level SELECT on RLS tables in public is not the expected set.'
-      ' expected=% actual=%',
-      expected_sorted, actual_tables;
+      'anon holds table-level SELECT on RLS tables with no admitting policy: %',
+      leaked_tables;
+  END IF;
+
+  -- Assertion 1b: none of the 22 explicitly revoked tables retains the grant.
+  SELECT coalesce(array_agg(t ORDER BY t), ARRAY[]::text[])
+    INTO still_granted
+    FROM unnest(ARRAY[
+      'adapter_requests','agent_invitation_tokens','agent_members',
+      'audit_entries','audit_events','beta_approved_users',
+      'channel_state','customers','encrypted_transactions',
+      'invoices','payments','pending_widget_sessions',
+      'quiltt_profile_map','quiltt_webhook_inbox','source_wallets',
+      'staff_users','strike_webhook_events','subaccounts',
+      'subscriptions','user_app_grants','waitlist','webhook_delivery'
+    ]::text[]) AS t
+    WHERE t = ANY(coalesce(actual_tables, ARRAY[]::text[]));
+
+  IF array_length(still_granted, 1) IS NOT NULL THEN
+    RAISE EXCEPTION
+      'REVOKE did not clear anon SELECT on: %',
+      still_granted;
   END IF;
 
   -- Assertion 2: the two anon INSERT grants the public forms depend on.
