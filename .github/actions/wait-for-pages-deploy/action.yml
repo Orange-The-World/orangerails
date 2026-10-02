@@ -1,7 +1,8 @@
 name: Wait for the Cloudflare Pages deploy
 description: >
-  Block until the Pages production deployment for a given commit is live, so a
-  smoke test cannot assert against the bundle the push was replacing.
+  Block until the Pages deployment for a given commit is live, so a smoke
+  test cannot assert against the bundle the push was replacing, or against
+  no bundle at all.
 
 inputs:
   project:
@@ -16,10 +17,30 @@ inputs:
   api_token:
     description: Cloudflare API token with Pages read. Empty disables the wait.
     required: true
+  environment:
+    description: >
+      Cloudflare Pages deployment environment to match: "production" or
+      "preview". A push to the project's production branch reports
+      environment=production; a feature-branch build reports
+      environment=preview and will never match the default.
+    required: false
+    default: "production"
+  fail_if_absent:
+    description: >
+      When "true", every abnormal path (missing credentials, an unreadable
+      API, a failed deploy, or a timeout with no matching deployment) fails
+      the step instead of warning and continuing. Use true on a path where
+      there is no fallback bundle to fall back to, such as a PR preview:
+      continuing there would hand the smoke a 404 or a stale build and let
+      a broken deploy read as a code verdict. Leave false (the default) on
+      a path like the prod smoke, where the previous live bundle is still
+      being served and best-effort is correct.
+    required: false
+    default: "false"
   timeout_seconds:
     description: >
-      Give up waiting after this long and continue anyway. Observed deploys take
-      about 2m30s end to end, most of it queue, so this is a wide margin.
+      Give up waiting after this long. Observed deploys take about 2m30s
+      end to end, most of it queue, so this is a wide margin.
     required: false
     default: "420"
   poll_seconds:
@@ -29,23 +50,33 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Wait for the Pages production deploy
+    - name: Wait for the Pages deploy
       shell: bash
       env:
         CF_ACCOUNT: ${{ inputs.account_id }}
         CF_TOKEN: ${{ inputs.api_token }}
         PROJECT: ${{ inputs.project }}
         SHA: ${{ inputs.commit_sha }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        FAIL_IF_ABSENT: ${{ inputs.fail_if_absent }}
         TIMEOUT_S: ${{ inputs.timeout_seconds }}
         POLL_S: ${{ inputs.poll_seconds }}
       run: |
-        # Deliberately no `set -e`. This step is best effort by design: it
-        # exists to remove a false failure, so it must never become a new
-        # source of one. Every abnormal path warns and returns 0, leaving the
-        # smoke itself as the only thing that can fail the job.
+        # Deliberately no `set -e`. Every abnormal path below decides for
+        # itself, via FAIL_IF_ABSENT, whether to warn and exit 0 (best
+        # effort, the historical behaviour, still the default) or to fail
+        # loudly with a distinct message (opt in, for a caller with no safe
+        # fallback bundle to test instead).
         set -uo pipefail
 
+        SEE_TICKET="see OR-T1573."
+        UNKNOWN_NOTE="This is an UNKNOWN, not a test failure and not a pass. Do not re-run this job as the remedy: ${SEE_TICKET}"
+
         if [ -z "${CF_TOKEN}" ] || [ -z "${CF_ACCOUNT}" ]; then
+          if [ "${FAIL_IF_ABSENT}" = "true" ]; then
+            echo "::error::Cloudflare credentials are not available to this run, so the deploy wait could not check for a matching ${ENVIRONMENT} deployment. ${UNKNOWN_NOTE}"
+            exit 1
+          fi
           echo "::warning::Cloudflare credentials are not available to this run, so the deploy wait is skipped. A red smoke below may be a race with the build rather than a defect."
           exit 0
         fi
@@ -61,15 +92,20 @@ runs:
           BODY=$(curl -sS --max-time 20 -H "Authorization: Bearer ${CF_TOKEN}" "${API}" 2>/dev/null)
 
           if [ -z "${BODY}" ] || [ "$(printf '%s' "${BODY}" | jq -r '.success // false')" != "true" ]; then
+            if [ "${FAIL_IF_ABSENT}" = "true" ]; then
+              echo "::error::Could not read the Cloudflare Pages deployments API, so the deploy wait could not check for a matching ${ENVIRONMENT} deployment. ${UNKNOWN_NOTE}"
+              exit 1
+            fi
             echo "::warning::Could not read the Pages deployments API, so the deploy wait is skipped. A red smoke below may be a race with the build rather than a defect."
             exit 0
           fi
 
-          # Only production deployments count. A branch push to this project
-          # produces environment=preview, which never serves the live host.
-          LAST=$(printf '%s' "${BODY}" | jq -r --arg sha "${SHA}" '
+          # Match on the requested environment. A branch push to this project
+          # produces environment=preview; only production deployments serve
+          # the live host, so the two must never be conflated.
+          LAST=$(printf '%s' "${BODY}" | jq -r --arg sha "${SHA}" --arg env "${ENVIRONMENT}" '
             [ .result[]
-              | select(.environment == "production")
+              | select(.environment == $env)
               | select(.deployment_trigger.metadata.commit_hash == $sha)
             ][0]
             | if . == null then "absent"
@@ -78,20 +114,32 @@ runs:
 
           case "${LAST}" in
             deploy:success)
-              echo "Pages production deploy for ${SHA} is live. Safe to assert against it."
+              echo "Pages ${ENVIRONMENT} deploy for ${SHA} is live. Safe to assert against it."
               exit 0
               ;;
             *:failure)
+              if [ "${FAIL_IF_ABSENT}" = "true" ]; then
+                echo "::error::The Cloudflare Pages ${ENVIRONMENT} deploy for ${SHA} reported ${LAST}, so there is no successful build to test against. ${UNKNOWN_NOTE}"
+                exit 1
+              fi
               echo "::warning::The Pages deploy for ${SHA} reported ${LAST}. Continuing so the smoke can report what the host actually serves."
               exit 0
               ;;
           esac
 
           if [ "$(date +%s)" -ge "${DEADLINE}" ]; then
-            echo "::warning::Timed out after ${TIMEOUT_S}s waiting for the Pages production deploy of ${SHA}; last observed state was '${LAST}'. Continuing anyway. READ THIS FIRST if the smoke below is red: it may be asserting against the previous bundle."
+            if [ "${FAIL_IF_ABSENT}" = "true" ]; then
+              if [ "${LAST}" = "absent" ]; then
+                echo "::error::No Cloudflare Pages ${ENVIRONMENT} deployment exists for this commit, so the smoke had nothing to measure. ${UNKNOWN_NOTE}"
+              else
+                echo "::error::Timed out after ${TIMEOUT_S}s waiting for the Cloudflare Pages ${ENVIRONMENT} deploy of ${SHA}; last observed state was '${LAST}'. ${UNKNOWN_NOTE}"
+              fi
+              exit 1
+            fi
+            echo "::warning::Timed out after ${TIMEOUT_S}s waiting for the Pages ${ENVIRONMENT} deploy of ${SHA}; last observed state was '${LAST}'. Continuing anyway. READ THIS FIRST if the smoke below is red: it may be asserting against the previous bundle."
             exit 0
           fi
 
-          echo "waiting for ${PROJECT} @ ${SHA}: ${LAST}"
+          echo "waiting for ${PROJECT} @ ${SHA} (${ENVIRONMENT}): ${LAST}"
           sleep "${POLL_S}"
         done

@@ -13,8 +13,10 @@
  * report green: that is how a monitor becomes a source of false comfort, which
  * is worse than having no monitor at all because somebody trusts it.
  *
- * Always returns HTTP 200 with a JSON report, so a cron run is marked failed
- * only when the invocation itself failed.
+ * Always returns HTTP 200 with a JSON report. The database-side tracked cron
+ * wrapper persists pg_net's request id and checks that exact response on the
+ * following invocation, so a missing, timed-out, errored, or non-2xx delivery
+ * still makes cron visibly red even though enqueueing was asynchronous.
  *
  * Env vars:
  *   OR_INTERNAL_WORKER_TOKEN                 caller auth (required)
@@ -28,6 +30,7 @@ import {
   classify,
   type QueueDefinition,
   QUEUES,
+  stillQueued,
   unmonitoredQueues,
   watchedQueues,
 } from './queues.ts';
@@ -87,30 +90,26 @@ function jsonResponse(body: unknown, status: number): Response {
 /**
  * Oldest still-queued row for one queue.
  *
- * "Still queued" means the drain column is NULL and every terminal column is
- * NULL. Ordering ascending and taking one row means we read one row rather
- * than counting the whole table.
+ * "Still queued" means the drain column is NULL, every terminal column is NULL,
+ * and, for a queue that declares a retry ceiling, the retry count is below it.
+ * Ordering ascending and taking one row means we read one row rather than
+ * counting the whole table.
  *
- * ON INDEXES, because an earlier version of this comment claimed one covered
- * this and that was FALSE. `idx_webhook_delivery_pending` is partial on
- * `(succeeded_at IS NULL AND attempts < 5)`. This query deliberately omits the
- * attempts clause, because a row that exhausted its retries is exactly the row
- * we must still see, so Postgres cannot use that index: a partial index is only
- * usable when the query predicate implies the index predicate. The migration in
- * this change adds an index matching THIS predicate. Check both together if you
- * ever change the filter here.
+ * ON INDEXES. A partial index is only usable when the query predicate implies
+ * the index predicate. `idx_webhook_delivery_pending` is partial on
+ * `(succeeded_at IS NULL AND attempts < 5)`, and for webhook_delivery this
+ * query carries both clauses (see `giveUpAt` in queues.ts), so it qualifies
+ * again. `idx_webhook_delivery_undrained` (partial on `succeeded_at IS NULL`)
+ * qualifies too. An earlier version of this query left the attempts clause out
+ * on purpose, so the pending index could not serve it. If you change the
+ * filter, check it against both indexes.
  */
 async function oldestUndrained(
   // deno-lint-ignore no-explicit-any
   client: any,
   q: QueueDefinition,
 ): Promise<{ at: string | null; error?: string }> {
-  let query = client
-    .from(q.table)
-    .select(q.enqueuedAt)
-    .is(q.drainedAt, null);
-
-  for (const col of q.alsoTerminal) query = query.is(col, null);
+  const query = stillQueued(q, client.from(q.table).select(q.enqueuedAt));
 
   const { data, error } = await query
     .order(q.enqueuedAt, { ascending: true })
@@ -262,9 +261,12 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         ...lines,
         '',
         'A queue with an old undrained row means its drain is not running, or ' +
-        'is running and failing. Check whether the job exists at all before ' +
-        'checking whether it succeeded: an absent `cron.job` entry is how ' +
-        'DL-1562 went unnoticed for ten weeks.',
+        'is running and failing. The exception is a queue with a retry ceiling ' +
+        '(webhook_delivery): rows that fail until they reach it are treated as ' +
+        'given up and are not counted, so a drain that runs while every ' +
+        'delivery fails does NOT raise this alert. Check whether the job ' +
+        'exists at all before checking whether it succeeded: an absent ' +
+        '`cron.job` entry is how DL-1562 went unnoticed for ten weeks.',
         '',
         'A `could not check` line is NOT a clean bill of health. It means this ' +
         'probe learned nothing about that queue on this run.',

@@ -1,0 +1,49 @@
+/**
+ * Classify a Supabase/PostgREST read into the three outcomes a naive
+ * `if (!data) ...` check collapses into one: a row was found, no row
+ * exists, or the read itself failed (a renamed column, an RLS refusal,
+ * an expired token, a dropped connection).
+ *
+ * PostgREST returns `data: null` for both "no row" and "the read failed",
+ * and the shape depends on the query builder used:
+ *  - `.single()` errors on zero rows (PGRST116), so "no row" already
+ *    carries an error there.
+ *  - `.maybeSingle()` and a plain `.select()` return `data: null` (or an
+ *    empty array) with `error: null` when nothing matches, and only set
+ *    `error` for a genuine failure.
+ *
+ * `error` is the only field that tells the two apart. This function is
+ * the one place that check happens, so it can be tested once instead of
+ * re-derived, wrong, at every call site.
+ *
+ * See the co-admin gate effect in src/routes/app.tsx (DEV-0392): every
+ * read there used to destructure `data` only, so a failed read presented
+ * as an absent row and a workspace silently disappeared instead of the
+ * failure being surfaced.
+ */
+export type ReadOutcome = "row" | "empty" | "error";
+
+/**
+ * PostgREST's code for ".single() matched zero-or-more-than-one rows."
+ * The SAME code covers both cases (its own message says "multiple (or
+ * no) rows returned"), so the code alone never proves zero rows: only
+ * `details` does, when PostgREST confirms it in text. A details-less or
+ * ambiguous PGRST116 must stay "error" rather than guess "empty", or a
+ * genuine multi-row integrity error would be hidden as an absent row.
+ */
+const PGRST_NO_ROWS = "PGRST116";
+const CONFIRMS_ZERO_ROWS = /\b0 rows\b/i;
+
+function isConfirmedZeroRows(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("code" in error)) return false;
+  if ((error as { code?: unknown }).code !== PGRST_NO_ROWS) return false;
+  const details = (error as { details?: unknown }).details;
+  return typeof details === "string" && CONFIRMS_ZERO_ROWS.test(details);
+}
+
+export function classifyRead(data: unknown, error: unknown): ReadOutcome {
+  if (error) return isConfirmedZeroRows(error) ? "empty" : "error";
+  if (data === null || data === undefined) return "empty";
+  if (Array.isArray(data) && data.length === 0) return "empty";
+  return "row";
+}

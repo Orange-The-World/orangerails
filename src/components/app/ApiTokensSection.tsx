@@ -138,6 +138,24 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
     void reload();
   }, [reload]);
 
+  // The vault salt shown beside a fresh token is the user's own Argon2id salt,
+  // written at signup and stored on user_vault_meta. The owner reads that row
+  // directly under row level security, exactly as unlock, recover and app load
+  // already do. Deliberately NOT a database function: the server does not
+  // derive or issue vault salts, it only stores the one the client generated.
+  const fetchVaultSalt = useCallback(async (): Promise<string> => {
+    if (!userId) throw new Error("Not signed in");
+    const { data, error: saltErr } = await supabase
+      .from("user_vault_meta")
+      .select("vault_salt")
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (saltErr) throw new Error(saltErr.message ?? "Salt lookup failed");
+    const salt = data?.vault_salt ?? null;
+    if (!salt) throw new Error("No vault found for this account. Please complete signup.");
+    return salt;
+  }, [userId]);
+
   // Trigger the branded confirm dialog. The actual revoke/rotate work runs
   // from confirmRevoke / confirmRotate below.
   const handleRevoke = (id: string) => setPendingRevokeId(id);
@@ -161,15 +179,13 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
   const confirmRotate = async (id: string) => {
     setError(null);
     try {
-      const [tokenRes, saltRes] = await Promise.all([
+      const [tokenRes, salt] = await Promise.all([
         (supabase.rpc as any)("rotate_or_access_token", { p_grant_id: id }),
-        supabase.rpc("get_or_vault_salt"),
+        fetchVaultSalt(),
       ]);
       if (tokenRes.error) throw new Error(tokenRes.error.message ?? "Rotate failed");
-      if (saltRes.error) throw new Error(saltRes.error.message ?? "Salt lookup failed");
       const token = tokenRes.data as string | null;
-      const salt = saltRes.data as string | null;
-      if (!token || !salt) throw new Error("Empty token or salt returned");
+      if (!token) throw new Error("Empty token returned");
       setFresh({ token, salt });
       setSavedAcked(false);
       if (userId) void logSecurityEvent(supabase, userId, "token_rotated", { action: "rotate", grant_id: id });
@@ -182,15 +198,13 @@ export function ApiTokensSection({ userId }: { userId: string | null }) {
     setGenerating(true);
     setError(null);
     try {
-      const [tokenRes, saltRes] = await Promise.all([
+      const [tokenRes, salt] = await Promise.all([
         supabase.rpc("create_or_access_token", { app_slug: "bitbooks" }),
-        supabase.rpc("get_or_vault_salt"),
+        fetchVaultSalt(),
       ]);
       if (tokenRes.error) throw new Error(tokenRes.error.message ?? "Token creation failed");
-      if (saltRes.error) throw new Error(saltRes.error.message ?? "Salt lookup failed");
       const token = tokenRes.data as string | null;
-      const salt = saltRes.data as string | null;
-      if (!token || !salt) throw new Error("Empty token or salt returned");
+      if (!token) throw new Error("Empty token returned");
       setFresh({ token, salt });
       setSavedAcked(false);
       if (userId) void logSecurityEvent(supabase, userId, "token_rotated", { action: "create", app_slug: "bitbooks" });

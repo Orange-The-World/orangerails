@@ -299,23 +299,34 @@ export function isPasswordAcceptable(
 }
 
 // ------------------------------------------------------------------
-// Raw MEK bytes , for the co-admin grant flow only.
+// The password stretch , raw Argon2id output. NOT the MEK.
 // ------------------------------------------------------------------
 
 /**
- * Re-run Argon2id and return the raw 32-byte hash.
+ * Run Argon2id over the vault password and return the raw 32-byte hash.
  *
- * This is the ONLY sanctioned way to get extractable key material from the
- * vault password. It is used exclusively in the co-admin grant flow, where
- * the owner must re-confirm their vault password so the browser can
- * concatenate credentials+transactions subkeys into a 64-byte blob and wrap
- * it for the recipient's PQC public key.
+ * THIS IS NOT THE MASTER KEY, and the name has misled a caller before. On a
+ * key-version-2 vault, which is what setupVault creates, the master key is 32
+ * random bytes and this output is only the KEK that wraps it. Data subkeys
+ * derived from this value decrypt nothing, and PQC secrets do not unwrap under
+ * it. It is the master key ONLY on a legacy key-version-1 vault, where the two
+ * happen to coincide.
  *
- * The returned bytes are transient: callers must derive subkeys from them
- * immediately and then let the array be garbage-collected. Never persist or
- * log the returned value.
+ * ITS ONLY CALLER IS deriveKek, immediately below. That is the correct use and
+ * the intended one. Anything that needs key material should take the unlocked
+ * MEK CryptoKey from VaultContext instead.
  *
- * @param password   The user's vault password (re-confirmed in the dialog).
+ * "BUT I NEED RAW BYTES." No. A non-extractable HKDF CryptoKey supports
+ * crypto.subtle.deriveBits, which returns raw bits; non-extractability blocks
+ * exporting the key itself, not deriving output from it. deriveSubkey in
+ * key-derivation.ts has always relied on that. The co-admin grant came back
+ * here on exactly this misunderstanding and built its subkeys out of the wrong
+ * key on every vault the product creates.
+ *
+ * The returned bytes are transient: use them immediately and let the array be
+ * garbage-collected. Never persist or log the returned value.
+ *
+ * @param password   The user's vault password.
  * @param saltBase64 The per-user salt (from user_vault_meta.vault_salt).
  */
 export async function deriveMekRaw(password: string, saltBase64: string): Promise<Uint8Array> {
@@ -398,6 +409,61 @@ export async function unwrapMekBytes(
 ): Promise<Uint8Array> {
   const b64 = await decryptString(ciphertextB64, wrappingKey);
   return base64ToBytes(b64);
+}
+
+/**
+ * Length-safe byte comparison.
+ *
+ * Not timing hardened on purpose: both sides are values this session just
+ * generated itself, so there is no attacker-controlled input whose comparison
+ * time could leak anything.
+ */
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
+}
+
+/**
+ * Prove a wrapped MEK envelope re-opens to exactly the key material it was
+ * given.
+ *
+ * WHY THIS EXISTS. Wrapping is write-only: wrapMekBytes hands back a string and
+ * nothing checks that the string can ever be opened again. If a wrap were
+ * wrong, the user holds a password or a recovery code that opens nothing, and
+ * there is no server-side copy of their key to fall back on because there is
+ * none by design. The likelihood is low and the consequence is total and
+ * irreversible, which is the shape that earns two unwraps and a compare.
+ *
+ * BOTH HALVES ARE NEEDED and neither is redundant:
+ *   - the unwrap catches a corrupt envelope or the wrong key, because AES-GCM
+ *     authenticates its ciphertext;
+ *   - the byte compare catches a wrap that authenticates cleanly and carries
+ *     the wrong plaintext, which authentication cannot see.
+ *
+ * Throws on either failure and says which one it was. It deliberately does NOT
+ * say whether anything was saved: this is called on the bytes a write returned,
+ * and it is meant to be usable before a write too, and those two situations owe
+ * the user different sentences. The caller adds that.
+ *
+ * @param what  human-readable name of the envelope, used in the error text
+ */
+export async function assertMekEnvelopeReopens(
+  what: string,
+  ciphertextB64: string,
+  wrappingKey: CryptoKey,
+  expectedMekRaw: Uint8Array,
+): Promise<void> {
+  let reopened: Uint8Array;
+  try {
+    reopened = await unwrapMekBytes(ciphertextB64, wrappingKey);
+  } catch {
+    throw new Error(`${what} could not be re-opened with the key that wrapped it.`);
+  }
+  if (!bytesEqual(reopened, expectedMekRaw)) {
+    throw new Error(`${what} re-opened to different key material than it was given.`);
+  }
 }
 
 // ------------------------------------------------------------------

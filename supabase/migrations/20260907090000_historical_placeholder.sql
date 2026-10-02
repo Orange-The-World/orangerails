@@ -1,0 +1,23 @@
+-- OUT-OF-ORDER-OK: placeholder for orphan ledger row already applied to dev; apply-migrations skips on ledger match (OR-T2621)
+-- 20260907090000_historical_placeholder.sql
+--
+-- PLACEHOLDER FILE: this migration version was already applied to dev
+-- (fzwmnzmtqidumdqjdddz) and the original file was removed from the repository
+-- without a corresponding cleanup of the schema_migrations ledger row. The
+-- ledger row for this version carries a NULL name, so the original filename
+-- cannot be recovered from the ledger or from prod (prod never had this
+-- version either).
+--
+-- The apply-migrations workflow skips any version already present in the
+-- schema_migrations ledger (line 867: continue on match), so the content of
+-- this file is NEVER EXECUTED on any project that ran the original. This file
+-- exists only to satisfy the migration classifier's rename-check, which hard
+-- stops when a ledger row has no matching file in the tree.
+--
+-- ASSESSMENT (orangerails/dba, OR-T2621): LIKELY LEDGER-ROW-ONLY but not
+-- independently verified (deleted-blob git history unreadable). Best-evidence
+-- reasoning: this version is adjacent in time to the confirmed LEDGER-ROW-ONLY
+-- case at 20260905230000, and shows the same shape. DO NOT attempt to apply
+-- or re-derive DDL for this version without independent verification.
+--
+-- Refs: OR-T2621, OR-T1252

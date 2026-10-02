@@ -75,6 +75,39 @@ interface SealedTransactionInput {
   block_height: number;
   /** Lowercase hex, 64 chars. HMAC-SHA-256 output, not base64. */
   txid_blind_index_hex: string;
+  /**
+   * Canonical block hash at block_height, lowercase hex 64 chars.
+   * Captured client-side from the .json sidecar before sealing (OR-T0999).
+   * Absent on records sealed before this field was added -- those are stored
+   * with block_hash=NULL and the reorg detector skips them as unverifiable
+   * (OR-T0407 ruling: NULL means pre-hash, not an error).
+   */
+  block_hash_hex?: string;
+}
+
+/**
+ * The sealed UTXO set built by sync.ts's in-run tracker (OR-T0049 PR 2).
+ * Opaque end to end: this function stores and returns the bytes without
+ * ever parsing or decrypting them, exactly like SealedTransactionInput
+ * above. Optional so every existing caller (which does not send this yet)
+ * is unaffected.
+ */
+interface SealedUtxosInput {
+  version: 1;
+  algorithm: 'AES-256-GCM';
+  iv_b64: string;
+  ciphertext_b64: string;
+}
+
+function isSealedUtxosInput(x: unknown): x is SealedUtxosInput {
+  if (!x || typeof x !== 'object') return false;
+  const o = x as Record<string, unknown>;
+  return (
+    o.version === 1 &&
+    o.algorithm === 'AES-256-GCM' &&
+    typeof o.iv_b64 === 'string' &&
+    typeof o.ciphertext_b64 === 'string'
+  );
 }
 
 interface TransactionsStoreRequestBody {
@@ -88,6 +121,14 @@ interface TransactionsStoreRequestBody {
    * OrangeRails JWT. Ignored when X-Platform-API-Key is present.
    */
   widget_token?: string;
+  /**
+   * The sealed UTXO set as of this sync run (OR-T0049 PR 2), optional.
+   * When present and well-formed, persisted via upsert_stealth_utxos keyed
+   * to the same bounded cursor height this call would otherwise return, so
+   * a future sync can fetch it (or-stealth-utxos-fetch) and seed its
+   * in-run matcher instead of starting from an empty UTXO map.
+   */
+  sealed_utxos?: SealedUtxosInput;
 }
 
 interface TransactionsStoreResponseBody {
@@ -96,6 +137,14 @@ interface TransactionsStoreResponseBody {
   total: number;
   skipped_duplicates: number;
   last_block_scanned: number | null;
+  /**
+   * Present ONLY when the caller sent sealed_utxos and the persist RPC
+   * failed. Absence means either no sealed_utxos was sent, or it was
+   * persisted successfully -- both healthy outcomes. The sealed
+   * transactions above are the primary record and are not rolled back on
+   * this failure.
+   */
+  utxo_persist_failed?: boolean;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -105,6 +154,15 @@ const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 // hex chars. Checking the shape here keeps a malformed client from writing a
 // value the dedup constraint would treat as a distinct transaction forever.
 const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
+
+// block_hash_hex, when present, must be exactly 64 lowercase hex chars, the
+// same shape a real block hash always has and the shape fetchCanonicalBlockHash
+// always lowercases to on the read side. Rejecting anything else here (not
+// just on the client) closes OR-C2078: an uppercase or malformed hash stored
+// verbatim would permanently fail a case-sensitive compare against the
+// always-lowercase canonical hash and orphan a real transaction with no
+// self-heal path, since the reorg check filters out already-orphaned rows.
+const BLOCK_HASH_HEX_RE = /^[0-9a-f]{64}$/;
 
 // Cap at 10k transactions per request and 16 KB per sealed record. A whole
 // 5-year wallet history with ~500 txs comes in well under that.
@@ -130,7 +188,13 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
     Number.isInteger(o.block_height) &&
     (o.block_height as number) >= 0 &&
     typeof o.txid_blind_index_hex === 'string' &&
-    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string)
+    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string) &&
+    // block_hash_hex is optional (pre-hash records, OR-T0407), but when the
+    // caller sends one it must be well-formed lowercase hex. Any other shape
+    // fails the whole record rather than being stored verbatim (OR-C2078).
+    (o.block_hash_hex === undefined ||
+      (typeof o.block_hash_hex === 'string' &&
+        BLOCK_HASH_HEX_RE.test(o.block_hash_hex as string)))
   );
 }
 
@@ -247,6 +311,9 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         400, cors,
       );
     }
+    if (body.sealed_utxos !== undefined && !isSealedUtxosInput(body.sealed_utxos)) {
+      return jsonResponse({ error: 'sealed_utxos is malformed' }, 400, cors);
+    }
 
     if (ctx.mode === 'direct' && body.app_user_id !== ctx.userId) {
       return jsonResponse(
@@ -331,6 +398,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         occurred_at: tx.occurred_at,
         block_height: tx.block_height,
         txid_blind_index_hex: tx.txid_blind_index_hex,
+        // Persist the canonical block hash so the server-side reorg detector
+        // can compare it against the chain later.  NULL means this record was
+        // uploaded before hash capture was added and is permanently unverifiable;
+        // the detector skips NULL rows in silence, never logs them as failures.
+        block_hash: tx.block_hash_hex ?? null,
       }));
 
       // Count duplicates BEFORE insert by checking which txid blind indexes
@@ -403,6 +475,26 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       return jsonResponse({ error: 'Failed to update connection sync metadata' }, 500, cors);
     }
 
+    // Optional UTXO-set persist (OR-T0049 PR 2a). Non-fatal: the sealed
+    // transactions above are already committed, and failing the whole
+    // request over this secondary write would discard them for no reason.
+    // scanned_to uses the same bounded height boundCursorAdvance already
+    // computed above, so the persisted UTXO set and the persisted cursor
+    // never disagree about what height they describe.
+    let utxo_persist_failed = false;
+    if (body.sealed_utxos !== undefined) {
+      const scannedTo = Math.max(cursorAdvanceTo, storedCursor, 0);
+      const { error: utxoErr } = await ctx.serviceClient.rpc('upsert_stealth_utxos', {
+        p_connection_id: body.connection_id,
+        p_sealed_utxos: body.sealed_utxos,
+        p_scanned_to: scannedTo,
+      });
+      if (utxoErr) {
+        console.error('[or-stealth-transactions-store] upsert_stealth_utxos failed:', utxoErr);
+        utxo_persist_failed = true;
+      }
+    }
+
     // Return the effective stored cursor so callers can distinguish "cursor
     // advanced" from "no new rows, cursor unchanged." Derived only from stored
     // state: on a fresh connection with no stored cursor and zero inserts this
@@ -419,6 +511,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       total,
       skipped_duplicates,
       last_block_scanned: effectiveCursor,
+      ...(utxo_persist_failed ? { utxo_persist_failed: true } : {}),
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {

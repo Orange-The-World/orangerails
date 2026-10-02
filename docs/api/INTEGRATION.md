@@ -117,7 +117,7 @@ Red-tier pairs will return `fill_type: gap` for most historical timestamps. Alwa
 
 ## Testing note
 
-The `exchange_rates` table exists on the ORBI production Supabase project only. There is no dev replica. Integration tests must target the prod project. Unit tests should mock the Supabase client.
+The `exchange_rates` table exists on two Supabase projects: the ORBI production project, and this app's own production project. Only the ORBI copy is served; the copy on this app's production project is a retired leftover from an earlier build phase with no reader. There is no dev replica of either. Integration tests must target the ORBI prod project. Unit tests should mock the Supabase client.
 
 ## Minting a new API key (@DBA only)
 

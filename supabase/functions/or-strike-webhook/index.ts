@@ -34,6 +34,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
+import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const CONN_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -74,7 +75,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
 
     const { data: conn, error: lookupErr } = await client
       .from('connections')
-      .select('id, strike_webhook_secret, provider_type')
+      .select('id, strike_webhook_secret, provider_type, strike_bad_sig_count')
       .eq('id', connId)
       .maybeSingle();
 
@@ -92,7 +93,13 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     const expected = await computeHmacHex(conn.strike_webhook_secret, body);
     if (!timingSafeEqual(expected, sig)) {
       console.warn('[or-strike-webhook] bad-sig 401: conn=%s sig_len=%s expected_len=%s', connId, sig.length, expected.length);
+      await recordBadSig(client, connId);
       return new Response('bad signature', { status: 401 });
+    }
+    // A correctly verified delivery proves the stored secret is still
+    // right, so any run of prior failures no longer means anything.
+    if (conn.strike_bad_sig_count) {
+      await clearBadSig(client, connId);
     }
 
     let event: StrikeWebhookEvent;
@@ -156,4 +163,60 @@ function timingSafeEqual(a: string, b: string): boolean {
     r |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
   return r === 0;
+}
+
+// ─── Subscription reconcile (OR-T0386) ────────────────────────────────────
+//
+// A stored subscription id does not mean it still verifies: the secret on
+// the connection row can drift from the secret Strike actually signs with,
+// and the registration path in queue.ts only ever fires once (when there is
+// no subscription id yet). These two helpers are how a connection recovers:
+// count consecutive bad-sig failures, and once they cross the threshold,
+// flag the connection so the next user-initiated sync deletes the stale
+// Strike subscription and registers a fresh one with a new secret.
+//
+// Both are best-effort. A failure here must never change the 401 the caller
+// (Strike) gets, so every error is caught and logged, never thrown.
+const STRIKE_BAD_SIG_THRESHOLD = 3;
+
+// The client parameter is typed SupabaseClient, not ReturnType<typeof
+// createClient>. Those are not the same type. createClient(url, key) with no
+// explicit Database argument returns SupabaseClient<any, "public", ...>, while
+// ReturnType<typeof createClient> resolves the generic DEFAULTS instead and
+// yields a schema of never. Under never, .rpc() types its args parameter as
+// undefined and .update() types its payload as never, so the two calls below
+// could not be written at all. Bare SupabaseClient is what _shared/
+// connection-state.ts and _shared/quiltt-config.ts already use for exactly
+// this, so this follows the convention rather than inventing one.
+async function recordBadSig(
+  client: SupabaseClient,
+  connId: string,
+): Promise<void> {
+  // strike_bump_bad_sig does the read and the write as one UPDATE, so two
+  // bad-sig deliveries for the same connection arriving close together each
+  // see the row as it is at the moment they run, never a count read here and
+  // then staled by the other. It returns true only on the delivery that
+  // actually crosses the threshold (OR-T2248).
+  try {
+    const { data: crossed, error } = await client.rpc('strike_bump_bad_sig', {
+      p_conn_id: connId,
+      p_threshold: STRIKE_BAD_SIG_THRESHOLD,
+    });
+    if (error) throw error;
+    if (crossed) {
+      console.warn(
+        `[or-strike-webhook] conn=${connId} crossed bad-sig threshold (${STRIKE_BAD_SIG_THRESHOLD}), flagged for resubscribe`,
+      );
+    }
+  } catch (err) {
+    console.error('[or-strike-webhook] recordBadSig failed:', err);
+  }
+}
+
+async function clearBadSig(client: SupabaseClient, connId: string): Promise<void> {
+  try {
+    await client.from('connections').update({ strike_bad_sig_count: 0 }).eq('id', connId);
+  } catch (err) {
+    console.error('[or-strike-webhook] clearBadSig failed:', err);
+  }
 }

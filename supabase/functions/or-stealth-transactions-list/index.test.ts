@@ -31,8 +31,64 @@
  */
 
 import { assertEquals, assert, assertThrows } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { PAGE_ORDER, cursorOrExpression, nextCursorFrom } from './index.ts';
+import {
+  PAGE_ORDER,
+  cursorOrExpression,
+  nextCursorFrom,
+  isBlindIndexHex,
+  isUuid,
+} from './index.ts';
 import type { PageCursor } from './index.ts';
+
+// ── request validators: exact, not "exact except one newline" ──────────
+//
+// Without the m flag, JavaScript's `$` matches only at the very end of the
+// input, so each pattern alone already rejects a trailing newline. Each
+// validator also carries a length check beside its pattern, and these cases
+// hold the whole validator to "exactly this shape and nothing more".
+
+const VALID_BLIND_INDEX = 'a'.repeat(64);
+const VALID_UUID = '0f8fad5b-d9cb-469f-a165-70867728950e';
+
+Deno.test('isBlindIndexHex accepts exactly 64 lowercase hex characters', () => {
+  assert(isBlindIndexHex(VALID_BLIND_INDEX));
+});
+
+Deno.test('isBlindIndexHex rejects 64 hex characters followed by a newline', () => {
+  // The cursor this builds is the one the handler answers 400 for. The pattern
+  // and the length check each reject it on their own.
+  assert(!isBlindIndexHex(VALID_BLIND_INDEX + '\n'));
+  assert(!isBlindIndexHex(VALID_BLIND_INDEX + '\r\n'));
+  assert(!isBlindIndexHex('a'.repeat(63)));
+  assert(!isBlindIndexHex('A'.repeat(64)));
+  assert(!isBlindIndexHex(undefined));
+  assert(!isBlindIndexHex(64));
+});
+
+Deno.test('isUuid accepts a canonical uuid', () => {
+  assert(isUuid(VALID_UUID));
+});
+
+Deno.test('isUuid rejects a uuid followed by a newline', () => {
+  assert(!isUuid(VALID_UUID + '\n'));
+  assert(!isUuid(VALID_UUID + '\r\n'));
+  assert(!isUuid(VALID_UUID.slice(0, 35)));
+  assert(!isUuid(''));
+  assert(!isUuid(null));
+});
+
+// Pins the claim in the comment at the top of this section to the runtime that
+// runs the function. The patterns are copied here because the production
+// regexes are not exported. The positive controls prove each copy matches a
+// good value, so a rejection is the anchor behaviour and not a typo in the copy.
+Deno.test('without the m flag, $ does not match before a trailing newline', () => {
+  const hex64 = /^[0-9a-f]{64}$/;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  assert(hex64.test(VALID_BLIND_INDEX));
+  assert(!hex64.test(VALID_BLIND_INDEX + '\n'));
+  assert(uuid.test(VALID_UUID));
+  assert(!uuid.test(VALID_UUID + '\n'));
+});
 
 interface Row {
   block_height: number;

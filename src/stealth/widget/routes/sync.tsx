@@ -208,6 +208,14 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           // coverage-map read. The widget and the edge function ship
           // separately, so either can be the older half.
           scan_ranges?: ScanRange[] | null;
+          // The connection's fencing token (OR-T2457), read here and echoed
+          // back unchanged on the step-5 cursor write below. Required on the
+          // write side, but read defensively here for the same split-deploy
+          // reason as scan_ranges: an older envelope-fetch predating this
+          // field would otherwise crash the sync on a destructure of
+          // undefined rather than surfacing a clear "cursor update failed"
+          // once the write is attempted.
+          scan_generation?: string;
         };
         setIsFirstSync(envJson.last_block_scanned === null);
 
@@ -246,7 +254,45 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           descriptor = parseDescriptor(envelopePayload.descriptor);
         }
 
-        // 2. Run the orchestrator.
+        // 2. Fetch the persisted UTXO set so runSync can seed its in-run map.
+        //    A first sync returns { sealed_utxos: null }; any fetch failure is
+        //    logged and treated as absent -- the run starts with an empty map,
+        //    preserving existing behavior.
+        let priorSealedUtxos: SealedEnvelope | null = null;
+        if (!init.skip_transaction_upload) {
+          try {
+            const utxoBody = {
+              connection_id: init.connection_id,
+              app_user_id: init.app_user_id,
+              widget_token: init.widget_token,
+            };
+            type UtxoResp = { sealed_utxos: SealedEnvelope | null };
+            let utxoJson: UtxoResp | null = null;
+            if (init.proxy_base_url && parent) {
+              const r = await proxyFetch({
+                parent,
+                parentOrigin: init.return_callback_origin,
+                fn: "or-stealth-utxos-fetch",
+                body: utxoBody,
+                timeoutMs: 15000,
+              });
+              if (r.ok && r.parsed !== null) utxoJson = r.parsed as UtxoResp;
+            } else {
+              const hdrs: Record<string, string> = { "Content-Type": "application/json" };
+              if (init.access_token) hdrs["Authorization"] = "Bearer " + init.access_token;
+              const r = await fetch(
+                resolveFunctionUrl("or-stealth-utxos-fetch", init.proxy_base_url),
+                { method: "POST", headers: hdrs, body: JSON.stringify(utxoBody) },
+              );
+              if (r.ok) utxoJson = (await r.json()) as UtxoResp;
+            }
+            if (utxoJson?.sealed_utxos) priorSealedUtxos = utxoJson.sealed_utxos;
+          } catch (e) {
+            console.warn("[stealth/sync] UTXO set fetch failed; starting with empty map:", e);
+          }
+        }
+
+        // 3. Run the orchestrator.
         const result = await runSync({
           envelope: envJson.sealed_envelope,
           orStealthKey: init.or_stealth_key_b64,
@@ -257,6 +303,7 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           fetchTip: useMock ? mockFetchTip : liveFetchTip,
           fetchFilter: useMock ? mockFetchFilter : liveFetchFilter,
           fetchBlock: useMock ? mockFetchBlock : liveFetchBlock,
+          sealedUtxos: priorSealedUtxos,
           matcher: useMock ? mockNeverMatcher : undefined,
           onProgress: (ev) => {
             if (cancelled) return;
@@ -313,13 +360,14 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         //    not needed). Cuts the slow upload step entirely for those
         //    apps. SYNC_COMPLETE still fires below so the consumer
         //    persists locally.
-        if (!init.skip_transaction_upload && result.sealedTransactions.length > 0) {
+        if (!init.skip_transaction_upload && (result.sealedTransactions.length > 0 || result.sealedUtxos !== null)) {
           const uploadBody = {
             connection_id: init.connection_id,
             app_user_id: init.app_user_id,
             widget_token: currentWidgetToken,
             sealed_transactions: result.sealedTransactions,
             last_block_scanned: result.lastBlockScanned,
+            ...(result.sealedUtxos !== null ? { sealed_utxos: result.sealedUtxos } : {}),
           };
           let uploadOk = false;
           let uploadStatus = 0;
@@ -441,8 +489,18 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
         // filled in ground below it. The second arm is new. Without it, a
         // gap-filling scan that stops before overtaking the old cursor throws
         // away everything it just read and the gap never closes.
-        const reachedHigher = result.lastBlockScanned > (envJson.last_block_scanned ?? -1);
-        const filledBelow = scannedFrom <= (envJson.last_block_scanned ?? -1)
+        // OR-T1117: on the short-circuit path result.scanned is false and
+        // result.lastBlockScanned is an ECHO of the stored cursor, not a
+        // height this run actually read. Without gating on scanned, both
+        // conditions below can be satisfied by a run that read zero
+        // filters, which recorded a coverage range for heights nobody
+        // scanned. Gate on the explicit signal rather than re-deriving
+        // "did we scan" from a comparison that collapses to a tautology
+        // on that path.
+        const reachedHigher = result.scanned
+          && result.lastBlockScanned > (envJson.last_block_scanned ?? -1);
+        const filledBelow = result.scanned
+          && scannedFrom <= (envJson.last_block_scanned ?? -1)
           && result.lastBlockScanned >= scannedFrom;
         if ((!useMock || isForceCursor()) && (reachedHigher || filledBelow)) {
           try {
@@ -455,6 +513,11 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
             widget_token: currentWidgetToken,
             last_block_scanned: result.lastBlockScanned,
             from_height: scannedFrom,
+            // OR-T2457: the token read at step 1, unchanged. or-stealth-envelope-update
+            // refuses the write (409) if the connection was reset (envelope
+            // replaced) since this sync began, rather than silently accepting
+            // a scan position that predates the reset.
+            scan_generation: envJson.scan_generation,
           };
           let cursorWritten = false;
           if (init.proxy_base_url && parent) {
@@ -557,6 +620,46 @@ export function SyncRoute({ init: _initProp }: { init: StealthInitWidgetMessage 
           } catch (e) {
             console.error('[stealth/sync] cursor update failed: next sync will rescan from stored cursor:', e);
             cursorFailed = true;
+          }
+        }
+
+        // 6. Server-side reorg check (OR-T0999).
+        //    For every stored transaction within REORG_LOOKBACK_BLOCKS of the
+        //    current tip, the server compares the stored block_hash against the
+        //    canonical chain.  On a mismatch it sets orphaned_at, removing the
+        //    row from the customer-visible balance and list.
+        //
+        //    Non-fatal: a failure here must never fail the sync.  The cursor
+        //    was already written above; the next sync will re-run the check.
+        //
+        //    Only fired when we actually scanned (result.scanned) so that a
+        //    short-circuit run (tip unchanged) does not hammer the block source
+        //    on every poll interval without new data to check.
+        if (result.scanned && !useMock) {
+          const reorgBody = {
+            connection_id: init.connection_id,
+            app_user_id: init.app_user_id,
+            widget_token: currentWidgetToken,
+            chain_tip: result.lastBlockScanned,
+          };
+          try {
+            if (init.proxy_base_url && parent) {
+              await proxyFetch({
+                parent,
+                parentOrigin: init.return_callback_origin,
+                fn: 'or-stealth-reorg-check',
+                body: reorgBody,
+              });
+            } else {
+              const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+              if (init.access_token) headers['Authorization'] = `Bearer ${init.access_token}`;
+              await fetch(
+                resolveFunctionUrl('or-stealth-reorg-check', init.proxy_base_url),
+                { method: 'POST', headers, body: JSON.stringify(reorgBody) },
+              );
+            }
+          } catch (reorgErr) {
+            console.warn('[stealth/sync] reorg check failed (non-fatal):', reorgErr);
           }
         }
 

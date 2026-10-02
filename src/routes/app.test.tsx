@@ -1,0 +1,297 @@
+// @vitest-environment jsdom
+//
+// The first test that ever mounts src/routes/app.tsx (OR-E0018 step 1,
+// folded from OR-T0837). Until this file existed, package.json's own
+// "test": "vitest run" never touched this route: the repo had zero
+// *.test.tsx files anywhere.
+//
+// The second test below is OR-T0834's acceptance criterion 2: the co-admin
+// workspace loader must not report "no workspaces" when the read that would
+// tell it so was actually rejected. That guard (classifyRead, OR-T1768) is
+// already shipped; this is what proves it stays shipped, by driving the
+// real effect with a Supabase client that returns an error instead of an
+// empty result and asserting on the real rendered output -- not an
+// extracted helper in isolation.
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import "@testing-library/jest-dom/vitest";
+
+// Radix UI (Checkbox, Select) calls ResizeObserver internally; jsdom does not
+// ship it. Stub it so tests that render TransactionsPanel do not throw
+// "ResizeObserver is not defined" (OR-T0079).
+globalThis.ResizeObserver = class ResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+};
+
+const mockNavigate = vi.fn();
+vi.mock("@tanstack/react-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-router")>();
+  return {
+    ...actual,
+    useNavigate: () => mockNavigate,
+  };
+});
+
+// A single stable mock object returned by every useVault() call.
+// If the factory returned a NEW object literal each call, every function
+// reference would change on each render, causing any useEffect that depends
+// on vault functions to re-fire endlessly and preventing the component from
+// ever reaching "loaded" state (tx-load-complete / data-stale-banner never
+// render). vi.hoisted() runs before vi.mock hoisting, so mockVault is
+// available in the factory closure.
+const mockVault = vi.hoisted(() => ({
+  isUnlocked: true,
+  saltB64: "test-salt",
+  lock: vi.fn(),
+  encryptCredentials: vi.fn(async (s: string) => s),
+  decryptText: vi.fn(async (s: string) => s),
+  encryptText: vi.fn(async (s: string) => s),
+  decryptTransaction: vi.fn(async (s: string) => JSON.parse(s)),
+  encryptTransaction: vi.fn(async (t: unknown) => JSON.stringify(t)),
+  exportCredentialsKeyForSync: vi.fn(),
+  exportTransactionsKeyForSync: vi.fn(),
+  ensurePqcKeypairs: vi.fn(async () => ({ generated: false })),
+  grantCoAdmin: vi.fn(),
+  revokeCoAdmin: vi.fn(),
+  loadAdminSubkeys: vi.fn(),
+  changeVaultPassword: vi.fn(),
+}));
+
+vi.mock("@/context/VaultContext", () => ({
+  useVault: () => mockVault,
+}));
+
+interface ReadResult {
+  data: unknown;
+  error: unknown;
+}
+
+// A minimal chainable query-builder stand-in for the handful of
+// PostgREST-style calls app.tsx makes (.select().eq().order() etc, some
+// terminated with .single()/.maybeSingle(), some awaited directly). It is
+// deliberately generic rather than a full supabase-js mock: app.tsx only
+// ever calls the methods below on the objects `from()` returns.
+function makeQueryBuilder(result: ReadResult) {
+  const builder: PromiseLike<ReadResult> & Record<string, unknown> = {
+    select: () => builder,
+    eq: () => builder,
+    order: () => builder,
+    limit: () => builder,
+    in: () => builder,
+    delete: () => builder,
+    single: () => Promise.resolve(result),
+    maybeSingle: () => Promise.resolve(result),
+    then: (onFulfilled: (r: ReadResult) => unknown, onRejected?: (e: unknown) => unknown) =>
+      Promise.resolve(result).then(onFulfilled, onRejected),
+  };
+  return builder;
+}
+
+let tableResults: Record<string, ReadResult>;
+let rpcResults: Record<string, ReadResult>;
+
+function resetSupabaseFixtures() {
+  tableResults = {
+    user_vault_meta: {
+      data: {
+        vault_salt: "test-salt",
+        workspace_key_id: null,
+        kem_secret_wrapped: "wrapped-kem-secret",
+        enc_mek_ciphertext: null,
+        vault_verifier_ciphertext: null,
+        vault_key_version: 1,
+      },
+      error: null,
+    },
+    workspace_admins: { data: [], error: null },
+    connections: { data: [], error: null },
+    source_wallets: { data: [], error: null },
+    encrypted_transactions: { data: [], error: null },
+  };
+  rpcResults = {
+    get_or_create_direct_subaccount: { data: "subaccount-1", error: null },
+    list_coadmin_workspaces: { data: [], error: null },
+    get_coadmin_emails: { data: [], error: null },
+  };
+}
+
+vi.mock("@/integrations/supabase/client", () => ({
+  supabase: {
+    auth: {
+      getSession: vi.fn(async () => ({
+        data: { session: { user: { id: "user-1", email: "user@example.com" } } },
+      })),
+      signOut: vi.fn(async () => ({ error: null })),
+    },
+    rpc: vi.fn((fn: string) => Promise.resolve(rpcResults[fn] ?? { data: null, error: null })),
+    from: vi.fn((table: string) => makeQueryBuilder(tableResults[table] ?? { data: [], error: null })),
+  },
+}));
+
+// Imported after the mocks above so app.tsx picks up the mocked modules.
+const { AppHome, ConnectionRow } = await import("./app");
+
+describe("AppHome (/app)", () => {
+  beforeEach(() => {
+    resetSupabaseFixtures();
+    mockNavigate.mockClear();
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("renders the unlocked screen once session + vault checks pass", async () => {
+    render(<AppHome />);
+    expect(
+      await screen.findByText(/Session-based zero-knowledge active/i, {}, { timeout: 5000 }),
+    ).toBeInTheDocument();
+    expect(mockNavigate).not.toHaveBeenCalledWith({ to: "/login" });
+    expect(mockNavigate).not.toHaveBeenCalledWith({ to: "/unlock" });
+  });
+
+  it("surfaces a rejected co-admin workspaces read as a visible error, not a silent empty list (OR-T0834)", async () => {
+    rpcResults.list_coadmin_workspaces = {
+      data: null,
+      error: { message: "permission denied for function list_coadmin_workspaces" },
+    };
+
+    render(<AppHome />);
+
+    // The real failure mode this guards: before classifyRead (OR-T1768),
+    // `{ data: null, error }` was destructured for `data` only, so a
+    // rejected read and "administers nothing" were indistinguishable and
+    // the page showed no error at all.
+    expect(
+      await screen.findByText(/Could not load your co-admin workspaces/i, {}, { timeout: 5000 }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/permission denied for function list_coadmin_workspaces/i),
+    ).toBeInTheDocument();
+  });
+
+  // OR-T0079 defect fixes
+  describe("no-data-imported / data-stale banners (OR-T0079)", () => {
+    const SYNCED_CONN = {
+      id: "conn-1",
+      provider_type: "blink",
+      status: "active" as const,
+      last_sync_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+      encrypted_label: null,
+      encrypted_last_error: null,
+      created_at: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+    };
+
+    it("ConnectionRow hides no-data-imported banner when latestTxAt is null (loading / cap state)", () => {
+      // null is what the call site passes before txLoadComplete or at cap.
+      // The banner must not fire in either case.
+      render(
+        <ConnectionRow
+          conn={SYNCED_CONN as any}
+          syncing={false}
+          onSync={vi.fn()}
+          onDelete={vi.fn()}
+          latestTxAt={null}
+        />,
+      );
+      expect(screen.queryByTestId("no-data-imported-banner")).not.toBeInTheDocument();
+    });
+
+    it("no-data-imported banner is hidden after transactions fetch errors (OR-T0079 defect 1)", async () => {
+      tableResults.connections = { data: [SYNCED_CONN], error: null };
+      tableResults.encrypted_transactions = {
+        data: null,
+        error: { message: "transactions fetch failed" },
+      };
+
+      render(<AppHome />);
+      // Wait for the failed transactions fetch to surface its error text:
+      // that proves the refresh cycle actually finished, so the assertion
+      // is not testing the trivially-false initial-load path.
+      await screen.findByText("transactions fetch failed");
+      expect(screen.queryByTestId("no-data-imported-banner")).not.toBeInTheDocument();
+    });
+
+    it("no-data-imported banner is hidden when 1000-row cap reached and connection absent from window (OR-T0079 defect 2)", async () => {
+      tableResults.connections = { data: [SYNCED_CONN], error: null };
+      // 1000 rows for a different connection -- conn-1 absent from the map.
+      // One row has an undecryptable payload so transactions.length===999
+      // while txFetchedCount===1000: proves the cap guard reads the raw fetch
+      // count, not the post-decrypt count (Auditor item C).
+      tableResults.encrypted_transactions = {
+        data: Array.from({ length: 1000 }, (_, i) => ({
+          id: `tx-${i}`,
+          connection_id: "conn-other",
+          external_id: `ext-${i}`,
+          encrypted_payload: i === 0 ? "not-valid-json" : "{}",
+          occurred_at: new Date(Date.now() - i * 1000).toISOString(),
+        })),
+        error: null,
+      };
+
+      render(<AppHome />);
+      // Wait for tx-load-complete sentinel: txLoadComplete===true means the
+      // cap guard is tested against real state, not the initial-loading null.
+      await screen.findByTestId("tx-load-complete");
+      expect(screen.queryByTestId("no-data-imported-banner")).not.toBeInTheDocument();
+    });
+
+    it("no-data-imported banner is shown after successful load with no transactions for connection (OR-T0079)", async () => {
+      tableResults.connections = { data: [SYNCED_CONN], error: null };
+      tableResults.encrypted_transactions = { data: [], error: null };
+
+      render(<AppHome />);
+      expect(await screen.findByTestId("no-data-imported-banner")).toBeInTheDocument();
+    });
+
+    it("data-stale-banner fires at 15-day gap and is absent at 13-day gap (14-day threshold)", async () => {
+      const now = Date.now();
+      const lastSyncAt = new Date(now).toISOString();
+      const fifteenDaysAgo = new Date(now - 15 * 24 * 60 * 60 * 1000).toISOString();
+
+      tableResults.connections = {
+        data: [{ ...SYNCED_CONN, last_sync_at: lastSyncAt }],
+        error: null,
+      };
+      tableResults.encrypted_transactions = {
+        data: [{
+          id: "tx-stale",
+          connection_id: "conn-1",
+          external_id: "ext-stale",
+          encrypted_payload: "{}",
+          occurred_at: fifteenDaysAgo,
+        }],
+        error: null,
+      };
+
+      render(<AppHome />);
+      expect(await screen.findByTestId("data-stale-banner")).toBeInTheDocument();
+      expect(screen.queryByTestId("no-data-imported-banner")).not.toBeInTheDocument();
+      cleanup();
+
+      // 13 days: below threshold, banner absent.
+      resetSupabaseFixtures();
+      const thirteenDaysAgo = new Date(now - 13 * 24 * 60 * 60 * 1000).toISOString();
+      tableResults.connections = {
+        data: [{ ...SYNCED_CONN, last_sync_at: lastSyncAt }],
+        error: null,
+      };
+      tableResults.encrypted_transactions = {
+        data: [{
+          id: "tx-ok",
+          connection_id: "conn-1",
+          external_id: "ext-ok",
+          encrypted_payload: "{}",
+          occurred_at: thirteenDaysAgo,
+        }],
+        error: null,
+      };
+
+      render(<AppHome />);
+      await screen.findByTestId("tx-load-complete");
+      expect(screen.queryByTestId("data-stale-banner")).not.toBeInTheDocument();
+    });
+  });
+});

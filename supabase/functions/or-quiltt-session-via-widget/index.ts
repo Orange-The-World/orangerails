@@ -135,11 +135,10 @@ Deno.serve(
         return jsonResponse({ error: "Failed to read profile mapping" }, 500, cors);
       }
 
-      // 5. Resolve Quiltt config — per-platform with env fallback.
-      //    This swaps the global QUILTT_API_KEY / QUILTT_CONNECTOR_ID_LINK
-      //    reads for a platforms-row lookup. Backwards compatible: if the
-      //    platform row's quiltt_api_key column is NULL, falls back to the
-      //    global env var (preserves V2's sandbox during the transition, 'or-quiltt-session-via-widget')).
+      // 5. Resolve Quiltt config. connectorId and catalogProfileId still
+      //    prefer the platforms row with env fallback; apiKey resolves from
+      //    QUILTT_API_KEY unconditionally (platforms.quiltt_api_key is no
+      //    longer read here, see _shared/quiltt-config.ts, OR-T2565).
       let quilttCfg;
       try {
         quilttCfg = await resolveQuilttConfigForPlatform(service, platform.data.id);

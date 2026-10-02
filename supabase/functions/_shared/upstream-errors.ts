@@ -193,8 +193,10 @@ export function classifyUpstreamError(raw: string, errorClass?: string): Upstrea
   if (/(\b400\b|\b404\b|\b422\b|bad.?request|not.?found|unprocessable)/.test(m)) {
     return 'UPSTREAM_BAD_REQUEST';
   }
-  // Response body parse failures (upstream returned non-JSON when JSON expected)
-  if (/(syntaxerror|unexpected (token|end of json)|json[. ]*parse|invalid json)/.test(m)) {
+  // Response/credential envelope parse failures: upstream returned non-JSON
+  // when JSON was expected, or a credential envelope failed to decode
+  // (e.g. surge's bearer_token base64url layer, OR-T2697).
+  if (/(syntaxerror|unexpected (token|end of json)|json[. ]*parse|invalid json|invalid base64url)/.test(m)) {
     return 'UPSTREAM_PARSE_FAILED';
   }
   // OR's own bug -- adapter received malformed credentials/config (NOT upstream's fault).
