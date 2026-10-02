@@ -973,8 +973,8 @@ jobs:
     # Runner note: same as the job above. npx vitest run is used rather than
     # bun test because the suite uses vi.stubGlobal, which bun's runner does
     # not implement. Dependencies are installed with bun to match the rest of
-    # this workflow. The install is NOT frozen because this package commits no
-    # lockfile; committing one is tracked separately (OR-T1103 follow-up).
+    # this workflow. This package commits its own bun.lock, so the install is
+    # frozen independently of the root workspace lockfile.
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -988,7 +988,7 @@ jobs:
 
       - name: Install gateway dependencies
         working-directory: workers/api-gateway
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Run gateway vitest
         working-directory: workers/api-gateway
