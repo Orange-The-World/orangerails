@@ -99,6 +99,7 @@ import {
   buildListResponse,
   isUnmappedStealthStatus,
   mergeConnections,
+  SOURCE_WALLETS_UNAVAILABLE_ALARM,
   STEALTH_UNAVAILABLE_ALARM,
   stealthRowToConnection,
   tagRegularConnection,
@@ -148,6 +149,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // service-role client are filtered by connection_id IN (...) which is
     // safe because that ID set was just authorized above.
     let walletsByConn = new Map<string, SourceWalletRow[]>();
+    // Tracks whether the source_wallets bulk read could be READ, not
+    // whether it returned rows. A connection with no wallets set up is a
+    // successful read of an empty set and must not raise this. Mirrors
+    // stealthUnavailable below: same non-fatal contract, different store.
+    let sourceWalletsUnavailable = false;
     if (connections.length > 0) {
       const connIds = connections.map(c => (c as { id: string }).id);
       const { data: walletRows, error: walletErr } = await ctx.serviceClient
@@ -156,9 +162,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         .in('connection_id', connIds);
 
       if (walletErr) {
-        console.error('[or-connection-list] source_wallets query failed:', walletErr);
         // Non-fatal: surface connections without wallet badges rather than
         // blocking the whole list. UI degrades to "Default account" rendering.
+        // Loud on purpose (DL-1038): the visible symptom is indistinguishable
+        // from "no wallets", so the degradation must not be silent.
+        sourceWalletsUnavailable = true;
+        console.error(
+          `[or-connection-list] ${SOURCE_WALLETS_UNAVAILABLE_ALARM} source_wallets query failed:`,
+          walletErr,
+        );
       } else {
         walletsByConn = new Map();
         for (const w of (walletRows ?? []) as SourceWalletRow[]) {
@@ -281,7 +293,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       new Date(),
     );
 
-    return jsonResponse(buildListResponse(merged, stealthUnavailable), 200, cors);
+    return jsonResponse(
+      buildListResponse(merged, stealthUnavailable, sourceWalletsUnavailable),
+      200,
+      cors,
+    );
   } catch (err) {
     console.error('[or-connection-list] fatal:', err);
     return jsonResponse({ error: 'Internal error' }, 500, cors);

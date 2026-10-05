@@ -61,6 +61,24 @@ import { wrapSentryHandler } from '../_shared/sentry.ts';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Length of a canonical UUID in its hyphenated 8-4-4-4-12 form. */
+export const UUID_LENGTH = 36;
+
+/**
+ * True only for a canonical UUID, and for nothing else.
+ *
+ * WHY THE LENGTH CHECK IS NOT REDUNDANT. JavaScript has no end-of-string
+ * anchor. Without the m flag, `$` matches at the end of the string OR
+ * immediately before a final newline, so the pattern above accepts a
+ * 37-character value that is a UUID followed by "\n". The length check is what
+ * makes this exact. It is deliberately a length check rather than a lookahead:
+ * the next person to copy this can see what it does without first knowing that
+ * rule about `$`.
+ */
+export function isUuid(v: unknown): v is string {
+  return typeof v === 'string' && v.length === UUID_LENGTH && UUID_RE.test(v);
+}
+
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 1000;
 
@@ -68,12 +86,31 @@ const MAX_LIMIT = 1000;
  * Lowercase 64-char hex, same shape or-stealth-transactions-store enforces on
  * write and the same shape the column comment documents.
  *
- * This regex is also the injection guard. The cursor predicate below is a
- * PostgREST filter STRING, so a value carrying `,` `.` `(` or `)` would be
- * parsed as filter syntax rather than as data. Hex admits none of those
- * characters. Do not loosen this to a generic string check.
+ * This regex is HALF of the injection guard, and on its own it is one
+ * character wider than it looks. The cursor predicate below is a PostgREST
+ * filter STRING, so a value carrying `,` `.` `(` or `)` would be parsed as
+ * filter syntax rather than as data, and hex admits none of those characters.
+ * What hex does not exclude here is a trailing newline: see isUuid above for
+ * why `$` is not an end-of-string anchor. Validate through isBlindIndexHex,
+ * which adds the length check that makes the shape exact, and do not loosen
+ * either half to a generic string check.
  */
 const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
+
+/** Length of the hex-encoded blind index, in characters. */
+export const BLIND_INDEX_HEX_LENGTH = 64;
+
+/**
+ * True only for exactly 64 lowercase hex characters. The length check is what
+ * makes that "exactly", for the reason given on isUuid.
+ */
+export function isBlindIndexHex(v: unknown): v is string {
+  return (
+    typeof v === 'string' &&
+    v.length === BLIND_INDEX_HEX_LENGTH &&
+    BLIND_INDEX_HEX_RE.test(v)
+  );
+}
 
 /**
  * The page ordering, as data rather than as two .order() calls, so the
@@ -190,7 +227,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     if (isAuthError(ctx)) return jsonResponse({ error: ctx.message }, ctx.status, cors);
 
     // Validate required fields.
-    if (!body.connection_id || !UUID_RE.test(body.connection_id)) {
+    if (!body.connection_id || !isUuid(body.connection_id)) {
       return jsonResponse({ error: 'connection_id (uuid) required' }, 400, cors);
     }
     if (!body.app_user_id || typeof body.app_user_id !== 'string') {
@@ -249,11 +286,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     // Strict hex, because this value is interpolated into a PostgREST filter
     // expression. See BLIND_INDEX_HEX_RE.
-    if (
-      hasTxid &&
-      (typeof body.before_txid_blind_index_hex !== 'string' ||
-        !BLIND_INDEX_HEX_RE.test(body.before_txid_blind_index_hex))
-    ) {
+    if (hasTxid && !isBlindIndexHex(body.before_txid_blind_index_hex)) {
       return jsonResponse(
         { error: 'before_txid_blind_index_hex must be 64 lowercase hex characters' },
         400, cors,
