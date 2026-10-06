@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { SINK_REASON_INSERT_FAILED, SINK_REASON_NO_WEBHOOK_URL, SINK_REASON_PLATFORM_NOT_FOUND, claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+import { SINK_REASON_INSERT_FAILED, SINK_REASON_NO_WEBHOOK_URL, SINK_REASON_PLATFORM_NOT_FOUND, claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldFlipOnMappingMissFirstAttempt, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── explicit retired-event replay (OR-T0128) ────────────────────────
 
@@ -2377,4 +2377,136 @@ Deno.test('claimRetiredEventForReplay: unrelated retirement reason is still not-
   const result = await claimRetiredEventForReplay(mock.client as any, 'evt-unrelated-retired');
 
   assertEquals(result.status, 'not-replayable', 'a row retired for an unrelated reason must remain not-replayable');
+});
+
+// ── OR-T0212 step 19: unrouted errored event flips connection at most once ──
+//
+// An unrouted connection.synced.errored.* event (no subaccount_id / platform_id
+// resolved) retries up to MAX_ATTEMPTS=25 ticks via bumpAttempts. Without a
+// guard the drain loop called flipConnectionToErrorByConnectionId on every tick,
+// so a connection that reconnected (flipped to 'active') was pushed back to
+// 'error' on the next retry. The fix gates the flip on ev.attempts === 0.
+
+Deno.test('OR-T0212 step 19: shouldFlipOnMappingMissFirstAttempt returns true on first attempt (attempts=0)', () => {
+  const ev = {
+    event_id:      'evt-first-s19',
+    event_type:    'connection.synced.errored.repairable',
+    payload:       { record: { id: 'qconn-s19' } },
+    platform_id:   null,
+    subaccount_id: null,
+    attempts:      0,
+  };
+  assertEquals(
+    shouldFlipOnMappingMissFirstAttempt(ev),
+    true,
+    'on the very first delivery attempt the flip should run so the connection status is reflected in the UI',
+  );
+});
+
+Deno.test('OR-T0212 step 19: shouldFlipOnMappingMissFirstAttempt returns true when attempts is absent (undefined)', () => {
+  const ev = {
+    event_id:      'evt-no-attempts-s19',
+    event_type:    'connection.synced.errored.repairable',
+    payload:       { record: { id: 'qconn-s19b' } },
+    platform_id:   null,
+    subaccount_id: null,
+    // attempts intentionally omitted -- matches PendingEvent where field is optional
+    attempts:      undefined as unknown as number,
+  };
+  assertEquals(
+    shouldFlipOnMappingMissFirstAttempt(ev),
+    true,
+    'a missing attempts field (??-defaulting to 0) must be treated as the first attempt',
+  );
+});
+
+Deno.test('OR-T0212 step 19: shouldFlipOnMappingMissFirstAttempt returns false on first retry (attempts=1)', () => {
+  const ev = {
+    event_id:      'evt-retry-s19',
+    event_type:    'connection.synced.errored.repairable',
+    payload:       { record: { id: 'qconn-s19c' } },
+    platform_id:   null,
+    subaccount_id: null,
+    attempts:      1,
+  };
+  assertEquals(
+    shouldFlipOnMappingMissFirstAttempt(ev),
+    false,
+    'on the second drain tick the connection may already be reconnected and active; ' +
+      'flipping it back to error would override that recovery',
+  );
+});
+
+Deno.test('OR-T0212 step 19: shouldFlipOnMappingMissFirstAttempt returns false near the attempt cap (attempts=24)', () => {
+  const ev = {
+    event_id:      'evt-near-cap-s19',
+    event_type:    'connection.synced.errored.provider',
+    payload:       { record: { id: 'qconn-s19d' } },
+    platform_id:   null,
+    subaccount_id: null,
+    attempts:      24,
+  };
+  assertEquals(
+    shouldFlipOnMappingMissFirstAttempt(ev),
+    false,
+    'at 24 of 25 attempts the guard must still suppress the flip; only the first attempt may flip',
+  );
+});
+
+Deno.test('OR-T0212 step 19: flipConnectionToErrorByConnectionId still fires on a valid first-attempt errored event (step 5 unchanged)', async () => {
+  // Smoke-test that step 5 behaviour is intact: flipConnectionToErrorByConnectionId
+  // still reaches and updates the connection when called directly with a first-attempt event.
+  let updateCalled = false;
+
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      if (table === 'connections') {
+        // deno-lint-ignore no-explicit-any
+        const chain: any = {
+          select(_c: string) { return chain; },
+          eq(_c: string, _v: unknown) { return chain; },
+          // Return exactly one row so the single-row guard passes.
+          // subaccount_id is set so the ordering guard can run.
+          // received_at is absent on ev, so findNewerProcessedSuccess is skipped.
+          async then(resolve: (v: unknown) => void) {
+            resolve({ data: [{ id: 'conn-s19-smoke', subaccount_id: 'sub-s19' }], error: null });
+          },
+          update(_patch: unknown) {
+            updateCalled = true;
+            return { eq(_c: string, _v: unknown) { return Promise.resolve({ error: null }); } };
+          },
+        };
+        return chain;
+      }
+      // subaccounts and platforms lookups: return minimal rows so the function proceeds.
+      // deno-lint-ignore no-explicit-any
+      const ch: any = {
+        select(_c: string) { return ch; },
+        eq(_c: string, _v: unknown) { return ch; },
+        maybeSingle() { return Promise.resolve({ data: null, error: null }); },
+      };
+      return ch;
+    },
+  };
+
+  const ev = {
+    event_id:      'evt-smoke-s19',
+    event_type:    'connection.synced.errored.repairable',
+    payload:       { record: { id: 'qconn-smoke-s19' } },
+    platform_id:   null,
+    subaccount_id: null,
+    attempts:      0,
+    // received_at absent: ordering guard (findNewerProcessedSuccess) is skipped
+  };
+
+  // Directly call flipConnectionToErrorByConnectionId -- this is what the drain loop
+  // calls when shouldFlipOnMappingMissFirstAttempt(ev) is true.
+  await flipConnectionToErrorByConnectionId(client, ev, 'qconn-smoke-s19');
+
+  assertEquals(
+    updateCalled,
+    true,
+    'flipConnectionToErrorByConnectionId must still write the error status on a first-attempt event (step 5 behaviour unchanged)',
+  );
 });

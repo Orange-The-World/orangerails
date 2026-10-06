@@ -336,7 +336,10 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         // exactly one row matches, flip it. Bump attempts as mapping-missing either way.
         // OR-T0212 step 5.
         const connIdForFlip = connectionIdForErroredMappingMiss(ev);
-        if (connIdForFlip) {
+        if (connIdForFlip && shouldFlipOnMappingMissFirstAttempt(ev)) {
+          // OR-T0212 step 19: flip only on the first attempt. If the connection
+          // was repaired and reconnected while this event was retrying,
+          // subsequent bumpAttempts ticks must not override that recovery.
           await flipConnectionToErrorByConnectionId(client, ev, connIdForFlip);
         }
         // Still no mapping; mark attempted but not processed (try next cycle)
@@ -1214,6 +1217,21 @@ export async function reconcileConnectionError(
 export function connectionIdForErroredMappingMiss(ev: PendingEvent): string | null {
   if (!ev.event_type.startsWith('connection.synced.errored')) return null;
   return typeof ev.payload?.record?.id === 'string' ? ev.payload.record.id : null;
+}
+
+/**
+ * OR-T0212 step 19: return true only when the drain loop should attempt the
+ * mapping-miss error flip for this event. True on the very first attempt
+ * (attempts === 0 or absent); false on all retries.
+ *
+ * Extracted as a pure function so it is directly testable without driving the
+ * HTTP handler (same pattern as shouldRetireConnRace). The guard lives here
+ * rather than inside flipConnectionToErrorByConnectionId so that function
+ * stays a simple "flip if exactly one row matches" helper with no retry
+ * awareness of its own.
+ */
+export function shouldFlipOnMappingMissFirstAttempt(ev: PendingEvent): boolean {
+  return (ev.attempts ?? 0) === 0;
 }
 
 /**
