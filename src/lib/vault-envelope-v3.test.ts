@@ -5,8 +5,9 @@ import {
   generateVaultSalt,
   encryptString,
   decryptString,
+  encoding,
 } from "./vault";
-import { deriveCredentialsKey, deriveTransactionsKey } from "./key-derivation";
+import { HKDF_CONTEXTS, deriveCredentialsKey, deriveTransactionsKey } from "./key-derivation";
 import {
   buildUpgradeKeyringFromV2,
   dataKeyFor,
@@ -19,8 +20,7 @@ import {
 // ---------------------------------------------------------------------------
 // Core upgrade invariant tests
 //
-// These tests exist to mechanically enforce the Cryptography Engineer ruling
-// (msg#3550, 2026-09-10, on OR-T0676):
+// These tests enforce one invariant of the v2-to-v3 upgrade:
 //
 //   Generation 1 of an upgraded v2 vault's keyring MUST hold the exact same
 //   byte values that the v2 HKDF derivation produced. Every pre-upgrade row
@@ -28,14 +28,21 @@ import {
 //   them, so a wrong generation-1 key permanently destroys all pre-upgrade
 //   data.
 //
-// The test shape is deliberate: the encrypt side uses deriveCredentialsKey
-// (the real v2 path) BEFORE buildUpgradeKeyringFromV2 is called. If the
-// freeze code uses the wrong HKDF context string, the wrong salt, or derives
-// from a different source, the decrypt step fails and the test goes red.
+// Two kinds of test guard it, and they catch different failures:
 //
-// A matching bug in both halves CANNOT hide here, because the two sides are
-// different code paths: one is the existing v2 derivation, and the other is
-// the new upgrade helper under test.
+//   1. Round-trip tests (the block directly below). The encrypt side uses
+//      deriveCredentialsKey, the real v2 path, BEFORE buildUpgradeKeyringFromV2
+//      is called. They catch a mistake made inside the upgrade helper: a wrong
+//      context string passed to it, a wrong salt, or a different source for the
+//      key bytes. They CANNOT catch a change to the shared derivation itself.
+//      The helper calls the same deriveCredentialsKey and deriveTransactionsKey,
+//      so editing an HKDF context string or the salt handling moves both sides
+//      together and the round trip stays green.
+//
+//   2. The pinned known-answer test (the second block). A fixed MEK and salt
+//      with the expected key bytes written out as constants. It is the only
+//      test in this file that protects rows that are already stored: if the
+//      derivation changes, the bytes no longer match and it goes red.
 // ---------------------------------------------------------------------------
 
 describe("vault envelope v3: buildUpgradeKeyringFromV2", () => {
@@ -169,6 +176,77 @@ describe("vault envelope v3: buildUpgradeKeyringFromV2", () => {
     // deriveCredentialsKey uses context 'orangerails-creds-v1' and
     // deriveTransactionsKey uses 'orangerails-txns-v1', so they must differ.
     expect(keyring.credentials[0].keyB64).not.toBe(keyring.transactions[0].keyB64);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pinned known-answer test for the frozen generation-1 keys
+//
+// The block above asks whether the upgrade helper returns what the live
+// derivation returns. That cannot notice the live derivation itself changing,
+// because the helper calls it. This block asks the question that protects
+// stored rows: for a fixed MEK and salt, are the derived bytes still the ones
+// that existing v2 rows were encrypted under.
+//
+// Inputs are fixed public test values, not a real vault: MEK bytes 00..1f and
+// salt bytes 20..3f, both 32 bytes like the real ones. The expected key bytes
+// were computed with an independent HKDF-SHA-256 (RFC 5869, two HMAC-SHA-256
+// calls) whose output was first checked against RFC 5869 test case 1, and they
+// are written out as constants so a derivation change shows up as a failing diff.
+//
+// If this goes red, the v2 derivation changed. Do not edit the constants to make
+// it pass: stored rows were encrypted under the old bytes, so the constants may
+// only change together with a versioned migration of those rows.
+// ---------------------------------------------------------------------------
+
+describe("vault envelope v3: pinned generation-1 key bytes (known-answer)", () => {
+  // 00 01 02 ... 1f
+  const MEK_RAW = Uint8Array.from({ length: 32 }, (_, i) => i);
+  // 20 21 22 ... 3f, as the base64 string the vault stores in vault_salt
+  const SALT_B64 = encoding.bytesToBase64(Uint8Array.from({ length: 32 }, (_, i) => 0x20 + i));
+
+  const PINNED_HEX = {
+    credentials: "f9da83632c1845ddadeda0a33c8f024cb697d15c0481af5215f3dbe6a4a85bb5",
+    transactions: "1a6934efaf8cf053a5395b9ecfd290a5aff544382cb2e51a3ea786d91f21b2f0",
+  } as const;
+
+  const toHex = (bytes: Uint8Array): string =>
+    Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+
+  it("pins the two HKDF context strings that stored v2 rows were encrypted under", () => {
+    expect(HKDF_CONTEXTS.ORANGERAILS_CREDENTIALS_V1).toBe("orangerails-creds-v1");
+    expect(HKDF_CONTEXTS.ORANGERAILS_TRANSACTIONS_V1).toBe("orangerails-txns-v1");
+  });
+
+  it("the live v2 derivation produces the pinned credentials and transactions keys", async () => {
+    const mek = await importMekAsHkdf(MEK_RAW);
+
+    // deriveCredentialsKey and deriveTransactionsKey import extractable keys, so the
+    // raw bytes can be read back and compared.
+    const credsKey = await deriveCredentialsKey(mek, SALT_B64);
+    const txnKey = await deriveTransactionsKey(mek, SALT_B64);
+    const credsRaw = new Uint8Array(await crypto.subtle.exportKey("raw", credsKey));
+    const txnRaw = new Uint8Array(await crypto.subtle.exportKey("raw", txnKey));
+
+    expect(toHex(credsRaw)).toBe(PINNED_HEX.credentials);
+    expect(toHex(txnRaw)).toBe(PINNED_HEX.transactions);
+  });
+
+  it("buildUpgradeKeyringFromV2 freezes exactly the pinned bytes as generation 1", async () => {
+    const mek = await importMekAsHkdf(MEK_RAW);
+
+    const keyring = await buildUpgradeKeyringFromV2(mek, SALT_B64, null, null);
+
+    expect(keyring.credentials).toHaveLength(1);
+    expect(keyring.transactions).toHaveLength(1);
+    expect(keyring.credentials[0].generation).toBe(1);
+    expect(keyring.transactions[0].generation).toBe(1);
+
+    const credsBytes = encoding.base64ToBytes(keyring.credentials[0].keyB64);
+    const txnBytes = encoding.base64ToBytes(keyring.transactions[0].keyB64);
+
+    expect(toHex(credsBytes)).toBe(PINNED_HEX.credentials);
+    expect(toHex(txnBytes)).toBe(PINNED_HEX.transactions);
   });
 });
 
