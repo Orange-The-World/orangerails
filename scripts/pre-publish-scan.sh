@@ -379,6 +379,12 @@ scan() {
   if [[ "$count" -gt 20 ]]; then
     printf "      ... %d more\n" "$((count - 20))"
   fi
+  if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+    printf '::error title=hygiene scan::%s: %d findings\n' "$name" "$count"
+    printf '%s\n' "$filtered" | sed -E 's/^([^:]+):[0-9]+:.*/\1/' | sort -u | while IFS= read -r f; do
+      printf '::error file=%s,title=hygiene scan::%s\n' "$f" "$name"
+    done
+  fi
   EXIT_CODE=1
 }
 
@@ -493,7 +499,7 @@ if [[ -n "$RESERVED_TERMS" ]]; then
   scan "Reserved internal terms" \
        "$RESERVED_TERMS" \
        "i" \
-       "orbi/scripts/"
+       ""
 elif [[ "${REQUIRE_RESERVED_TERMS:-}" == "true" ]]; then
   # On a real run (push to dev/prod, same-repo PR) the list MUST be present;
   # a missing list means the guard is not actually running, so fail hard
@@ -596,7 +602,7 @@ printf "\n\033[1m5. Operational dates in code comments\033[0m\n"
 scan "Audit/observation/verification dates in comments" \
      "(as of |observed |verified |Audit |audited )202[0-9]-[0-1][0-9]-[0-3][0-9]" \
      "" \
-     "$EXEMPT_AUDIT_RE|orbi/scripts/"
+     "$EXEMPT_AUDIT_RE"
 
 # ----------------------------------------------------------------------
 # Summary
