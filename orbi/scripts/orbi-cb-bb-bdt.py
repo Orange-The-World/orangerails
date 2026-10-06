@@ -21,7 +21,7 @@ ToS: BB does not publish an explicit terms-of-use for econdata. The rates
 are public sovereign-reference data, attributed to "Bangladesh Bank" in
 the notes column. robots.txt is gated behind a JS bot-challenge.
 
-Methodology spec: https://wiki.abascal.ca/doc/central-bank-rate-extractions-append-only-audit-trail-Mn9ADGAwiV
+Methodology spec: maintainer-only methodology doc
 """
 import hashlib
 import html
