@@ -18,7 +18,7 @@ DigiCert Global G2 TLS RSA SHA256 2020 CA1 intermediate at
 /opt/bb-support/ca-extras/digicert-g2-rsa-sha256-2020-ca1.pem so verification
 succeeds.
 
-Methodology spec: https://wiki.abascal.ca/doc/central-bank-rate-extractions-append-only-audit-trail-Mn9ADGAwiV
+Methodology spec: maintainer-only methodology doc
 """
 import hashlib
 import html as H
