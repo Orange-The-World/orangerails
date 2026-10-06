@@ -336,11 +336,25 @@ const _drainHandler = wrapSentryHandler(async (req: Request) => {
         // exactly one row matches, flip it. Bump attempts as mapping-missing either way.
         // OR-T0212 step 5.
         const connIdForFlip = connectionIdForErroredMappingMiss(ev);
-        if (connIdForFlip && shouldFlipOnMappingMissFirstAttempt(ev)) {
-          // OR-T0212 step 19: flip only on the first attempt. If the connection
-          // was repaired and reconnected while this event was retrying,
-          // subsequent bumpAttempts ticks must not override that recovery.
-          await flipConnectionToErrorByConnectionId(client, ev, connIdForFlip);
+        if (connIdForFlip) {
+          if (shouldFlipOnMappingMissFirstAttempt(ev)) {
+            // OR-T0212 step 19: flip only on the first attempt. If the connection
+            // was repaired and reconnected while this event was retrying,
+            // subsequent bumpAttempts ticks must not override that recovery.
+            await flipConnectionToErrorByConnectionId(client, ev, connIdForFlip);
+          } else {
+            // OR-E0022: on retries, check whether a reconnect has already processed
+            // a newer success event for this connection. If so, retire this event
+            // immediately -- the reconnect never marks the errored event processed,
+            // so without this check the event burns through the remaining
+            // MAX_ATTEMPTS ticks and, if a mapping appears before then, falls
+            // through to reconcileConnectionError and undoes the reconnect.
+            const retired = await retireIfReconnectSuperseded(client, ev, connIdForFlip);
+            if (retired) {
+              skipped++;
+              continue;
+            }
+          }
         }
         // Still no mapping; mark attempted but not processed (try next cycle)
         await bumpAttempts(client, ev, 'mapping-missing');
@@ -1351,6 +1365,59 @@ export async function flipConnectionToErrorByConnectionId(
       `quiltt_connection_id-only lookup (no mapping row; code: ${code}, ` +
       `correlation_id: ${correlationId})`,
   );
+}
+
+/**
+ * OR-E0022: in the mapping-miss retry path, retire a connection.synced.errored.*
+ * event that has been superseded by a customer reconnect.
+ *
+ * Returns true and writes processed_at / retirement_reason='superseded-by-reconnect'
+ * when a newer processed success event is found for the same Quiltt connection.
+ * Returns false on any lookup failure or when no newer success exists (caller
+ * should fall through to bumpAttempts).
+ *
+ * Uses the same event-to-event ordering check as the OR-T2694 guard in
+ * reconcileConnectionError and flipConnectionToErrorByConnectionId: subaccount_id
+ * is looked up from the connections row so the findNewerProcessedSuccess query is
+ * scoped correctly (a success on one connection must not suppress a real error on
+ * a different connection under the same subaccount).
+ */
+export async function retireIfReconnectSuperseded(
+  client: SupabaseClient,
+  ev: PendingEvent,
+  quilttConnectionId: string,
+): Promise<boolean> {
+  if (!ev.received_at) return false;
+  // Look up subaccount_id from the connections row (same pattern as
+  // flipConnectionToErrorByConnectionId) to scope findNewerProcessedSuccess.
+  const { data: rows, error: lookupErr } = await client
+    .from('connections')
+    .select('subaccount_id')
+    .eq('provider_type', 'quiltt')
+    .eq('quiltt_connection_id', quilttConnectionId);
+  if (lookupErr || !rows || rows.length !== 1 || !rows[0].subaccount_id) return false;
+  const subaccountId = rows[0].subaccount_id as string;
+  const newer = await findNewerProcessedSuccess(client, ev, subaccountId, quilttConnectionId);
+  if (newer.error || !newer.eventId) return false;
+  const { error: retireErr } = await client
+    .from('quiltt_webhook_inbox')
+    .update({
+      processed_at:      new Date().toISOString(),
+      retirement_reason: 'superseded-by-reconnect',
+    })
+    .eq('event_id', ev.event_id);
+  if (retireErr) {
+    console.error(
+      `[or-quiltt-sync] event ${ev.event_id}: superseded-by-reconnect retirement failed: ${retireErr.message}`,
+    );
+    return false;
+  }
+  console.log(
+    `[or-quiltt-sync] event ${ev.event_id}: retired as superseded-by-reconnect ` +
+      `(newer success event ${newer.eventId} already processed for Quiltt connection ` +
+      `${redactProviderId(quilttConnectionId)})`,
+  );
+  return true;
 }
 
 /**
