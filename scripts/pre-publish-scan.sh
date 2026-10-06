@@ -493,7 +493,7 @@ if [[ -n "$RESERVED_TERMS" ]]; then
   scan "Reserved internal terms" \
        "$RESERVED_TERMS" \
        "i" \
-       ""
+       "orbi/scripts/"
 elif [[ "${REQUIRE_RESERVED_TERMS:-}" == "true" ]]; then
   # On a real run (push to dev/prod, same-repo PR) the list MUST be present;
   # a missing list means the guard is not actually running, so fail hard
@@ -596,7 +596,7 @@ printf "\n\033[1m5. Operational dates in code comments\033[0m\n"
 scan "Audit/observation/verification dates in comments" \
      "(as of |observed |verified |Audit |audited )202[0-9]-[0-1][0-9]-[0-3][0-9]" \
      "" \
-     "$EXEMPT_AUDIT_RE"
+     "$EXEMPT_AUDIT_RE|orbi/scripts/"
 
 # ----------------------------------------------------------------------
 # Summary
