@@ -13,7 +13,7 @@ For USD/GHS we read the USDGHS row's mid column.
 ToS: BOG /terms-of-use returns 404. Rates are public sovereign-reference
 data. We attribute "Bank of Ghana" in notes, identify via User-Agent.
 
-Methodology spec: https://wiki.abascal.ca/doc/central-bank-rate-extractions-append-only-audit-trail-Mn9ADGAwiV
+Methodology spec: maintainer-only methodology doc
 """
 import hashlib
 import json
