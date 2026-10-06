@@ -24,6 +24,8 @@ const quiet: SignalSnapshot = {
   query_error:              null,
   starvation_firing:        false,
   unprocessed_non_deferred: 0,
+  deferred_firing:          false,
+  deferred_unprocessed:     0,
 };
 
 /** A snapshot in which only the queue stall signal is firing. */
@@ -65,6 +67,27 @@ Deno.test('snapshotsMatch ignores succeeded_count while zero completions is not 
   const stored = asJsonbReturns(stallOnly(25, 60));
   assertEquals(snapshotsMatch(stored, stallOnly(25, 59)), true);
   assertEquals(snapshotsMatch(stored, stallOnly(25, 61)), true);
+});
+
+/** A snapshot in which only the deferred backlog signal is firing. */
+const deferredOnly = (deferred: number): SignalSnapshot => ({
+  ...quiet,
+  deferred_firing:      true,
+  deferred_unprocessed: deferred,
+});
+
+Deno.test('snapshotsMatch reports a moved deferred count while the deferred signal is firing', () => {
+  const stored = asJsonbReturns(deferredOnly(30));
+  assertEquals(snapshotsMatch(stored, deferredOnly(30)), true);
+  assertEquals(snapshotsMatch(stored, deferredOnly(31)), false);
+  assertEquals(snapshotsMatch(stored, deferredOnly(29)), false);
+  assertEquals(snapshotsMatch(stored, quiet), false);
+});
+
+Deno.test('snapshotsMatch ignores a deferred count while the deferred signal is not firing', () => {
+  assertEquals(normalizeSnapshot({ ...quiet, deferred_unprocessed: 7 }).deferred_unprocessed, null);
+  assertEquals(normalizeSnapshot(deferredOnly(7)).deferred_unprocessed, 7);
+  assertEquals(snapshotsMatch(asJsonbReturns(quiet), { ...quiet, deferred_unprocessed: 7 }), true);
 });
 
 Deno.test('snapshotsMatch is false when nothing was stored', () => {
