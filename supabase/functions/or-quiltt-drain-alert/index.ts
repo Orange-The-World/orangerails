@@ -1,7 +1,8 @@
 /**
- * or-quiltt-drain-alert -- five-signal health check for or_quiltt_sync_drain
+ * or-quiltt-drain-alert -- six-signal health check for or_quiltt_sync_drain
  *
- * Signals (DL-0640, signal D added by DL-1540, signal E added by OR-T2583):
+ * Signals (DL-0640, signal D added by DL-1540, signal E added by OR-T2583,
+ * signal F added by OR-T1667):
  *   A. Failure rate: >10% of or_quiltt_sync_drain runs failed in last 30 min.
  *      Reads cron.job_run_details via drain_cron_job_stats() SECURITY DEFINER RPC.
  *      Fires only when at least one run occurred (total_count > 0), so a quiet
@@ -43,6 +44,15 @@
  *      deliberately just starvation_firing and the row count, not the age
  *      in minutes, because the age changes every run even when nothing else
  *      does and would defeat content dedup.
+ *   F. Deferred backlog: quiltt_webhook_inbox rows that are opk-deferred
+ *      (opk_deferred_at IS NOT NULL) and still unprocessed (processed_at IS
+ *      NULL). Fires when more than 25 such rows are waiting, or the oldest
+ *      has been waiting more than 24 hours. A deferred row waits for its
+ *      subaccount to register an OPK key, and the re-drive in or-quiltt-sync
+ *      re-admits it once a key exists, so a large or old backlog means that
+ *      re-drive has stalled. Signal E excludes these rows on purpose, so
+ *      nothing else watches them. Its snapshot contribution is deferred_firing
+ *      and the row count, not the age, for the same reason as signal E.
  *
  * Auth: X-Internal-Worker-Token header, constant-time compared to OR_INTERNAL_WORKER_TOKEN.
  * Query errors surface as alert_firing = true (absence of evidence is not green).
@@ -81,6 +91,8 @@ const STALL_HOURS                  = 2;
 const RETIREMENT_WINDOW_HOURS      = 24;
 const STARVATION_UNPROCESSED_MIN   = 20; // BATCH_SIZE in or-quiltt-sync
 const STARVATION_AGE_MINUTES       = 25; // proven worst-case retirement bound (OR-T2581)
+const DEFERRED_COUNT_THRESHOLD     = 25; // OR-T1667: more deferred unprocessed rows than this fires signal F
+const DEFERRED_AGE_HOURS           = 24; // OR-T1667: an older deferred unprocessed row than this fires signal F
 const SUPPRESSION_COOLDOWN_MINUTES = 60;
 /** Maximum time to suppress an unchanged firing signal before forcing a repost. */
 const RE_ALERT_CEILING_HOURS       = 6;
@@ -102,6 +114,8 @@ function buildSnapshot(
   retired:                number | null,
   starvationFiring:       boolean,
   unprocessedNonDeferred: number | null,
+  deferredFiring:         boolean,
+  deferredUnprocessed:    number | null,
   queryError:             string | undefined,
 ): SignalSnapshot {
   return {
@@ -115,6 +129,8 @@ function buildSnapshot(
     retired:                  retired,
     starvation_firing:        starvationFiring,
     unprocessed_non_deferred: unprocessedNonDeferred,
+    deferred_firing:          deferredFiring,
+    deferred_unprocessed:     deferredUnprocessed,
     query_error:              queryError ?? null,
   };
 }
@@ -156,6 +172,14 @@ interface HealthReport {
       unprocessed_threshold:          number;
       age_threshold_minutes:          number;
       firing:                         boolean;
+    };
+    deferred_backlog: {
+      deferred_unprocessed: number | null;
+      oldest_age_hours:     number | null;
+      subaccounts:          number | null;
+      threshold_count:      number;
+      threshold_age_hours:  number;
+      firing:               boolean;
     };
   };
 }
@@ -372,6 +396,32 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     unprocessedNonDeferred >= STARVATION_UNPROCESSED_MIN &&
     oldestUnprocessedAgeMinutes > STARVATION_AGE_MINUTES;
 
+  // Signal F: deferred backlog -- rows waiting for their subaccount's OPK key
+  // (opk_deferred_at IS NOT NULL) that are still unprocessed. Signal E
+  // excludes exactly these rows, so without this nothing watches them. The
+  // re-drive re-admits a deferred row once its key registers; a large or old
+  // backlog means that re-drive has stalled.
+  const { data: deferredRows, error: deferredErr } = await client
+    .from('quiltt_webhook_inbox')
+    .select('opk_deferred_at, subaccount_id')
+    .not('opk_deferred_at', 'is', null)
+    .is('processed_at', null);
+
+  if (deferredErr) {
+    console.error('[or-quiltt-drain-alert] signal F (deferred backlog) query failed:', deferredErr.message);
+  }
+
+  const deferredUnprocessed: number | null = deferredRows ? deferredRows.length : null;
+  const oldestDeferredAgeHours: number | null = deferredRows && deferredRows.length > 0
+    ? (Date.now() - Math.min(...deferredRows.map((r) => new Date(r.opk_deferred_at as string).getTime()))) / (60 * 60 * 1000)
+    : (deferredRows ? 0 : null);
+  const deferredSubaccounts: number | null = deferredRows
+    ? new Set(deferredRows.map((r) => r.subaccount_id)).size
+    : null;
+  const deferredFiring =
+    (deferredUnprocessed !== null && deferredUnprocessed > DEFERRED_COUNT_THRESHOLD) ||
+    (oldestDeferredAgeHours !== null && oldestDeferredAgeHours > DEFERRED_AGE_HOURS);
+
   // Surface query errors: a probe that cannot run must not exit green.
   const queryErrors: string[] = [];
   if (statsErr) queryErrors.push(`signals A+B (cron stats): ${statsErr.message}`);
@@ -380,6 +430,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
   if (starvationCountErr) queryErrors.push(`signal E (starvation, count): ${starvationCountErr.message}`);
   if (starvationRetriedErr) queryErrors.push(`signal E (starvation, retried): ${starvationRetriedErr.message}`);
   if (starvationOldestErr) queryErrors.push(`signal E (starvation, oldest): ${starvationOldestErr.message}`);
+  if (deferredErr) queryErrors.push(`signal F (deferred backlog): ${deferredErr.message}`);
   const queryError = queryErrors.length > 0 ? queryErrors.join('; ') : undefined;
 
   if (failureRateFiring) {
@@ -415,9 +466,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       `(threshold: >=${STARVATION_UNPROCESSED_MIN} rows AND >${STARVATION_AGE_MINUTES} min)`,
     );
   }
+  if (deferredFiring) {
+    console.error(
+      `[or-quiltt-drain-alert] ALERT signal F (deferred backlog): ` +
+      `${deferredUnprocessed} deferred unprocessed row(s), oldest ` +
+      `${(oldestDeferredAgeHours ?? 0).toFixed(1)}h, ${deferredSubaccounts} subaccount(s) ` +
+      `(threshold: >${DEFERRED_COUNT_THRESHOLD} rows OR >${DEFERRED_AGE_HOURS}h)`,
+    );
+  }
 
   const alertFiring = failureRateFiring || zeroCompletionsFiring || stallFiring ||
-    retiredFiring || starvationFiring || queryError !== undefined;
+    retiredFiring || starvationFiring || deferredFiring || queryError !== undefined;
 
   // zulip_post_sent: null when not firing, true/false when firing based on outcome.
   let zulipPostSent: boolean | null = null;
@@ -450,6 +509,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       stallFiring, stalled,
       retiredFiring, retired,
       starvationFiring, unprocessedNonDeferred,
+      deferredFiring, deferredUnprocessed,
       queryError,
     );
     const snapshotChanged = !snapshotsMatch(lastSnapshot, currentSnapshot);
@@ -512,6 +572,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           `row(s), oldest ${(oldestUnprocessedAgeMinutes ?? 0).toFixed(1)} min old. The fetch batch ` +
           `has been fully occupied longer than the proven ${STARVATION_AGE_MINUTES} min worst-case ` +
           `retirement bound (OR-T2581): this is starvation, not a normal burst.`,
+        );
+      }
+      if (deferredFiring) {
+        parts.push(
+          `:x: **Signal F (deferred backlog):** ${deferredUnprocessed} row(s) deferred and still ` +
+          `unprocessed, oldest ${(oldestDeferredAgeHours ?? 0).toFixed(1)}h, ` +
+          `${deferredSubaccounts} distinct subaccount(s). A subaccount's OPK registration ` +
+          `re-drive may have stalled.`,
         );
       }
       if (queryError) {
@@ -609,6 +677,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         unprocessed_threshold:          STARVATION_UNPROCESSED_MIN,
         age_threshold_minutes:          STARVATION_AGE_MINUTES,
         firing:                         starvationFiring,
+      },
+      deferred_backlog: {
+        deferred_unprocessed: deferredUnprocessed,
+        oldest_age_hours:     oldestDeferredAgeHours,
+        subaccounts:          deferredSubaccounts,
+        threshold_count:      DEFERRED_COUNT_THRESHOLD,
+        threshold_age_hours:  DEFERRED_AGE_HOURS,
+        firing:               deferredFiring,
       },
     },
   };
