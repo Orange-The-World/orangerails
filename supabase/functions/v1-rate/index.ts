@@ -13,7 +13,8 @@
 // Updated: Sr Dev A, 2026-08-18 -- DL-0505: return 404 unsupported_pair when pair has no coverage; stale forward-fill continues to return fill_type:gap
 // Updated: Sr Dev A, 2026-08-18 -- DL-0505 Auditor fix: existence probe distinguishes unsupported_pair from before_coverage_start; per-item errors in batch preserve prior results and metering
 // Updated: Sr Dev B, 2026-08-20 -- DL-1361: surface rate_type and data_source_authority for CB-sourced composites (official_reference vs market)
-// Updated: Sr Dev B, 2026-08-21 -- DL-1361 round 2: drop OFFICIAL_CB_AUTHORITIES whitelist; any non-null composite authority is official_reference
+// Updated: Sr Dev B, 2026-08-21 -- DL-1361 round 2: drop OFFICIAL_CB_AUTHORITIES whitelist; any non-null composite authority is official_reference (superseded by OR-T2745 below)
+// Updated: Dev 2, 2026-09-30 -- OR-T2745: aggregator authorities (OXR only today) map to 'market' via rateTypeForAuthority; data_source_authority still reports them. Central banks stay official_reference.
 // Updated: CTO, 2026-09-28 -- OR-T0113 follow-up: bound the coverage probe (it had no bucket_ts predicate at all; on orbi-prod's large table the planner picked a slow index and it timed out with the same 500 it was meant to prevent). See classifyCoverage.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.111.0'
