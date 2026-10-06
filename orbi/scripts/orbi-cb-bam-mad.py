@@ -5,7 +5,7 @@ BAM publishes daily reference rates ("Cours de référence") via a CSV export
 on bkam.ma. The export contains today's and the previous business day's mean
 rates for ~30 currencies in semicolon-delimited form with comma decimals.
 
-Methodology spec: https://wiki.abascal.ca/doc/central-bank-rate-extractions-append-only-audit-trail-Mn9ADGAwiV
+Methodology spec: maintainer-only methodology doc
 """
 import csv
 import hashlib
