@@ -30,8 +30,8 @@
 
 CREATE OR REPLACE FUNCTION store_stealth_transactions_atomic(
   p_connection_id   uuid,
-  p_platform_id     text,
-  p_generation      text,
+  p_platform_id     uuid,
+  p_generation      uuid,
   p_rows            jsonb,
   p_cursor_advance  integer,
   p_sync_at         timestamptz
@@ -110,3 +110,6 @@ BEGIN
   RETURN jsonb_build_object('http_status', 200, 'inserted', v_inserted);
 END;
 $$;
+
+REVOKE ALL ON FUNCTION store_stealth_transactions_atomic(uuid, uuid, uuid, jsonb, integer, timestamptz) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION store_stealth_transactions_atomic(uuid, uuid, uuid, jsonb, integer, timestamptz) TO service_role;
