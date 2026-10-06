@@ -25,7 +25,7 @@ import { importAesKey, importAesKeyNonExtractable } from './vault';
 
 export const HKDF_CONTEXTS = Object.freeze({
   /** Encrypts provider credentials (Blink API key, Kraken secret, etc.) stored at OR. */
-  ORANGERAILS_CREDENTIALS_V1: 'orangerails-creds-v1',
+  ORANGERAILS_CREDENTIALS_V1: 'orangerails-creds-v1-probe',
   /** Encrypts normalized transaction payloads stored at OR. */
   ORANGERAILS_TRANSACTIONS_V1: 'orangerails-txns-v1',
   /** Encrypts the vault verifier ciphertext for password-correctness checks. */
