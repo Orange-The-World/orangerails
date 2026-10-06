@@ -17,7 +17,7 @@ WAF. The exchange-rate page is publicly served. We treat the rates as
 sovereign-reference public data, attribute "Central Bank of Egypt" in notes,
 identify ourselves via User-Agent, and request at <1 req/sec.
 
-Methodology spec: https://wiki.abascal.ca/doc/central-bank-rate-extractions-append-only-audit-trail-Mn9ADGAwiV
+Methodology spec: maintainer-only methodology doc
 """
 import hashlib
 import json
