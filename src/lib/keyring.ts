@@ -614,20 +614,34 @@ export async function rewrapKeyringUnderNewMek(params: {
  * produces the wrong generation-1 key and makes every pre-upgrade row
  * permanently unreadable, because there is no per-row sweep to repair them.
  *
- * The round-trip test in vault-envelope-v3.test.ts is the mechanical guard:
- *   1. encrypt a known plaintext through TODAY's live deriveCredentialsKey path
- *   2. call buildUpgradeKeyringFromV2
- *   3. decrypt the stored ciphertext via dataKeyFor(keyring, 'credentials', 1)
- *   4. assert the plaintext round-trips byte for byte
- * That test MUST go red if the HKDF context or salt ever diverges. It MUST
- * use the real pre-upgrade encryption call, not a value produced by the same
- * freeze code under test, or a matching bug in both halves would hide the drift.
+ * What guards this, and what each guard can and cannot see:
+ *   - The round-trip tests in vault-envelope-v3.test.ts encrypt through the live
+ *     deriveCredentialsKey and deriveTransactionsKey, then decrypt with the
+ *     generation-1 keys this function returns. They show that this function
+ *     returns what those two functions return today. They cannot detect drift in
+ *     the shared derivation itself: this function calls the same two functions,
+ *     so a changed HKDF context string or changed salt handling moves both halves
+ *     together and the round trip stays green while pre-upgrade rows stop
+ *     decrypting.
+ *   - The pinned known-answer test in the same file is the guard for rows that
+ *     are already stored. It fixes the expected key bytes for a fixed MEK and
+ *     salt, so a change to either context string, the salt handling, or the hash
+ *     goes red there. If it does, the v2 derivation changed. Do not edit the
+ *     pinned values to make it pass: they stand for the derivation that stored
+ *     rows were encrypted under, and they may only change together with a
+ *     versioned migration of those rows.
  *
  * @param mek           The unlocked v2 MEK (non-extractable HKDF CryptoKey).
  * @param saltB64       The vault salt (user_vault_meta.vault_salt) -- the
  *                      same value passed to Argon2id and all HKDF derivations.
- * @param kemSecretB64  PQC KEM secret already wrapped in the vault, or null.
- * @param sigSecretB64  PQC signing secret already wrapped in the vault, or null.
+ * @param kemSecretB64  PQC KEM secret key as PLAINTEXT base64, or null. This is
+ *                      not the wrapped value that v2 keeps in
+ *                      user_vault_meta.kem_secret_wrapped: the caller unwraps
+ *                      that first. The keyring is encrypted as a whole by
+ *                      wrapKeyring, so the secret is stored in it unwrapped.
+ *                      The value is copied in as given and is not validated.
+ * @param sigSecretB64  PQC signing secret key as PLAINTEXT base64, or null.
+ *                      Same rule, against user_vault_meta.sig_secret_wrapped.
  */
 export async function buildUpgradeKeyringFromV2(
   mek: CryptoKey,
