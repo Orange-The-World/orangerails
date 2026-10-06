@@ -11,16 +11,16 @@ its mean / buy / sell columns. The mean is the CBK authoritative rate.
 ToS: CBK /terms-of-use returns 404; rates are public sovereign-reference
 data. Attribution "Central Bank of Kenya" in notes.
 
-KNOWN OPERATIONAL GAP: as of 2026-06-06 the bb-support egress IP
-(66.70.179.236) is on Sucuri WebSite Firewall's IP blacklist (BLACK02) for
+KNOWN OPERATIONAL GAP: as of 2026-06-06 the production egress IP
+is on Sucuri WebSite Firewall's IP blacklist (BLACK02) for
 www.centralbank.go.ke (any path / any User-Agent → 403). The scraper is
 fully built and verified to work from other egress IPs (confirmed working
-from Jarvis). Until the bb-support IP is whitelisted (open a Sucuri
+from another egress IP). Until the production egress IP is whitelisted (open a Sucuri
 support ticket or migrate egress), this service exits non-zero with
 "FETCH_BLOCKED". Follow-up: contact CBK web admin / Sucuri support to
-request unblock of 66.70.179.236.
+request unblock of the production egress IP.
 
-Methodology spec: https://wiki.abascal.ca/doc/central-bank-rate-extractions-append-only-audit-trail-Mn9ADGAwiV
+Methodology spec: maintainer-only methodology doc
 """
 import hashlib
 import json
