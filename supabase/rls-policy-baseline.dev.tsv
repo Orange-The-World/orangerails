@@ -14,12 +14,12 @@ public	commodity_prices	public_read_commodity_prices	SELECT	{anon,authenticated}
 public	connections	Direct users can delete connections via their subaccount	DELETE	{authenticated}	c612392f2e41b13e785c800676ed7b48	d41d8cd98f00b204e9800998ecf8427e
 public	connections	Direct users can insert connections via their subaccount	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	c612392f2e41b13e785c800676ed7b48
 public	connections	Direct users can read connections via their subaccount	SELECT	{authenticated}	c612392f2e41b13e785c800676ed7b48	d41d8cd98f00b204e9800998ecf8427e
-public	connections	Direct users can update connections via their subaccount	UPDATE	{authenticated}	c612392f2e41b13e785c800676ed7b48	c612392f2e41b13e785c800676ed7b48
+public	connections	Direct users can update connections via their subaccount	UPDATE	{authenticated}	c612392f2e41b13e785c800676ed7b48	d41d8cd98f00b204e9800998ecf8427e
 public	customer_recovery_shares	Customers insert own recovery share	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	cc5647e7f2f068547b3ab12692728a82
 public	customer_recovery_shares	Staff read recovery shares	SELECT	{authenticated}	a826f96421f219c86191dcefa966dda3	d41d8cd98f00b204e9800998ecf8427e
 public	customer_recovery_shares	Staff update recovery shares	UPDATE	{authenticated}	a826f96421f219c86191dcefa966dda3	d41d8cd98f00b204e9800998ecf8427e
 public	customer_vault_meta	Customers read own vault meta	SELECT	{authenticated}	3524221f4c117cdc55aacc0cc685db54	d41d8cd98f00b204e9800998ecf8427e
-public	customer_vault_meta	Customers update own vault meta	UPDATE	{authenticated}	cc5647e7f2f068547b3ab12692728a82	cc5647e7f2f068547b3ab12692728a82
+public	customer_vault_meta	Customers update own vault meta	UPDATE	{authenticated}	cc5647e7f2f068547b3ab12692728a82	d41d8cd98f00b204e9800998ecf8427e
 public	customer_vault_meta	Customers upsert own vault meta	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	cc5647e7f2f068547b3ab12692728a82
 public	customers	Customers read own row	SELECT	{authenticated}	9fc7fa9c9f97a66f2bb51d11f1e4a031	d41d8cd98f00b204e9800998ecf8427e
 public	customers	Staff update customers	UPDATE	{authenticated}	a826f96421f219c86191dcefa966dda3	d41d8cd98f00b204e9800998ecf8427e
@@ -47,7 +47,7 @@ public	quiltt_institutions_cache	quiltt_institutions_cache_public_read	SELECT	{p
 public	source_wallets	Direct users can delete source_wallets via their subaccount	DELETE	{authenticated}	7db97b20d0ba361d129b8ea7eae9755d	d41d8cd98f00b204e9800998ecf8427e
 public	source_wallets	Direct users can insert source_wallets via their subaccount	INSERT	{authenticated}	d41d8cd98f00b204e9800998ecf8427e	7db97b20d0ba361d129b8ea7eae9755d
 public	source_wallets	Direct users can read source_wallets via their subaccount	SELECT	{authenticated}	7db97b20d0ba361d129b8ea7eae9755d	d41d8cd98f00b204e9800998ecf8427e
-public	source_wallets	Direct users can update source_wallets via their subaccount	UPDATE	{authenticated}	7db97b20d0ba361d129b8ea7eae9755d	7db97b20d0ba361d129b8ea7eae9755d
+public	source_wallets	Direct users can update source_wallets via their subaccount	UPDATE	{authenticated}	7db97b20d0ba361d129b8ea7eae9755d	d41d8cd98f00b204e9800998ecf8427e
 public	staff_users	Staff read staff_users	SELECT	{authenticated}	8a30881afbcacd754d0577f49979525e	d41d8cd98f00b204e9800998ecf8427e
 public	stealth_connections	Owners can read their stealth connections	SELECT	{authenticated}	56432150e324804bab7b2994ce3e7d1e	d41d8cd98f00b204e9800998ecf8427e
 public	stealth_scan_ranges	Owners can read their stealth scan ranges	SELECT	{authenticated}	5c7f4607232447c2f0fd7e328acb394e	d41d8cd98f00b204e9800998ecf8427e
