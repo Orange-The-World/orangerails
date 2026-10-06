@@ -366,12 +366,24 @@ scan() {
   printf "  \033[31m✗\033[0m  %s (%d findings)\n" "$name" "$count"
   # In CI the output goes to a PUBLIC Actions log, so never echo matched
   # CONTENT there: a reserved-term or infra-shape hit would publish the exact
-  # internal string this scan exists to keep out of the public tree. Emit
-  # file:line only (the category is already named on the line above), which is
-  # enough to locate and clean up. Locally, emit the full matched line so a
-  # developer can see exactly what matched. The canary self-test sets
-  # SCAN_NO_REDACT to force full output so it can still assert the token fired.
+  # internal string this scan exists to keep out of the public tree. In CI:
+  # emit one ::error workflow annotation per matching file (line numbers only,
+  # no matched text), then also print the file:line list for the plain log.
+  # Locally: emit the full matched line so a developer can see what matched.
+  # The canary self-test sets SCAN_NO_REDACT to force full output so it can
+  # assert the token fired.
   if [[ -z "${SCAN_NO_REDACT:-}" && ( -n "${CI:-}" || -n "${GITHUB_ACTIONS:-}" ) ]]; then
+    # One ::error annotation per matching file, listing matched line numbers
+    # only. Cap at 10 per step to stay within GitHub's per-step limit.
+    printf '%s\n' "$filtered" | sed -E 's/^([^:]+:[0-9]+):.*/\1/' \
+      | awk -F: -v cat="$name" '{
+            f=$1; l=$2
+            if (f in seen) { ln[f]=ln[f]","l } else { seen[f]=1; ln[f]=l; order[++n]=f }
+        } END {
+            lim=(n>10)?10:n
+            for (i=1;i<=lim;i++)
+                printf "::error file=%s,title=%s::lines %s\n", order[i], cat, ln[order[i]]
+        }'
     printf '%s\n' "$filtered" | sed -E 's/^([^:]+:[0-9]+):.*/\1/' | sed 's/^/      /' | head -20
   else
     printf '%s\n' "$filtered" | sed 's/^/      /' | head -20
