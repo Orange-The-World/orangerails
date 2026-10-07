@@ -195,6 +195,8 @@ async function deleteNonUuidFixture(connectionId: string): Promise<void> {
 // envelope-fetch edge function, which reads the real DB row.
 async function fetchConnectionRow(
   connectionId: string,
+  appUserId: string = APP_USER_ID,
+  appSlug: string = 'e2e-stealth-cursor-test',
 ): Promise<{ last_block_scanned: number | null; scan_generation?: string }> {
   const resp = await fetch(`${FN}/or-stealth-envelope-fetch`, {
     method: 'POST',
