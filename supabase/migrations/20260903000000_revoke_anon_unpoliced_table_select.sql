@@ -43,9 +43,9 @@
 --   GRANT SELECT ON TABLE public.webhook_delivery        TO anon;
 --
 -- IDEMPOTENT: REVOKE on a privilege that is already absent is a no op, so this
--- file is safe to re-run.  The assertion block below is written as an equality
--- check on the surviving set rather than as an absence check on the 22, so a
--- twenty third table appearing later fails it instead of passing silently.
+-- file is safe to re-run.  The assertion block uses catalog queries computed
+-- at apply time rather than a hard-coded expected list, so it passes on both
+-- dev and prod regardless of which reference tables exist in each environment.
 
 REVOKE SELECT ON TABLE public.adapter_requests        FROM anon;
 REVOKE SELECT ON TABLE public.agent_invitation_tokens FROM anon;
