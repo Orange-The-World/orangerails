@@ -4,7 +4,8 @@
 --
 -- MEASURED ON DEV (fzwmnzmtqidumdqjdddz) BEFORE WRITING THIS FILE, 2026-09-02:
 --   31 RLS enabled tables in public grant table level SELECT to anon.
---   22 of them have no policy admitting anon for SELECT.  Those 22 are below.
+--   22 of them have no policy admitting anon for SELECT on dev.  Those 22 are
+--   below; plus beta_approved_users which exists on prod only (guarded below).
 --    9 of them do have such a policy and are deliberately untouched.
 --   anon holds column level SELECT on only two tables, apps and platforms,
 --   neither of which is in the 22, so no table level REVOKE here can clear a
@@ -17,6 +18,10 @@
 -- CLIENT SURFACE: no client path reads any of the 22 while unauthenticated.
 -- The four read sites either return early with no user, or call getSession()
 -- and redirect to the login route before they query.
+-- beta_approved_users: the only read site is
+-- sites/world/src/lib/authClient.ts fetchBetaStatus(), which returns early
+-- with no session, reads as the logged-in user, and maps a read error to
+-- state pending, never access.
 --
 -- REVERSIBLE: yes.  To undo, re-grant:
 --   GRANT SELECT ON TABLE public.adapter_requests        TO anon;
@@ -41,6 +46,7 @@
 --   GRANT SELECT ON TABLE public.user_app_grants         TO anon;
 --   GRANT SELECT ON TABLE public.waitlist                TO anon;
 --   GRANT SELECT ON TABLE public.webhook_delivery        TO anon;
+--   GRANT SELECT ON TABLE public.beta_approved_users     TO anon;
 --
 -- IDEMPOTENT: REVOKE on a privilege that is already absent is a no op, so this
 -- file is safe to re-run.  The assertion block uses catalog queries computed
@@ -69,6 +75,16 @@ REVOKE SELECT ON TABLE public.subscriptions           FROM anon;
 REVOKE SELECT ON TABLE public.user_app_grants         FROM anon;
 REVOKE SELECT ON TABLE public.waitlist                FROM anon;
 REVOKE SELECT ON TABLE public.webhook_delivery        FROM anon;
+
+-- beta_approved_users exists on prod only.  Guard the revoke so the file is
+-- safe to run on dev and fresh databases.
+DO $$ BEGIN
+  IF to_regclass('public.beta_approved_users') IS NULL THEN
+    RAISE NOTICE 'beta_approved_users not present, skipped';
+  ELSE
+    EXECUTE 'REVOKE SELECT ON TABLE public.beta_approved_users FROM anon';
+  END IF;
+END $$;
 
 -- Self check.  Four assertions, each of which can actually fail:
 --   1a. every RLS table in public that still holds anon table level SELECT has
@@ -105,7 +121,8 @@ DECLARE
     'subscriptions',
     'user_app_grants',
     'waitlist',
-    'webhook_delivery'
+    'webhook_delivery',
+    'beta_approved_users'
   ];
   actual_tables  text[];
   policed_tables text[];
@@ -118,9 +135,9 @@ DECLARE
 BEGIN
   -- Assertion 1a: every RLS table in public that still has anon table-level
   -- SELECT must have at least one permissive pg_policies row whose cmd is
-  -- SELECT or ALL and whose roles admit anon (cardinality 0 = TO PUBLIC, or
-  -- contains 'anon').  Computed from the catalog at apply time so it passes
-  -- on both dev (9 surviving tables) and prod (more surviving tables).
+  -- SELECT or ALL and whose roles contain 'anon' or 'public'.  TO PUBLIC in
+  -- pg_policies is stored as roles = {public}, not as an empty array.
+  -- Computed from the catalog at apply time.
 
   SELECT coalesce(array_agg(t.relname ORDER BY t.relname), ARRAY[]::text[])
     INTO actual_tables
@@ -146,8 +163,8 @@ BEGIN
      AND p.cmd IN ('SELECT', 'ALL')
      AND p.permissive = 'PERMISSIVE'
      AND (
-           cardinality(p.roles) = 0
-        OR 'anon'::name = ANY(p.roles)
+           'anon'::name = ANY(p.roles)
+        OR 'public'::name = ANY(p.roles)
      );
 
   SELECT coalesce(array_agg(t ORDER BY t), ARRAY[]::text[])
