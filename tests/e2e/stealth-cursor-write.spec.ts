@@ -195,6 +195,8 @@ async function deleteNonUuidFixture(connectionId: string): Promise<void> {
 // envelope-fetch edge function, which reads the real DB row.
 async function fetchConnectionRow(
   connectionId: string,
+  appUserId: string = APP_USER_ID,
+  appSlug: string = 'e2e-stealth-cursor-test',
 ): Promise<{ last_block_scanned: number | null; scan_generation?: string }> {
   const resp = await fetch(`${FN}/or-stealth-envelope-fetch`, {
     method: 'POST',
@@ -204,8 +206,8 @@ async function fetchConnectionRow(
     },
     body: JSON.stringify({
       connection_id: connectionId,
-      app_user_id: APP_USER_ID,
-      app_slug: 'e2e-stealth-cursor-test',
+      app_user_id: appUserId,
+      app_slug: appSlug,
     }),
   });
   if (!resp.ok) throw new Error(`or-stealth-envelope-fetch failed ${resp.status}`);
@@ -258,6 +260,17 @@ test.describe('or-stealth-transactions-store: non-UUID app_user_id (DL-0697)', (
 
   test('accepts non-UUID app_user_id and stores the transaction row', async () => {
     const tx = await sealFixtureTx();
+    // OR-T2457: the store function requires the connection's current
+    // scan_generation (the fencing token a real caller reads at sync start).
+    const row = await fetchConnectionRow(
+      nonUuidConnectionId,
+      NON_UUID_APP_USER_ID,
+      'e2e-dl0697-non-uuid-test',
+    );
+    expect(
+      typeof row.scan_generation,
+      'envelope-fetch must return scan_generation for the non-UUID fixture row',
+    ).toBe('string');
     const resp = await fetch(`${FN}/or-stealth-transactions-store`, {
       method: 'POST',
       headers: {
@@ -269,6 +282,7 @@ test.describe('or-stealth-transactions-store: non-UUID app_user_id (DL-0697)', (
         app_user_id: NON_UUID_APP_USER_ID,
         sealed_transactions: [tx],
         last_block_scanned: 800_000,
+        scan_generation: row.scan_generation,
       }),
     });
     const bodyText = await resp.text();
