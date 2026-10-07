@@ -70,34 +70,57 @@ REVOKE SELECT ON TABLE public.user_app_grants         FROM anon;
 REVOKE SELECT ON TABLE public.waitlist                FROM anon;
 REVOKE SELECT ON TABLE public.webhook_delivery        FROM anon;
 
--- Self check.  Three assertions, each of which can actually fail:
---   1. the surviving set of anon table level SELECT grants on RLS tables is
---      EXACTLY the nine that a policy admits (equality, not absence);
---   2. the two anon INSERT grants the public forms depend on are still there;
---   3. the tables carrying anon COLUMN level SELECT are still exactly apps and
---      platforms, so nothing here has cleared a column grant.
+-- Self check.  Four assertions, each of which can actually fail:
+--   1a. every RLS table in public that still holds anon table level SELECT has
+--       at least one permissive SELECT or ALL policy in pg_policies whose roles
+--       admit anon or PUBLIC; a table surviving without such a policy is an
+--       unpoliced grant and this raises loudly;
+--   1b. none of the 22 tables this file revoked still holds anon table level
+--       SELECT; if a revoke silently failed this raises;
+--    2. the two anon INSERT grants the public forms depend on are still there;
+--    3. the tables carrying anon COLUMN level SELECT are still exactly apps and
+--       platforms, so nothing here has cleared a column grant.
 DO $$
 DECLARE
-  expected_tables text[] := ARRAY[
-    'exchange_rate_resolutions',
-    'exchange_rates',
-    'quiltt_institutions_cache',
-    'stealth_connections',
-    'stealth_scan_ranges',
-    'stealth_transactions',
-    'stealth_utxos',
-    'workspace_admins',
-    'wrapped_data_keys'
+  -- The 22 tables revoked above.  Used only for Assertion 1b.
+  revoked_tables text[] := ARRAY[
+    'adapter_requests',
+    'agent_invitation_tokens',
+    'agent_members',
+    'audit_entries',
+    'audit_events',
+    'channel_state',
+    'customers',
+    'data_keys',
+    'encrypted_transactions',
+    'invoices',
+    'payments',
+    'pending_widget_sessions',
+    'quiltt_profile_map',
+    'quiltt_webhook_inbox',
+    'source_wallets',
+    'staff_users',
+    'strike_webhook_events',
+    'subaccounts',
+    'subscriptions',
+    'user_app_grants',
+    'waitlist',
+    'webhook_delivery'
   ];
-  expected_sorted text[];
-  actual_tables   text[];
-  expected_cols   text[] := ARRAY['apps', 'platforms'];
+  actual_tables  text[];
+  policed_tables text[];
+  unpoliced      text[];
+  still_granted  text[];
+  expected_cols  text[] := ARRAY['apps', 'platforms'];
   expected_cols_sorted text[];
-  actual_cols     text[];
-  n_insert        integer;
+  actual_cols    text[];
+  n_insert       integer;
 BEGIN
-  SELECT array_agg(e ORDER BY e) INTO expected_sorted FROM unnest(expected_tables) AS e;
-  SELECT array_agg(e ORDER BY e) INTO expected_cols_sorted FROM unnest(expected_cols) AS e;
+  -- Assertion 1a: every RLS table in public that still has anon table-level
+  -- SELECT must have at least one permissive pg_policies row whose cmd is
+  -- SELECT or ALL and whose roles admit anon (cardinality 0 = TO PUBLIC, or
+  -- contains 'anon').  Computed from the catalog at apply time so it passes
+  -- on both dev (9 surviving tables) and prod (more surviving tables).
 
   SELECT coalesce(array_agg(t.relname ORDER BY t.relname), ARRAY[]::text[])
     INTO actual_tables
@@ -113,12 +136,54 @@ BEGIN
          AND x.privilege_type = 'SELECT'
     ) AS t;
 
-  IF actual_tables IS DISTINCT FROM expected_sorted THEN
+  SELECT coalesce(
+           array_agg(DISTINCT p.tablename::text ORDER BY p.tablename::text),
+           ARRAY[]::text[]
+         )
+    INTO policed_tables
+    FROM pg_policies p
+   WHERE p.schemaname = 'public'
+     AND p.cmd IN ('SELECT', 'ALL')
+     AND p.permissive = 'PERMISSIVE'
+     AND (
+           cardinality(p.roles) = 0
+        OR 'anon'::name = ANY(p.roles)
+     );
+
+  SELECT coalesce(array_agg(t ORDER BY t), ARRAY[]::text[])
+    INTO unpoliced
+    FROM unnest(actual_tables) AS t
+   WHERE t <> ALL(policed_tables);
+
+  IF array_length(unpoliced, 1) IS NOT NULL THEN
     RAISE EXCEPTION
-      'anon table level SELECT on RLS tables in public is not the expected set. expected=% actual=%',
-      expected_sorted, actual_tables;
+      'Assertion 1a: RLS table(s) still hold anon SELECT without an admitting policy: %',
+      unpoliced;
   END IF;
 
+  -- Assertion 1b: none of the 22 revoked tables still holds anon table-level SELECT.
+  SELECT coalesce(array_agg(t.relname ORDER BY t.relname), ARRAY[]::text[])
+    INTO still_granted
+    FROM (
+      SELECT DISTINCT c.relname::text AS relname
+        FROM pg_class c
+        JOIN pg_namespace ns ON ns.oid = c.relnamespace
+        CROSS JOIN LATERAL aclexplode(c.relacl) AS x
+       WHERE ns.nspname = 'public'
+         AND c.relkind = 'r'
+         AND c.relrowsecurity
+         AND x.grantee = 'anon'::regrole
+         AND x.privilege_type = 'SELECT'
+         AND c.relname = ANY(revoked_tables)
+    ) AS t;
+
+  IF array_length(still_granted, 1) IS NOT NULL THEN
+    RAISE EXCEPTION
+      'Assertion 1b: revoked table(s) still hold anon SELECT: %',
+      still_granted;
+  END IF;
+
+  -- Assertion 2: the two anon INSERT grants the public forms depend on are still there.
   SELECT count(*)
     INTO n_insert
     FROM pg_class c
@@ -135,6 +200,7 @@ BEGIN
       n_insert;
   END IF;
 
+  -- Assertion 3: the tables carrying anon COLUMN level SELECT are still exactly apps and platforms.
   SELECT coalesce(array_agg(t.relname ORDER BY t.relname), ARRAY[]::text[])
     INTO actual_cols
     FROM (
@@ -148,6 +214,8 @@ BEGIN
          AND x.grantee = 'anon'::regrole
          AND x.privilege_type = 'SELECT'
     ) AS t;
+
+  SELECT array_agg(e ORDER BY e) INTO expected_cols_sorted FROM unnest(expected_cols) AS e;
 
   IF actual_cols IS DISTINCT FROM expected_cols_sorted THEN
     RAISE EXCEPTION
