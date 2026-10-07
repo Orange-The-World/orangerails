@@ -282,6 +282,7 @@ test.describe('or-stealth-transactions-store: non-UUID app_user_id (DL-0697)', (
         app_user_id: NON_UUID_APP_USER_ID,
         sealed_transactions: [tx],
         last_block_scanned: 800_000,
+        scan_generation: row.scan_generation,
       }),
     });
     const bodyText = await resp.text();
