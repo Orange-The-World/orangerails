@@ -260,6 +260,17 @@ test.describe('or-stealth-transactions-store: non-UUID app_user_id (DL-0697)', (
 
   test('accepts non-UUID app_user_id and stores the transaction row', async () => {
     const tx = await sealFixtureTx();
+    // OR-T2457: the store function requires the connection's current
+    // scan_generation (the fencing token a real caller reads at sync start).
+    const row = await fetchConnectionRow(
+      nonUuidConnectionId,
+      NON_UUID_APP_USER_ID,
+      'e2e-dl0697-non-uuid-test',
+    );
+    expect(
+      typeof row.scan_generation,
+      'envelope-fetch must return scan_generation for the non-UUID fixture row',
+    ).toBe('string');
     const resp = await fetch(`${FN}/or-stealth-transactions-store`, {
       method: 'POST',
       headers: {
