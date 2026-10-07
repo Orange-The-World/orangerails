@@ -206,8 +206,8 @@ async function fetchConnectionRow(
     },
     body: JSON.stringify({
       connection_id: connectionId,
-      app_user_id: APP_USER_ID,
-      app_slug: 'e2e-stealth-cursor-test',
+      app_user_id: appUserId,
+      app_slug: appSlug,
     }),
   });
   if (!resp.ok) throw new Error(`or-stealth-envelope-fetch failed ${resp.status}`);
