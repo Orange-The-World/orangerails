@@ -69,13 +69,31 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
   );
 
+  // Whether the reporter can send at all: true only when SENTRY_DSN is set and
+  // parses as a URL. Only the boolean is ever returned, never the value.
+  let dsnConfigured = false;
+  try {
+    dsnConfigured = new URL(Deno.env.get('SENTRY_DSN') ?? '').host.length > 0;
+  } catch {
+    dsnConfigured = false;
+  }
+
   const now = new Date();
-  const breaches = await checkOpkDeferredBacklogAndAlert(
-    client,
-    DEFAULT_BACKLOG_THRESHOLD,
-    (err) => reportError(err, 'or-quiltt-backlog-alert', req),
-    now,
-  );
+  let breaches;
+  try {
+    breaches = await checkOpkDeferredBacklogAndAlert(
+      client,
+      DEFAULT_BACKLOG_THRESHOLD,
+      (err) => reportError(err, 'or-quiltt-backlog-alert', req),
+      now,
+    );
+  } catch (err) {
+    // Make a crash loud: log it, await the report so worker teardown cannot
+    // cut it off, and return a JSON 500 instead of a bare crash.
+    console.error('[or-quiltt-backlog-alert] check failed:', err instanceof Error ? err.message : String(err));
+    await reportError(err, 'or-quiltt-backlog-alert', req);
+    return jsonResponse({ error: 'backlog check failed', dsn_configured: dsnConfigured }, 500);
+  }
 
   if (breaches.length > 0) {
     console.error(
