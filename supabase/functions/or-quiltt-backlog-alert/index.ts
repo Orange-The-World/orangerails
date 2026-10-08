@@ -107,6 +107,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     {
       checked_at: now.toISOString(),
       threshold: DEFAULT_BACKLOG_THRESHOLD,
+      dsn_configured: dsnConfigured,
       breach_count: breaches.length,
       breaches,
     },
