@@ -22,8 +22,19 @@ function makeFakeClient(rows: Array<{ subaccount_id: string; opk_deferred_at: st
       const chain: any = {
         select() { return chain; },
         not() { return chain; },
-        order() { return chain; },
+        order(column: string) {
+          // Mirrors Postgres: an unknown column is an error, as on the real
+          // table (42703). Today's code ordered by "id", which does not exist.
+          if (!REAL_COLUMNS.includes(column)) badColumn = column;
+          return chain;
+        },
         range(from: number, to: number) {
+          if (badColumn) {
+            return Promise.resolve({
+              data: null,
+              error: new Error(`column quiltt_webhook_inbox.${badColumn} does not exist`),
+            });
+          }
           return Promise.resolve({ data: rows.slice(from, to + 1), error: null });
         },
       };
