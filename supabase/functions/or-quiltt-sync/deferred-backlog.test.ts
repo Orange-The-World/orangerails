@@ -13,8 +13,12 @@ import {
  * "is not a function" rather than silently succeeding -- that absence is
  * itself part of the no-destructive-retention proof below.
  */
+// Columns that exist on quiltt_webhook_inbox and that this module may order by.
+const REAL_COLUMNS = ['event_id', 'received_at', 'subaccount_id', 'opk_deferred_at'];
+
 function makeFakeClient(rows: Array<{ subaccount_id: string; opk_deferred_at: string }>) {
   const calls: string[] = [];
+  let badColumn: string | null = null;
   const client: DeferredBacklogClient = {
     from(table: string) {
       calls.push(table);
