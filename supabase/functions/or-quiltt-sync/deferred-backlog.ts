@@ -56,7 +56,8 @@ export async function measureOpkDeferredBacklog(
       .from('quiltt_webhook_inbox')
       .select('subaccount_id, opk_deferred_at')
       .not('opk_deferred_at', 'is', null)
-      .order('id', { ascending: true })
+      .order('received_at', { ascending: true })
+      .order('event_id', { ascending: true })
       .range(offset, offset + MEASURE_PAGE_SIZE - 1);
     if (error) throw error;
     const page = (data ?? []) as DeferredRow[];
