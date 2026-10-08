@@ -13,8 +13,12 @@ import {
  * "is not a function" rather than silently succeeding -- that absence is
  * itself part of the no-destructive-retention proof below.
  */
+// Columns that exist on quiltt_webhook_inbox and that this module may order by.
+const REAL_COLUMNS = ['event_id', 'received_at', 'subaccount_id', 'opk_deferred_at'];
+
 function makeFakeClient(rows: Array<{ subaccount_id: string; opk_deferred_at: string }>) {
   const calls: string[] = [];
+  let badColumn: string | null = null;
   const client: DeferredBacklogClient = {
     from(table: string) {
       calls.push(table);
@@ -22,8 +26,19 @@ function makeFakeClient(rows: Array<{ subaccount_id: string; opk_deferred_at: st
       const chain: any = {
         select() { return chain; },
         not() { return chain; },
-        order() { return chain; },
+        order(column: string) {
+          // Mirrors Postgres: an unknown column is an error, as on the real
+          // table (42703). Today's code ordered by "id", which does not exist.
+          if (!REAL_COLUMNS.includes(column)) badColumn = column;
+          return chain;
+        },
         range(from: number, to: number) {
+          if (badColumn) {
+            return Promise.resolve({
+              data: null,
+              error: new Error(`column quiltt_webhook_inbox.${badColumn} does not exist`),
+            });
+          }
           return Promise.resolve({ data: rows.slice(from, to + 1), error: null });
         },
       };
