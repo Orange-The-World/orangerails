@@ -23,6 +23,8 @@ export interface SignalSnapshot {
   query_error:              string | null;
   starvation_firing:        boolean;
   unprocessed_non_deferred: number | null;
+  deferred_firing:          boolean;
+  deferred_unprocessed:     number | null;
 }
 
 /**
@@ -53,6 +55,8 @@ export function normalizeSnapshot(s: SignalSnapshot): SignalSnapshot {
     query_error:              s.query_error,
     starvation_firing:        s.starvation_firing,
     unprocessed_non_deferred: s.starvation_firing ? s.unprocessed_non_deferred : null,
+    deferred_firing:          s.deferred_firing,
+    deferred_unprocessed:     s.deferred_firing ? s.deferred_unprocessed : null,
   };
 }
 
