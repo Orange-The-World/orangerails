@@ -132,15 +132,6 @@ export const KNOWN_QUILTT_EVENT_TYPE_PREFIXES: readonly string[] = [
  */
 export const UNKNOWN_EVENT_TYPE_MARKER = 'QUILTT_UNKNOWN_EVENT_TYPE';
 
-/**
- * At most this many individual alarms per batch, with one counted summary line
- * for any overflow. A batch is already bounded by the receiver's 256KB body
- * limit, so in practice this is never reached; it exists so a pathological or
- * hostile batch cannot open hundreds of error-tracker issues in one request.
- * Nothing is silently dropped: the summary states how many were not itemised.
- */
-export const MAX_UNKNOWN_ALARMS_PER_BATCH = 25;
-
 const MAX_FIELD_LEN = 120;
 
 /**
@@ -208,19 +199,10 @@ export function alarmOnUnknownQuilttEventTypes<T extends QuilttEventRef>(
   fnName = 'or-quiltt-webhook',
 ): QuilttEventRef[] {
   const unknown = unknownQuilttEventTypes(rows);
-  const itemised = unknown.slice(0, MAX_UNKNOWN_ALARMS_PER_BATCH);
 
-  for (const ev of itemised) {
+  for (const ev of unknown) {
     const line = `[${fnName}] ${UNKNOWN_EVENT_TYPE_MARKER} type=${safeField(ev.event_type)} ` +
       `event_id=${safeField(ev.event_id)}`;
-    sink.warn(line);
-    sink.capture(new Error(line));
-  }
-
-  const overflow = unknown.length - itemised.length;
-  if (overflow > 0) {
-    const line = `[${fnName}] ${UNKNOWN_EVENT_TYPE_MARKER} ${overflow} further unknown-type ` +
-      `event(s) in this batch not itemised (cap ${MAX_UNKNOWN_ALARMS_PER_BATCH})`;
     sink.warn(line);
     sink.capture(new Error(line));
   }
