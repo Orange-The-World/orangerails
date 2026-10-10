@@ -239,7 +239,7 @@ export interface ProviderAdapter {
    *   - 'payment_processor'  merchant Bitcoin payment processors (BTCPay, future Flash)
    *   - 'exchange'           crypto exchanges (CCXT-backed: Coinbase, Kraken, Binance, etc.)
    *   - 'card'               Bitcoin debit cards (future)
-   *   - 'mining'             mining pools (future Braiins, Ocean)
+   *   - 'mining'             mining pools (ViaBTC, future Braiins, Ocean)
    *   - 'bank'               traditional banking aggregators (future Quiltt, SimpleFIN)
    *   - 'lender'             Bitcoin-backed lenders (future Unchained, Ledn)
    */

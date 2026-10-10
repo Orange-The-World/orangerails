@@ -43,7 +43,7 @@ export interface NormalizedTransaction {
   id: string;                       // OrangeRails-side uuid (provider's external_id lives plaintext alongside)
   adapter: string;                  // 'blink', 'kraken', etc.
   direction: 'in' | 'out';
-  type: 'lightning' | 'onchain' | 'trade' | 'deposit' | 'withdrawal' | 'fee';
+  type: 'lightning' | 'onchain' | 'trade' | 'deposit' | 'withdrawal' | 'fee' | 'mining_earning' | 'mining_payout';
   amount_sats?: number;
   amount?: number;                  // for non-sat adapters (USD, etc.)
   currency?: string;
@@ -60,6 +60,14 @@ export interface NormalizedTransaction {
    * route per-wallet using this field.
    */
   source_wallet_id?: string | null;
+  /** On-chain txid. Required on mining_payout, absent on mining_earning. */
+  txid?: string;
+  /** Output index within txid. Present only when the pool reports it. */
+  vout?: number;
+  /** True when a mining_payout came from the block coinbase. Never inferred. */
+  from_coinbase?: boolean;
+  /** Transport tag, e.g. viabtc.api.v1. */
+  source_tag?: string;
   raw?: unknown;                    // original provider response for audit
 }
 
