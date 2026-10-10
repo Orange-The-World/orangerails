@@ -1,46 +1,110 @@
 name: Comment findings-boundary scan
 
-# Detects internal-infrastructure references in PR/issue comment bodies, PR
-# review comments, and PR review summaries on this public repo, so a maintainer
-# can remove them. scripts/pre-publish-scan.sh already keeps these out of
-# shipping FILES; this covers the comment surface, which nothing scanned before.
+# Detects internal-infrastructure references in issue comments, PR conversation
+# comments, PR review comments, and PR review summaries on this public repo,
+# so a maintainer can remove them. scripts/pre-publish-scan.sh already keeps
+# these out of shipping FILES; this covers the comment surface.
 #
 # It DETECTS ONLY. It never edits or deletes a comment: removing already
 # published content is a maintainer decision, not an automated one. It never
 # echoes the matched text, because printing the match into the public run log
-# would republish the reference it is flagging. A failed run here is the signal.
+# would republish the reference it is flagging.
+#
+# WHY A SCHEDULE AND NOT issue_comment / pull_request_review_comment /
+# pull_request_review (OR-T0626, the remaining half of OR-T1675 / DL-1602):
+#   GitHub attaches a workflow's own check-run to github.sha. For
+#   issue_comment that is documented as "last commit on default branch".
+#   The default branch (dev) is itself the head of every dev-to-prod
+#   promotion PR, so every comment anywhere in the repo added a
+#   "Scan comment body" check-run and a skipped "Open issue on scan
+#   failure" check-run to the promotion PR head. Those records are
+#   newest-first on the check-runs API, so they occupy page one and hide
+#   the five required contexts from any tool that fetches one page of 100
+#   (gh_checks / gh_merge_pr). Measured this wake on promotion PR #1294
+#   head 7c3d6b0 (six hours as tip of dev): 276 check-runs, 39+39 of
+#   them this workflow, zero of the five required names in the first
+#   page. pull_request_review and pull_request_review_comment attach to
+#   the PR merge commit rather than default branch, but they still
+#   create one check-run per event; one scheduled sweep covers all four
+#   surfaces with one check-run per interval.
+#
+# OPTIONS REJECTED, and why:
+#   - Consolidate per-comment jobs into one job that UPDATES a single
+#     check-run. GitHub Actions always opens a new check-run record for
+#     each job in each workflow run. There is no workflow config that
+#     reuses a previous check-run id. Calling the Checks API to PATCH an
+#     earlier run would still leave the Actions job's own new record on
+#     the SHA, so the count would not drop. The same job `name:` still
+#     produces distinct check-run ids; the merge tool pages records, not
+#     unique names.
+#   - Scope the trigger with a job-level `if` that skips bot comments.
+#     A skipped job is still a check-run (conclusion: skipped). The
+#     measured flood was one set per bot comment; skipping would replace
+#     success records with skipped records and the page would still fill.
+#     GitHub has no actor filter at the `on:` level that would prevent
+#     the workflow from starting. All 39 "Open issue on scan failure"
+#     records on PR #1294 were already `skipped` and still occupied the
+#     page.
+#   - Move reporting to a PR comment or a job summary. This workflow
+#     already writes a job summary. A PR comment would itself be an
+#     issue_comment event (feedback loop) and is the report destination
+#     the original design rejected because it republishes a pointer to
+#     the finding. Neither destination stops GitHub creating a check-run
+#     for the job. The defect is the record count, not where the finding
+#     is displayed.
+#
+# WHAT THIS TRADES: detection latency, up to one sweep interval (and
+# longer if GitHub delays the schedule). A leaked reference in a comment
+# is already public the moment it is posted; this workflow exists to
+# alert a maintainer to remove it, not to prevent the post. That latency
+# vs check-run-hygiene call is the one OR-T1675 left for this ticket.
+#
+# EXIT BEHAVIOUR on default branch, which is a promotion PR head:
+#   A content hit opens a maintainer issue and does NOT fail the
+#   check-run. A red check on dev is a red check on every open promotion
+#   PR (same rule stale-ci-label.yml records). A canary failure DOES
+#   fail the job: the scanner is broken and a green sweep would be a
+#   false negative.
+#
+# Privilege: this is a scheduled sweep, not a comment-triggered run, and
+# it does not check out the tree. Untrusted comment bodies are fetched
+# via the API, held in variables, grepped on stdin, and never
+# interpolated into the shell or written into the alert issue (the issue
+# gets comment URLs only). Write scope is issues: write so the alarm
+# path can open that issue. The previous two-job split (scan at
+# permissions: {}, notify at issues: write) existed because a
+# comment-triggered workflow that holds write scope is the classic
+# pwn-request foot-gun. Collapsing to one job is what stops the skipped
+# "Open issue on scan failure" check-run on every success.
 
 on:
-  issue_comment:
-    types: [created, edited]
-  pull_request_review_comment:
-    types: [created, edited]
-  pull_request_review:
-    types: [submitted, edited]
+  schedule:
+    # Every 6 hours at minute 41. Off the hour (shared-runner congestion)
+    # and off the :00/:15/:10 slots used by other default-branch sweeps,
+    # so this does not add a check-run in the same burst as those.
+    - cron: '41 */6 * * *'
+  workflow_dispatch: {}
 
-# Minimum privilege required across all jobs. The scan job further restricts
-# itself to permissions: {} (no scope at all). Only the notify-on-failure job
-# needs issues: write, and only when the scan job fails.
 permissions:
   issues: write
+  pull-requests: read
 
 concurrency:
-  group: comment-scan-${{ github.event.comment.id || github.event.review.id }}
-  cancel-in-progress: false
+  group: comment-findings-sweep
+  cancel-in-progress: true
 
 jobs:
   scan:
     name: Scan comment body
     runs-on: ubuntu-latest
-    # Deny all permissions for this job. A comment-triggered workflow that holds
-    # write permissions is the classic pwn-request foot-gun. The scan job reads
-    # only the event payload passed through env -- it needs no repo contents and
-    # no write scope.
-    permissions: {}
+    timeout-minutes: 10
+    permissions:
+      issues: write
+      pull-requests: read
     steps:
       - name: Canary self-test (prove patterns match before trusting results)
         # Routes known-matching and known-safe literals through the exact grep
-        # calls used in the scan step below. If either pattern fails to match
+        # calls used in the sweep step below. If either pattern fails to match
         # its canary, or matches a safe string it should not, the mechanism is
         # broken and a green scan would be a false negative -- hard-fail (exit 2)
         # before scanning anything. Mirrors self_test() in pre-publish-scan.sh
@@ -83,93 +147,195 @@ jobs:
           fi
           echo "Canary self-test passed: both patterns match their canary and do not false-positive on safe strings."
 
-      - name: Scan for internal-infrastructure references
-        # The comment/review body and its URL are passed through env, NEVER
-        # interpolated into the run script. Inlining a user-controlled
-        # ${{ github.event.*.body }} into a shell would let a crafted comment
-        # inject commands; env keeps the body inert data.
+      - name: Sweep recent comments and reviews
         env:
-          BODY: ${{ github.event.comment.body || github.event.review.body }}
-          COMMENT_URL: ${{ github.event.comment.html_url || github.event.review.html_url }}
-          EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          LOOKBACK_HOURS: '24'
+          GH_PAGER: cat
+          NO_COLOR: '1'
         run: |
           set -euo pipefail
 
-          if [ -z "${BODY:-}" ]; then
-            echo "No comment/review body on this event; nothing to scan."
-            exit 0
-          fi
-
-          # Two generic STRUCTURAL patterns, identical to Category 3 of
-          # scripts/pre-publish-scan.sh. Each names a CLASS of internal
-          # reference (any Tailscale tail-net hostname, any address in the CGNAT
-          # /10), never a specific host, so this file publishes no value.
           TAILNET='\btail[a-z0-9]+\.ts\.net\b'
           CGNAT='\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+\b'
+          URL_PREFIX="https://github.com/${GITHUB_REPOSITORY}/"
 
-          hit=0
-          if printf '%s' "$BODY" | grep -Eq "$TAILNET"; then
-            echo "::error::Comment matches a Tailscale tail-net hostname pattern (internal-infrastructure reference)."
-            hit=1
-          fi
-          if printf '%s' "$BODY" | grep -Eq "$CGNAT"; then
-            echo "::error::Comment matches a CGNAT-range address pattern (internal-infrastructure reference)."
-            hit=1
+          scanned=0
+          hits=0
+          already=0
+          fetch_warnings=0
+          hit_urls=""
+
+          SINCE=$(date -u -d "${LOOKBACK_HOURS} hours ago" +%Y-%m-%dT%H:%M:%SZ)
+          cutoff_s=$(date -u -d "${LOOKBACK_HOURS} hours ago" +%s)
+          echo "Lookback ${LOOKBACK_HOURS}h since ${SINCE}."
+
+          # Bodies of open findings-scan issues, used to skip URLs already
+          # ticketed. Search is eventually consistent; a duplicate issue on
+          # the overlap window is noisy but not a miss.
+          open_issue_text=""
+          if open_issue_text=$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "findings-scan in:title" \
+            --limit 50 \
+            --json body \
+            --jq '.[].body' 2>/dev/null); then
+            :
+          else
+            echo "::warning::Could not list open findings-scan issues; dedupe disabled this sweep."
+            open_issue_text=""
+            fetch_warnings=$((fetch_warnings + 1))
           fi
 
-          # The matched text is deliberately NOT printed: echoing it would
-          # republish the reference in this public run log. The pattern class and
-          # the comment URL are enough for a maintainer to find and remove it.
+          consider() {
+            local url="$1"
+            local body="$2"
+            scanned=$((scanned + 1))
+            if [ -z "$body" ]; then
+              return 0
+            fi
+            case "$url" in
+              "${URL_PREFIX}"*) ;;
+              *)
+                echo "::warning::Skipping unexpected comment url (not under ${URL_PREFIX})."
+                return 0
+                ;;
+            esac
+            local hit=0
+            if printf '%s' "$body" | grep -Eq "$TAILNET"; then
+              hit=1
+            fi
+            if printf '%s' "$body" | grep -Eq "$CGNAT"; then
+              hit=1
+            fi
+            if [ "$hit" -eq 0 ]; then
+              return 0
+            fi
+            if [ -n "$open_issue_text" ] && printf '%s' "$open_issue_text" | grep -F -q "$url"; then
+              already=$((already + 1))
+              echo "Already ticketed: ${url}"
+              return 0
+            fi
+            hits=$((hits + 1))
+            hit_urls="${hit_urls}${url}"$'\n'
+            echo "HIT: ${url}"
+          }
+
+          consume_tsv() {
+            local url b64 body
+            while IFS=$'\t' read -r url b64; do
+              [ -z "${url:-}" ] && continue
+              # gh --jq emits @tsv as a raw string (real tab). jq @base64 of an
+              # empty body is empty; GNU base64 -d of empty succeeds with no output.
+              body=$(printf '%s' "${b64:-}" | base64 -d 2>/dev/null || true)
+              consider "$url" "$body"
+            done
+          }
+
+          # Issue comments and PR conversation comments. Process substitution
+          # (not a pipe) so consume_tsv/consider mutate this shell's counters.
+          if issue_tsv=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/issues/comments?since=${SINCE}&per_page=100" \
+            -H "Accept: application/vnd.github+json" \
+            --jq '.[] | [.html_url, (.body // "" | @base64)] | @tsv'); then
+            consume_tsv < <(printf '%s\n' "$issue_tsv")
+          else
+            echo "::warning::Failed to list issue comments; this sweep is incomplete."
+            fetch_warnings=$((fetch_warnings + 1))
+          fi
+
+          # Inline PR review comments (diff notes).
+          if review_comment_tsv=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/pulls/comments?since=${SINCE}&per_page=100" \
+            -H "Accept: application/vnd.github+json" \
+            --jq '.[] | [.html_url, (.body // "" | @base64)] | @tsv'); then
+            consume_tsv < <(printf '%s\n' "$review_comment_tsv")
+          else
+            echo "::warning::Failed to list pull request review comments; this sweep is incomplete."
+            fetch_warnings=$((fetch_warnings + 1))
+          fi
+
+          # PR review summaries. The reviews list has no `since` filter, so
+          # walk recently updated PRs and scan each review body. An edit of
+          # a review body updates the PR, which is what makes this catch
+          # the old pull_request_review `edited` event.
+          page=1
+          stop_prs=0
+          while [ "$page" -le 5 ] && [ "$stop_prs" -eq 0 ]; do
+            if ! prs=$(gh api \
+              "repos/${GITHUB_REPOSITORY}/pulls?state=all&sort=updated&direction=desc&per_page=50&page=${page}" \
+              -H "Accept: application/vnd.github+json"); then
+              echo "::warning::Failed to list pull requests on page ${page}; review-summary scan is incomplete."
+              fetch_warnings=$((fetch_warnings + 1))
+              break
+            fi
+            n=$(printf '%s' "$prs" | jq 'length')
+            if [ "$n" = "0" ]; then
+              break
+            fi
+            while IFS= read -r pr; do
+              [ -z "$pr" ] && continue
+              updated=$(printf '%s' "$pr" | jq -r '.updated_at')
+              updated_s=$(date -d "$updated" +%s)
+              if [ "$updated_s" -lt "$cutoff_s" ]; then
+                stop_prs=1
+                break
+              fi
+              number=$(printf '%s' "$pr" | jq -r '.number')
+              if review_tsv=$(gh api --paginate \
+                "repos/${GITHUB_REPOSITORY}/pulls/${number}/reviews" \
+                -H "Accept: application/vnd.github+json" \
+                --jq '.[] | [.html_url, (.body // "" | @base64)] | @tsv'); then
+                consume_tsv < <(printf '%s\n' "$review_tsv")
+              else
+                echo "::warning::Failed to list reviews for PR #${number}."
+                fetch_warnings=$((fetch_warnings + 1))
+              fi
+            done < <(printf '%s' "$prs" | jq -c '.[]')
+            page=$((page + 1))
+          done
+
           {
             echo "## Comment findings-boundary scan"
             echo
-            if [ "$hit" -eq 1 ]; then
+            echo "Scanned **${scanned}** comment/review bodies updated in the last ${LOOKBACK_HOURS}h."
+            echo
+            echo "- New hits (not yet ticketed): ${hits}"
+            echo "- Already ticketed: ${already}"
+            echo "- Fetch warnings: ${fetch_warnings}"
+            if [ "$hits" -gt 0 ]; then
+              echo
               echo "A comment matched an internal-infrastructure reference class."
               echo
-              echo "- Event: ${EVENT_NAME}"
-              echo "- Comment: ${COMMENT_URL}"
+              echo "The matched text is intentionally not shown here. A maintainer should open each linked comment and remove the reference if confirmed."
               echo
-              echo "The matched text is intentionally not shown here. A maintainer should open the linked comment and remove the reference if confirmed."
+              echo "$hit_urls" | sed '/^$/d' | sed 's/^/- /'
             else
-              echo "No internal-infrastructure reference found."
+              echo
+              echo "No new internal-infrastructure reference found."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$hit" -eq 1 ]; then
-            exit 1
+          if [ "$hits" -gt 0 ]; then
+            issue_body_file="${RUNNER_TEMP:?RUNNER_TEMP is not set}/findings-scan-issue.md"
+            {
+              echo "The comment findings-boundary scan found internal-infrastructure reference class matches."
+              echo
+              echo "Scanned ${scanned} comment/review bodies updated in the last ${LOOKBACK_HOURS}h."
+              echo
+              echo "Hits:"
+              echo
+              echo "$hit_urls" | sed '/^$/d' | sed 's/^/- /'
+              echo
+              echo "The matched text is intentionally not shown. A maintainer should open each linked comment and remove the reference if confirmed. Close this issue once resolved."
+            } > "$issue_body_file"
+            if ! gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "[findings-scan] Comment scan found internal-infrastructure references" \
+              --body-file "$issue_body_file"; then
+              echo "::warning::Failed to open a findings-scan issue. URLs are in the job summary. Not failing this sweep: a red check on default branch is a red check on every open promotion PR."
+            fi
           fi
 
-  # issue_comment-triggered runs do NOT appear in a PR's check list. A failure
-  # is therefore invisible to reviewers unless actively watched in the Actions
-  # tab. This job opens a GitHub issue on failure so maintainers are notified
-  # without requiring any external secret -- only GITHUB_TOKEN (issues: write).
-  #
-  # Note: the scheduled-workflow-failure monitor (PR #660) covers scheduled and
-  # dispatched workflows via workflow_run. It does NOT cover event-triggered runs
-  # like this one, so this job is the alarm path for this workflow specifically.
-  notify-on-failure:
-    name: Open issue on scan failure
-    runs-on: ubuntu-latest
-    needs: scan
-    if: failure()
-    steps:
-      - name: Open maintainer-alert issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          EVENT_NAME: ${{ github.event_name }}
-          COMMENT_URL: ${{ github.event.comment.html_url || github.event.review.html_url }}
-        run: |
-          set -euo pipefail
-          BODY="The comment findings-boundary scan failed.
-
-          - **Run:** ${RUN_URL}
-          - **Event:** ${EVENT_NAME}
-          - **Comment/review:** ${COMMENT_URL}
-
-          Either a comment matched an internal-infrastructure reference class, or the scanner self-test failed (pattern broken). A maintainer should open the linked comment, verify, and remove any reference found. Close this issue once resolved."
-
-          gh issue create \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "[findings-scan] Comment scan failure: ${EVENT_NAME}" \
-            --body "$BODY"
+          echo "Sweep finished: scanned=${scanned} hits=${hits} already=${already} fetch_warnings=${fetch_warnings}."
