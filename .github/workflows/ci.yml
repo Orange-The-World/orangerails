@@ -410,7 +410,7 @@ jobs:
 
       - name: Upload deno.lock
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: deno-lock
           path: deno.lock
@@ -1215,7 +1215,7 @@ jobs:
 
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: playwright-report
           path: playwright-report/
@@ -1223,7 +1223,7 @@ jobs:
 
       - name: Upload screenshots
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: playwright-screenshots
           path: tests/e2e/screenshots/
@@ -1292,7 +1292,7 @@ jobs:
 
       - name: Upload prod-smoke report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: playwright-prod-smoke-report
           path: playwright-report/
@@ -1418,7 +1418,7 @@ jobs:
 
       - name: Upload stealth cursor-write report
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: playwright-stealth-cursor-report
           path: playwright-report/
@@ -1605,7 +1605,7 @@ jobs:
 
       - name: Upload gate report and verdict
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: connect-protocol-compat-report
           path: |
