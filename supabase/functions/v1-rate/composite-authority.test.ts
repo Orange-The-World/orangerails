@@ -11,7 +11,7 @@
 //   deno test --no-check --allow-all supabase/functions/v1-rate/composite-authority.test.ts
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts'
-import { extractCompositeAuthority } from './index.ts'
+import { extractCompositeAuthority, rateTypeForAuthority } from './index.ts'
 
 // --- null / missing input ---
 
@@ -94,24 +94,48 @@ Deno.test('dated form: USD-MXN-BANXICO-2026-01-01 -> BANXICO', () => {
   assertEquals(extractCompositeAuthority('BTC-USD * USD-MXN-BANXICO-2026-01-01'), 'BANXICO')
 })
 
-// --- rate_type mapping: non-null authority -> 'official_reference', null -> 'market' ---
-// Whitelist dropped (DL-1361 round 2): any non-null result from extractCompositeAuthority
-// maps to 'official_reference'. PEG rows return null and stay 'market'.
+// --- rate_type mapping via rateTypeForAuthority ---
+// Whitelist dropped (DL-1361 round 2): central-bank authorities map to 'official_reference'.
+// Aggregators (OXR, OR-T2745) map to 'market'. PEG rows return null and stay 'market'.
 
 Deno.test('ECB (outside old hardcoded whitelist): non-null authority -> official_reference', () => {
   const auth = extractCompositeAuthority('BTC-USD * USD-CNY-ECB-2026-06-19')
   assertEquals(auth, 'ECB')
-  assertEquals(auth !== null ? 'official_reference' : 'market', 'official_reference')
+  assertEquals(rateTypeForAuthority(auth), 'official_reference')
 })
 
 Deno.test('CBN: non-null authority -> official_reference', () => {
   const auth = extractCompositeAuthority('BTC-USD * USD-NGN-CBN')
   assertEquals(auth, 'CBN')
-  assertEquals(auth !== null ? 'official_reference' : 'market', 'official_reference')
+  assertEquals(rateTypeForAuthority(auth), 'official_reference')
 })
 
 Deno.test('PEG: null authority -> market, not official_reference', () => {
   const auth = extractCompositeAuthority('BTC-USD * USD-HKD-PEG')
   assertEquals(auth, null)
-  assertEquals(auth !== null ? 'official_reference' : 'market', 'market')
+  assertEquals(rateTypeForAuthority(auth), 'market')
+})
+
+// --- OR-T2745: aggregator authorities are not official sources ---
+
+Deno.test('OXR: aggregator authority -> market, authority still reported', () => {
+  const auth = extractCompositeAuthority('BTC-USD * USD-KES-OXR')
+  assertEquals(auth, 'OXR')
+  assertEquals(rateTypeForAuthority(auth), 'market')
+})
+
+Deno.test('OXR dated form -> market', () => {
+  const auth = extractCompositeAuthority('BTC-USD * USD-GHS-OXR-2026-09-01')
+  assertEquals(auth, 'OXR')
+  assertEquals(rateTypeForAuthority(auth), 'market')
+})
+
+Deno.test('central banks stay official_reference (CBR, CBN, ECB)', () => {
+  for (const via of ['BTC-USD * USD-RUB-CBR', 'BTC-USD * USD-NGN-CBN', 'BTC-USD * USD-CNY-ECB-2026-06-19']) {
+    assertEquals(rateTypeForAuthority(extractCompositeAuthority(via)), 'official_reference')
+  }
+})
+
+Deno.test('null authority -> market', () => {
+  assertEquals(rateTypeForAuthority(null), 'market')
 })

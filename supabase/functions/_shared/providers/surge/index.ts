@@ -75,25 +75,29 @@ function base64urlDecodeToString(s: string): string {
   return atob(std);
 }
 
-function decodeTokenEnvelope(token: string): SurgeTokenEnvelope {
+export function decodeTokenEnvelope(token: string): SurgeTokenEnvelope {
   if (token.length > 4096) {
     throw new Error('[surge] bearer_token exceeds 4096 chars');
   }
   let raw: string;
   try {
     raw = base64urlDecodeToString(token);
-  } catch (err) {
-    throw new Error(
-      `[surge] bearer_token is not valid base64url: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  } catch {
+    // token is decrypted bearer_token credential material. A decode failure
+    // here throws a FIXED string: the underlying exception is discarded,
+    // never composed into this message. Same contract as parseCredentials in
+    // ../types.ts (OR-T2643); this call site was the gap OR-T2697 found.
+    throw new Error('[surge] bearer_token is invalid base64url');
   }
   let env: unknown;
   try {
     env = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(
-      `[surge] bearer_token envelope is not valid JSON: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  } catch {
+    // raw is the decoded envelope of the user's bearer_token. Deno/V8's own
+    // JSON.parse SyntaxError text can itself contain a literal fragment of
+    // the malformed input, so this throws a FIXED string too, same reasoning
+    // as the block above.
+    throw new Error('[surge] bearer_token envelope is invalid JSON');
   }
   if (!env || typeof env !== 'object') {
     throw new Error('[surge] bearer_token envelope must be an object');

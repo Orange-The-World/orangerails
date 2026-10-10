@@ -86,16 +86,18 @@ When the widget needs to make a network request (fetch filters, fetch a block, s
 
 Documented in `src/stealth/lib/postmessage.ts` in the orangerails repo. Stable surface for third-party integration. Versioned via `protocol_version` field; bumping it is the migration mechanism.
 
-### Protocol version support window (DEC-0304)
+### Protocol version support window
 
 The widget checks membership in a supported set, not equality with a single
 constant: `STEALTH_SUPPORTED_PROTOCOL_VERSIONS` in `postmessage.ts` lists
 every `protocol_version` this build of the widget will accept at INIT.
 `OR_STEALTH_READY` carries that same set as `supported_protocol_versions`,
 alongside the existing `protocol_version` field (the current preferred
-version), so a consuming app can pick a version both sides speak with no
-app deploy of its own, including right after a widget rollback or when a
-stale cached copy of the widget is served.
+version). Only version 1 exists today, so an integrator sends
+`protocol_version: 1`. The `openStealthWidget` helper posts the init
+exactly as the caller built it and does not read the advertised set. A
+helper that selects a version from the advertised set arrives together
+with the second version, and no date is promised for it.
 
 At most two versions are live at a time: the current version and the one
 before it. A new version stays live for 90 days, measured from the later

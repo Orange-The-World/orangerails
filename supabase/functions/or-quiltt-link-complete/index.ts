@@ -44,6 +44,12 @@
  * Response 404 — unknown platform OR no quiltt_profile_map row (call
  *                or-quiltt-session first)
  *
+ * DL-1115: on success this also stamps completed_connection_id on the
+ * pending_widget_sessions row the widget_token claimed, so or-quiltt-
+ * link-status can answer "did it land" for an opener that never received
+ * this call's postMessage (popup closed mid-completion). Best-effort,
+ * logged on failure, never turns a real link into a 500.
+ *
  * Schema note: connections.encrypted_credentials is NOT NULL, so we
  * store the sentinel literal 'quiltt-managed'. The bank credentials
  * never exist server-side under any key — Quiltt holds them. The
@@ -392,6 +398,22 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           return jsonResponse({ error: 'Failed to activate connection' }, 500, cors);
         }
       }
+    }
+
+    // DL-1115: record the outcome so or-quiltt-link-status can answer "did
+    // it land" for an opener that never received the postMessage (popup
+    // closed mid-completion). Best-effort and after every other write:
+    // a failure here must not turn an otherwise-successful link into a 500
+    // for the popup that is waiting on this exact response.
+    const statusWrite = await service
+      .from('pending_widget_sessions')
+      .update({ completed_connection_id: connectionId })
+      .eq('id', body.widget_token);
+    if (statusWrite.error) {
+      console.error(
+        '[or-quiltt-link-complete] completed_connection_id write-back failed:',
+        statusWrite.error.message,
+      );
     }
 
     return jsonResponse({ subaccount_id: subaccountId, connection_id: connectionId }, 200, cors);

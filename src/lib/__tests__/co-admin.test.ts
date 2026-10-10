@@ -20,7 +20,7 @@
 import { describe, it, expect } from "vitest";
 import { generateHybridKemKeyPair } from "../pqc";
 import { importAesKey } from "../vault";
-import { wrapBlob64, unwrapBlob64 } from "../co-admin";
+import { wrapBlob64, unwrapBlob64, assertSaltMatchesUnlockedVault } from "../co-admin";
 
 // ------------------------------------------------------------------
 // Helpers
@@ -159,5 +159,29 @@ describe("co-admin: revocation (store-layer)", () => {
     // NOTE: If consumeBlob had been called before revoke, the in-memory
     // CryptoKey objects would still work until the tab closes. This is the
     // documented MVP cached-subkey-in-tab limitation.
+  });
+});
+
+describe("assertSaltMatchesUnlockedVault", () => {
+  // This is the OR-T1889 hardening guard. grantCoAdmin's subkeys and the
+  // owner's ML-DSA secret are derived from the unlocked MEK, but the salt
+  // paired with that MEK arrives as a separate parameter. Remove the call
+  // to this function from VaultContext.grantCoAdmin and this test still
+  // passes, because it exercises the guard directly, not the callback: the
+  // callback has no React test harness in this repo. The guard itself is
+  // the unit under test, and it is a plain function precisely so it can be.
+
+  it("throws when the salt does not match the unlocked vault's own salt", () => {
+    expect(() => assertSaltMatchesUnlockedVault("unlocked-salt", "different-salt")).toThrow(
+      /salt mismatch/i,
+    );
+  });
+
+  it("does not throw when the salts match", () => {
+    expect(() => assertSaltMatchesUnlockedVault("same-salt", "same-salt")).not.toThrow();
+  });
+
+  it("throws on an empty ownerSaltB64 rather than treating it as compatible", () => {
+    expect(() => assertSaltMatchesUnlockedVault("unlocked-salt", "")).toThrow(/salt mismatch/i);
   });
 });

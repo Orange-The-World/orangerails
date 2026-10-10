@@ -30,7 +30,7 @@
  */
 
 import { encoding, importAesKey } from "./vault";
-import { deriveKeyringWrapKey } from "./key-derivation";
+import { deriveKeyringWrapKey, deriveCredentialsKey, deriveTransactionsKey } from "./key-derivation";
 
 // ------------------------------------------------------------------
 // Constants
@@ -77,7 +77,15 @@ export type DataKeyKind = "credentials" | "transactions";
  */
 export interface DataKeyEntry {
   generation: number;
-  /** Raw 32 random bytes, base64. Never derived from the MEK. */
+  /**
+   * Raw 32 bytes, base64.
+   *
+   * For new vaults: always a fresh random value, never derived from the MEK.
+   * For upgraded v2 vaults: generation 1 is the frozen v2 HKDF-derived value
+   * (see buildUpgradeKeyringFromV2). All subsequent generations (2, 3, ...) are
+   * random. The "never derived from MEK" invariant holds for everything written
+   * after the one-time upgrade.
+   */
   keyB64: string;
 }
 
@@ -101,13 +109,38 @@ export interface VaultKeyring {
 
 /**
  * What the wrap is bound to. Both fields go into the AES-GCM AAD, so a blob
- * cannot be replayed onto another user's row or onto a different envelope
- * scheme version. Getting either wrong makes the unwrap fail loudly rather
- * than return the wrong keys.
+ * cannot be replayed onto another user's row, and an older generation of
+ * this same row cannot be restored underneath a caller. Getting either wrong
+ * makes the unwrap fail loudly rather than return the wrong keys.
+ *
+ * WHY THIS IS keyring_epoch AND NOT vault_key_version. An AAD may bind a
+ * value only if that value is fixed for the lifetime of the ciphertext it
+ * protects. vault_key_version is not: it is an envelope scheme selector that
+ * other call sites raise on their own, and the AAD is recomputed from
+ * whatever the row currently says, so raising it without re-wrapping in the
+ * same statement leaves a blob whose AAD can never be reproduced. That is an
+ * unopenable vault. keyring_epoch qualifies because the database forbids it
+ * from moving unless keyring_ciphertext is rewritten in the same statement,
+ * and forbids the ciphertext from moving without it.
+ *
+ * There is deliberately no compatibility fallback anywhere in this module.
+ * A fallback that accepts an older AAD hands back exactly the rollback the
+ * epoch exists to stop.
  */
 export interface KeyringBinding {
   userId: string;
-  vaultKeyVersion: number;
+  /**
+   * user_vault_meta.keyring_epoch for this row. Strictly increasing, never
+   * reused, and only ever changed in the same statement that rewrites the
+   * ciphertext it is bound to.
+   *
+   * Typed as number | string, matching canonicalKeyringEpoch, because
+   * keyring_epoch is a Postgres bigint and a client driver may hand it back
+   * as either shape. A caller holding the driver's value can pass it
+   * straight through with no cast; canonicalKeyringEpoch is what actually
+   * normalises and validates it.
+   */
+  keyringEpoch: number | string;
 }
 
 // ------------------------------------------------------------------
@@ -362,16 +395,84 @@ export function decodeKeyring(json: string): VaultKeyring {
 // Wrap / unwrap
 // ------------------------------------------------------------------
 
-function aadBytes(binding: KeyringBinding): Uint8Array {
-  if (typeof binding.userId !== "string" || binding.userId.length === 0) {
+/**
+ * The one place a keyring epoch turns into AAD bytes.
+ *
+ * keyring_epoch is a bigint in Postgres, and a client library is free to hand
+ * it back as a JavaScript number or as a string depending on the driver. Two
+ * callers that disagree by a single character produce different AAD bytes and
+ * an unwrap failure that reads to the user as a destroyed vault, possibly
+ * months after the mistake was made. So it is normalised exactly once, here,
+ * to canonical decimal: digits only, no sign, no separators, no leading
+ * zeros, no exponent form. Anything else throws rather than being coerced,
+ * because a silent coercion is the failure this function exists to prevent.
+ */
+export function canonicalKeyringEpoch(value: unknown): string {
+  if (typeof value === "number") {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new Error(
+        "Keyring binding requires a keyring epoch that is a safe positive integer.",
+      );
+    }
+    return String(value);
+  }
+  if (typeof value === "string") {
+    if (!/^[1-9][0-9]*$/.test(value)) {
+      throw new Error(
+        "Keyring binding requires a keyring epoch in canonical decimal form: " +
+          "digits only, no sign, no separators, no leading zeros.",
+      );
+    }
+    if (BigInt(value) > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(
+        "Keyring epoch is past the JavaScript safe integer range, so a caller " +
+          "holding it as a number and one holding it as a string would build " +
+          "different AAD bytes.",
+      );
+    }
+    return value;
+  }
+  throw new Error(
+    "Keyring binding requires a keyring epoch as a number or a decimal string.",
+  );
+}
+
+/** RFC 4122 UUID shape: 8-4-4-4-12 hex digits, hyphenated as shown. */
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The one place a keyring binding's user id turns into canonical bytes.
+ *
+ * This codebase's user ids are Supabase auth UUIDs. A client library, an
+ * `auth.uid()` call, or a future case-folding change is free to hand the
+ * same user back in a different case, and interpolating the id raw into the
+ * AAD means two such callers would build different bytes for the same user.
+ * The unwrap failure that follows reads to the user as a destroyed vault,
+ * possibly months after the mismatched write. So the id is validated as a
+ * UUID and normalized to lower case, exactly once, here, matching the rigor
+ * canonicalKeyringEpoch already applies to the other AAD field. Anything
+ * that is not that shape throws rather than being interpolated: a UUID
+ * cannot contain "|", so this also cannot collide with the epoch field's
+ * delimiter, and validating the shape here keeps that true even if the
+ * epoch's own format ever changes.
+ */
+export function canonicalizeUserId(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) {
     throw new Error("Keyring binding requires a user id.");
   }
-  if (!Number.isInteger(binding.vaultKeyVersion) || binding.vaultKeyVersion < 1) {
-    throw new Error("Keyring binding requires a positive integer vault key version.");
+  if (!UUID_SHAPE.test(value)) {
+    throw new Error(
+      "Keyring binding requires a user id in canonical UUID form: " +
+        "8-4-4-4-12 hexadecimal digits, hyphenated as shown.",
+    );
   }
-  return new TextEncoder().encode(
-    `${AAD_PREFIX}|${binding.userId}|${binding.vaultKeyVersion}`,
-  );
+  return value.toLowerCase();
+}
+
+function aadBytes(binding: KeyringBinding): Uint8Array {
+  const userId = canonicalizeUserId(binding.userId);
+  const epoch = canonicalKeyringEpoch(binding.keyringEpoch);
+  return new TextEncoder().encode(`${AAD_PREFIX}|${userId}|${epoch}`);
 }
 
 /**
@@ -407,8 +508,9 @@ export async function wrapKeyring(
  * Unwrap a stored keyring.
  *
  * Throws if the MEK is wrong, if the blob was written for a different user or
- * a different vault_key_version, if it was tampered with, or if it decodes to
- * something that is not a valid keyring.
+ * under a different keyring epoch, if it was tampered with, or if it decodes
+ * to something that is not a valid keyring. There is no fallback: a failure
+ * here is a failure, never a second attempt under an older binding.
  */
 export async function unwrapKeyring(
   ciphertextB64: string,
@@ -444,8 +546,20 @@ export async function unwrapKeyring(
  * returned ciphertext in the same single statement that writes the new MEK
  * wrappers and the new verifier.
  *
- * The binding does not change: recovery keeps the same user and the same
- * envelope scheme version.
+ * The user does not change. The EPOCH does, and it has to: the stored
+ * ciphertext is about to be replaced, and the database refuses a keyring
+ * ciphertext write that does not raise keyring_epoch in the same statement.
+ * So `binding` is the CURRENT binding, used to open the old blob, and the new
+ * blob is sealed under epoch + 1. The returned `keyringEpoch` is the value
+ * the caller must write.
+ *
+ * What the caller then owes, and it cannot be done from here because this
+ * module never touches the database: one UPDATE that matches BOTH the exact
+ * prior keyring_ciphertext AND the exact prior keyring_epoch, and sets the
+ * new ciphertext and this epoch together. Zero rows matched means someone
+ * else rotated first, which is a lost race and is retryable. A rejection from
+ * the epoch guard means something tried to move one column without the other,
+ * which is not a race. Report them differently.
  */
 export async function rewrapKeyringUnderNewMek(params: {
   ciphertextB64: string;
@@ -453,13 +567,125 @@ export async function rewrapKeyringUnderNewMek(params: {
   newMek: CryptoKey;
   saltB64: string;
   binding: KeyringBinding;
-}): Promise<{ keyring: VaultKeyring; ciphertextB64: string }> {
+}): Promise<{ keyring: VaultKeyring; ciphertextB64: string; keyringEpoch: number }> {
+  const currentEpoch = Number(canonicalKeyringEpoch(params.binding.keyringEpoch));
+  const keyringEpoch = currentEpoch + 1;
+  if (!Number.isSafeInteger(keyringEpoch)) {
+    throw new Error(
+      "Keyring epoch cannot be raised without leaving the safe integer range.",
+    );
+  }
+
   const keyring = await unwrapKeyring(
     params.ciphertextB64,
     params.oldMek,
     params.saltB64,
     params.binding,
   );
-  const ciphertextB64 = await wrapKeyring(keyring, params.newMek, params.saltB64, params.binding);
-  return { keyring, ciphertextB64 };
+  const ciphertextB64 = await wrapKeyring(keyring, params.newMek, params.saltB64, {
+    userId: params.binding.userId,
+    keyringEpoch,
+  });
+  return { keyring, ciphertextB64, keyringEpoch };
+}
+
+// ------------------------------------------------------------------
+// v2-to-v3 upgrade: freeze existing derived keys as generation 1.
+// ------------------------------------------------------------------
+
+/**
+ * Build a v3 keyring that preserves continuity for an existing v2 vault.
+ *
+ * In v2, the credentials and transactions data keys are HKDF subkeys of the
+ * MEK. Every existing data row was encrypted under those derived values, and
+ * every row's data_key_generation column defaults to 1. For those rows to
+ * remain readable after the upgrade, generation 1 of the new keyring MUST
+ * hold the exact same byte values that the v2 HKDF derivation produced.
+ *
+ * After this call returns, those bytes are frozen into the keyring. The caller
+ * MUST NOT call this function again on the same vault, and MUST NOT re-derive
+ * those values from the MEK. Future data-key generations (2, 3, ...) are
+ * always random and are never derived from the MEK, so the "data keys are
+ * independent of the MEK" invariant holds for all generations after the upgrade.
+ *
+ * CRITICAL: the freeze uses the identical HKDF context strings and identical
+ * salt that the live v2 derivation uses. If either drifts between this call
+ * and the values actually written to pre-upgrade rows, the upgrade silently
+ * produces the wrong generation-1 key and makes every pre-upgrade row
+ * permanently unreadable, because there is no per-row sweep to repair them.
+ *
+ * What guards this, and what each guard can and cannot see:
+ *   - The round-trip tests in vault-envelope-v3.test.ts encrypt through the live
+ *     deriveCredentialsKey and deriveTransactionsKey, then decrypt with the
+ *     generation-1 keys this function returns. They show that this function
+ *     returns what those two functions return today. They cannot detect drift in
+ *     the shared derivation itself: this function calls the same two functions,
+ *     so a changed HKDF context string or changed salt handling moves both halves
+ *     together and the round trip stays green while pre-upgrade rows stop
+ *     decrypting.
+ *   - The pinned known-answer test in the same file is the guard for rows that
+ *     are already stored. It fixes the expected key bytes for a fixed MEK and
+ *     salt, so a change to either context string, the salt handling, or the hash
+ *     goes red there. If it does, the v2 derivation changed. Do not edit the
+ *     pinned values to make it pass: they stand for the derivation that stored
+ *     rows were encrypted under, and they may only change together with a
+ *     versioned migration of those rows.
+ *
+ * @param mek           The unlocked v2 MEK (non-extractable HKDF CryptoKey).
+ * @param saltB64       The vault salt (user_vault_meta.vault_salt) -- the
+ *                      same value passed to Argon2id and all HKDF derivations.
+ * @param kemSecretB64  PQC KEM secret key as PLAINTEXT base64, or null. This is
+ *                      not the wrapped value that v2 keeps in
+ *                      user_vault_meta.kem_secret_wrapped: the caller unwraps
+ *                      that first. The keyring is encrypted as a whole by
+ *                      wrapKeyring, so the secret is stored in it unwrapped.
+ *                      The value is copied in as given and is not validated.
+ * @param sigSecretB64  PQC signing secret key as PLAINTEXT base64, or null.
+ *                      Same rule, against user_vault_meta.sig_secret_wrapped.
+ */
+export async function buildUpgradeKeyringFromV2(
+  mek: CryptoKey,
+  saltB64: string,
+  kemSecretB64: string | null,
+  sigSecretB64: string | null,
+): Promise<VaultKeyring> {
+  // Derive the same subkeys that every pre-upgrade row was encrypted under.
+  // deriveCredentialsKey and deriveTransactionsKey default to extractable=true,
+  // which is required so we can call crypto.subtle.exportKey('raw', ...).
+  const [credsKey, txnKey] = await Promise.all([
+    deriveCredentialsKey(mek, saltB64),
+    deriveTransactionsKey(mek, saltB64),
+  ]);
+
+  // Export the raw bytes. These are what the v3 keyring stores as generation 1.
+  // After this export the caller owns the bytes; neither this function nor any
+  // downstream path re-derives them from the MEK.
+  const [credsRaw, txnRaw] = await Promise.all([
+    crypto.subtle.exportKey("raw", credsKey),
+    crypto.subtle.exportKey("raw", txnKey),
+  ]);
+
+  const credsBytes = new Uint8Array(credsRaw);
+  const txnBytes = new Uint8Array(txnRaw);
+
+  if (credsBytes.length !== DATA_KEY_BYTES) {
+    throw new Error(
+      `Derived credentials key is ${credsBytes.length} bytes, expected ${DATA_KEY_BYTES}. ` +
+        "This should never happen with HKDF-SHA-256 at 256 bits.",
+    );
+  }
+  if (txnBytes.length !== DATA_KEY_BYTES) {
+    throw new Error(
+      `Derived transactions key is ${txnBytes.length} bytes, expected ${DATA_KEY_BYTES}. ` +
+        "This should never happen with HKDF-SHA-256 at 256 bits.",
+    );
+  }
+
+  return {
+    version: KEYRING_VERSION,
+    credentials: [{ generation: 1, keyB64: encoding.bytesToBase64(credsBytes) }],
+    transactions: [{ generation: 1, keyB64: encoding.bytesToBase64(txnBytes) }],
+    kemSecretB64,
+    sigSecretB64,
+  };
 }

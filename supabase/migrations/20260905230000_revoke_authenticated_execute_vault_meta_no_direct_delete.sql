@@ -1,0 +1,20 @@
+-- OUT-OF-ORDER-OK: placeholder for orphan ledger row already applied to dev; apply-migrations skips on ledger match (OR-T2621)
+-- 20260905230000_revoke_authenticated_execute_vault_meta_no_direct_delete.sql
+--
+-- PLACEHOLDER FILE: this migration version was already applied to dev
+-- (fzwmnzmtqidumdqjdddz) and the original file was removed from the repository
+-- without a corresponding cleanup of the schema_migrations ledger row.
+--
+-- The apply-migrations workflow skips any version already present in the
+-- schema_migrations ledger (line 867: continue on match), so the content of
+-- this file is NEVER EXECUTED on any project that ran the original. This file
+-- exists only to satisfy the migration classifier's rename-check, which hard
+-- stops when a ledger row has no matching file in the tree.
+--
+-- VERIFIED (orangerails/dba, OR-T2621): the DDL effect of this migration --
+-- REVOKE EXECUTE on enforce_vault_meta_no_direct_delete from authenticated --
+-- is already live on dev. has_function_privilege('authenticated',
+-- 'enforce_vault_meta_no_direct_delete','EXECUTE') = false as of 2026-09-22.
+-- DO NOT attempt to re-apply this DDL.
+--
+-- Refs: OR-T2621, OR-T1252
