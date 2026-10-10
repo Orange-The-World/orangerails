@@ -91,7 +91,7 @@ jobs:
           } >>"$GITHUB_OUTPUT"
 
       - name: Post results to tracking issue
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           PROBE_REPORT: ${{ steps.fetch.outputs.report }}
           ISSUE_NUMBER: ${{ inputs.issue_number }}
