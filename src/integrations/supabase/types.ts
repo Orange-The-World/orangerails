@@ -281,6 +281,27 @@ export type Database = {
           },
         ]
       }
+      beta_approved_users: {
+        Row: {
+          approved: boolean
+          approved_at: string | null
+          email: string
+          note: string | null
+        }
+        Insert: {
+          approved?: boolean
+          approved_at?: string | null
+          email: string
+          note?: string | null
+        }
+        Update: {
+          approved?: boolean
+          approved_at?: string | null
+          email?: string
+          note?: string | null
+        }
+        Relationships: []
+      }
       channel_state: {
         Row: {
           closed_at: string | null
@@ -314,6 +335,66 @@ export type Database = {
           sealed_iv?: string
           update_id?: number
           user_id?: string
+        }
+        Relationships: []
+      }
+      commodity_prices: {
+        Row: {
+          country: string | null
+          currency: string
+          fetched_at: string
+          id: string
+          inserted_at: string
+          item: string
+          period_end: string
+          period_label: string
+          period_start: string
+          provenance: string
+          region: string | null
+          release_date: string | null
+          source_authority: string
+          source_series_id: string | null
+          source_url: string | null
+          unit: string
+          value: number
+        }
+        Insert: {
+          country?: string | null
+          currency?: string
+          fetched_at?: string
+          id?: string
+          inserted_at?: string
+          item: string
+          period_end: string
+          period_label: string
+          period_start: string
+          provenance: string
+          region?: string | null
+          release_date?: string | null
+          source_authority: string
+          source_series_id?: string | null
+          source_url?: string | null
+          unit: string
+          value: number
+        }
+        Update: {
+          country?: string | null
+          currency?: string
+          fetched_at?: string
+          id?: string
+          inserted_at?: string
+          item?: string
+          period_end?: string
+          period_label?: string
+          period_start?: string
+          provenance?: string
+          region?: string | null
+          release_date?: string | null
+          source_authority?: string
+          source_series_id?: string | null
+          source_url?: string | null
+          unit?: string
+          value?: number
         }
         Relationships: []
       }
@@ -712,6 +793,63 @@ export type Database = {
           },
         ]
       }
+      exchange_rate_providers: {
+        Row: {
+          active: boolean
+          created_at: string
+          endpoint_base: string
+          failure_count_24h: number
+          id: string
+          last_failure_at: string | null
+          last_success_at: string | null
+          name: string
+          notes: string | null
+          pairs_supported: Json
+          permission_doc_url: string | null
+          permission_status: string
+          rate_limit_rps: number
+          role: string
+          updated_at: string
+          user_agent: string
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          endpoint_base: string
+          failure_count_24h?: number
+          id?: string
+          last_failure_at?: string | null
+          last_success_at?: string | null
+          name: string
+          notes?: string | null
+          pairs_supported: Json
+          permission_doc_url?: string | null
+          permission_status?: string
+          rate_limit_rps: number
+          role: string
+          updated_at?: string
+          user_agent: string
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          endpoint_base?: string
+          failure_count_24h?: number
+          id?: string
+          last_failure_at?: string | null
+          last_success_at?: string | null
+          name?: string
+          notes?: string | null
+          pairs_supported?: Json
+          permission_doc_url?: string | null
+          permission_status?: string
+          rate_limit_rps?: number
+          role?: string
+          updated_at?: string
+          user_agent?: string
+        }
+        Relationships: []
+      }
       exchange_rate_resolutions: {
         Row: {
           fetched_at: string
@@ -805,6 +943,207 @@ export type Database = {
         }
         Relationships: []
       }
+      historical_money_prices: {
+        Row: {
+          asset: string
+          citation: string
+          compiler: string | null
+          confidence: string
+          fetched_at: string
+          id: string
+          inserted_at: string
+          notes: Json | null
+          period_label: string
+          quote_in: string
+          region: string | null
+          source_authority: string
+          unit: string
+          value: number
+          year_end: number
+          year_start: number
+        }
+        Insert: {
+          asset: string
+          citation: string
+          compiler?: string | null
+          confidence: string
+          fetched_at?: string
+          id?: string
+          inserted_at?: string
+          notes?: Json | null
+          period_label: string
+          quote_in: string
+          region?: string | null
+          source_authority: string
+          unit: string
+          value: number
+          year_end: number
+          year_start: number
+        }
+        Update: {
+          asset?: string
+          citation?: string
+          compiler?: string | null
+          confidence?: string
+          fetched_at?: string
+          id?: string
+          inserted_at?: string
+          notes?: Json | null
+          period_label?: string
+          quote_in?: string
+          region?: string | null
+          source_authority?: string
+          unit?: string
+          value?: number
+          year_end?: number
+          year_start?: number
+        }
+        Relationships: []
+      }
+      historical_money_prices_resolutions: {
+        Row: {
+          detail: Json
+          fetched_at: string
+          id: string
+          price_id: string
+        }
+        Insert: {
+          detail: Json
+          fetched_at?: string
+          id?: string
+          price_id: string
+        }
+        Update: {
+          detail?: Json
+          fetched_at?: string
+          id?: string
+          price_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "historical_money_prices_resolutions_price_id_fkey"
+            columns: ["price_id"]
+            isOneToOne: false
+            referencedRelation: "historical_money_prices"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      inflation_rates: {
+        Row: {
+          base_year: number | null
+          country: string
+          fetched_at: string
+          id: string
+          index_kind: string
+          inserted_at: string
+          mom_pct: number | null
+          period_end: string
+          period_label: string
+          period_start: string
+          populated_by: string
+          provenance: string
+          region: string | null
+          release_date: string | null
+          revision_number: number
+          source_authority: string
+          source_series_id: string | null
+          source_url: string | null
+          status: string
+          superseded_by_id: string | null
+          value: number
+          yoy_pct: number | null
+        }
+        Insert: {
+          base_year?: number | null
+          country: string
+          fetched_at?: string
+          id?: string
+          index_kind: string
+          inserted_at?: string
+          mom_pct?: number | null
+          period_end: string
+          period_label: string
+          period_start: string
+          populated_by?: string
+          provenance: string
+          region?: string | null
+          release_date?: string | null
+          revision_number?: number
+          source_authority: string
+          source_series_id?: string | null
+          source_url?: string | null
+          status?: string
+          superseded_by_id?: string | null
+          value: number
+          yoy_pct?: number | null
+        }
+        Update: {
+          base_year?: number | null
+          country?: string
+          fetched_at?: string
+          id?: string
+          index_kind?: string
+          inserted_at?: string
+          mom_pct?: number | null
+          period_end?: string
+          period_label?: string
+          period_start?: string
+          populated_by?: string
+          provenance?: string
+          region?: string | null
+          release_date?: string | null
+          revision_number?: number
+          source_authority?: string
+          source_series_id?: string | null
+          source_url?: string | null
+          status?: string
+          superseded_by_id?: string | null
+          value?: number
+          yoy_pct?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inflation_rates_superseded_by_id_fkey"
+            columns: ["superseded_by_id"]
+            isOneToOne: false
+            referencedRelation: "inflation_rates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      inflation_resolutions: {
+        Row: {
+          derivation_notes: string | null
+          fetched_at: string
+          id: string
+          rate_id: string
+          raw_response: Json | null
+        }
+        Insert: {
+          derivation_notes?: string | null
+          fetched_at?: string
+          id?: string
+          rate_id: string
+          raw_response?: Json | null
+        }
+        Update: {
+          derivation_notes?: string | null
+          fetched_at?: string
+          id?: string
+          rate_id?: string
+          raw_response?: Json | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "inflation_resolutions_rate_id_fkey"
+            columns: ["rate_id"]
+            isOneToOne: false
+            referencedRelation: "inflation_rates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       invoices: {
         Row: {
           amount_cents: number
@@ -870,6 +1209,63 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      monetary_aggregates: {
+        Row: {
+          aggregate: string
+          country: string
+          currency: string
+          fetched_at: string
+          id: string
+          inserted_at: string
+          period_end: string
+          period_label: string
+          period_start: string
+          provenance: string
+          release_date: string | null
+          seasonally_adjusted: boolean
+          source_authority: string
+          source_series_id: string | null
+          source_url: string | null
+          value: number
+        }
+        Insert: {
+          aggregate: string
+          country: string
+          currency: string
+          fetched_at?: string
+          id?: string
+          inserted_at?: string
+          period_end: string
+          period_label: string
+          period_start: string
+          provenance: string
+          release_date?: string | null
+          seasonally_adjusted?: boolean
+          source_authority: string
+          source_series_id?: string | null
+          source_url?: string | null
+          value: number
+        }
+        Update: {
+          aggregate?: string
+          country?: string
+          currency?: string
+          fetched_at?: string
+          id?: string
+          inserted_at?: string
+          period_end?: string
+          period_label?: string
+          period_start?: string
+          provenance?: string
+          release_date?: string | null
+          seasonally_adjusted?: boolean
+          source_authority?: string
+          source_series_id?: string | null
+          source_url?: string | null
+          value?: number
+        }
+        Relationships: []
       }
       opk_key_rotations: {
         Row: {
@@ -1349,6 +1745,110 @@ export type Database = {
           },
         ]
       }
+      precious_metals_rates: {
+        Row: {
+          bucket_ts: string
+          composite: boolean
+          composite_via: string | null
+          computed_at: string
+          fetched_at: string
+          granularity: string
+          id: string
+          product: string
+          provenance: string
+          provider_count: number
+          rate: number
+          source_authority: string
+          source_metal: string
+          status: string
+          superseded_by_id: string | null
+          target_currency: string
+          tier: string
+          weight_unit: string
+        }
+        Insert: {
+          bucket_ts: string
+          composite?: boolean
+          composite_via?: string | null
+          computed_at?: string
+          fetched_at?: string
+          granularity: string
+          id?: string
+          product: string
+          provenance: string
+          provider_count?: number
+          rate: number
+          source_authority: string
+          source_metal: string
+          status?: string
+          superseded_by_id?: string | null
+          target_currency: string
+          tier: string
+          weight_unit?: string
+        }
+        Update: {
+          bucket_ts?: string
+          composite?: boolean
+          composite_via?: string | null
+          computed_at?: string
+          fetched_at?: string
+          granularity?: string
+          id?: string
+          product?: string
+          provenance?: string
+          provider_count?: number
+          rate?: number
+          source_authority?: string
+          source_metal?: string
+          status?: string
+          superseded_by_id?: string | null
+          target_currency?: string
+          tier?: string
+          weight_unit?: string
+        }
+        Relationships: []
+      }
+      precious_metals_resolutions: {
+        Row: {
+          fetched_at: string
+          id: string
+          median_calculation: string | null
+          outliers_discarded: Json | null
+          provider_responses: Json
+          providers_failed: Json | null
+          providers_succeeded: string[]
+          rate_id: string
+        }
+        Insert: {
+          fetched_at?: string
+          id?: string
+          median_calculation?: string | null
+          outliers_discarded?: Json | null
+          provider_responses: Json
+          providers_failed?: Json | null
+          providers_succeeded: string[]
+          rate_id: string
+        }
+        Update: {
+          fetched_at?: string
+          id?: string
+          median_calculation?: string | null
+          outliers_discarded?: Json | null
+          provider_responses?: Json
+          providers_failed?: Json | null
+          providers_succeeded?: string[]
+          rate_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "precious_metals_resolutions_rate_id_fkey"
+            columns: ["rate_id"]
+            isOneToOne: false
+            referencedRelation: "precious_metals_rates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       queue_health_alert_state: {
         Row: {
           last_notified_at: string
@@ -1460,6 +1960,66 @@ export type Database = {
           received_at?: string
           retirement_reason?: string | null
           subaccount_id?: string | null
+        }
+        Relationships: []
+      }
+      schema_migrations: {
+        Row: {
+          applied_at: string
+          source: string | null
+          version: string
+        }
+        Insert: {
+          applied_at?: string
+          source?: string | null
+          version: string
+        }
+        Update: {
+          applied_at?: string
+          source?: string | null
+          version?: string
+        }
+        Relationships: []
+      }
+      source_terms_of_service: {
+        Row: {
+          archive_format: string
+          archived_text: string
+          assessed_by: string
+          assessment_notes: string | null
+          fetched_at: string
+          id: string
+          our_usage_assessment: string
+          source_key: string
+          superseded_at: string | null
+          tos_sha256: string
+          tos_url: string
+        }
+        Insert: {
+          archive_format?: string
+          archived_text: string
+          assessed_by?: string
+          assessment_notes?: string | null
+          fetched_at?: string
+          id?: string
+          our_usage_assessment: string
+          source_key: string
+          superseded_at?: string | null
+          tos_sha256: string
+          tos_url: string
+        }
+        Update: {
+          archive_format?: string
+          archived_text?: string
+          assessed_by?: string
+          assessment_notes?: string | null
+          fetched_at?: string
+          id?: string
+          our_usage_assessment?: string
+          source_key?: string
+          superseded_at?: string | null
+          tos_sha256?: string
+          tos_url?: string
         }
         Relationships: []
       }
@@ -1800,6 +2360,60 @@ export type Database = {
           },
         ]
       }
+      tech_productivity_curves: {
+        Row: {
+          cumulative_production: number | null
+          cumulative_production_unit: string | null
+          currency: string | null
+          fetched_at: string
+          id: string
+          inserted_at: string
+          item: string
+          metric: string
+          notes: string | null
+          period_end: string
+          period_start: string
+          source_authority: string
+          source_url: string | null
+          unit: string
+          value: number
+        }
+        Insert: {
+          cumulative_production?: number | null
+          cumulative_production_unit?: string | null
+          currency?: string | null
+          fetched_at?: string
+          id?: string
+          inserted_at?: string
+          item: string
+          metric: string
+          notes?: string | null
+          period_end: string
+          period_start: string
+          source_authority: string
+          source_url?: string | null
+          unit: string
+          value: number
+        }
+        Update: {
+          cumulative_production?: number | null
+          cumulative_production_unit?: string | null
+          currency?: string | null
+          fetched_at?: string
+          id?: string
+          inserted_at?: string
+          item?: string
+          metric?: string
+          notes?: string | null
+          period_end?: string
+          period_start?: string
+          source_authority?: string
+          source_url?: string | null
+          unit?: string
+          value?: number
+        }
+        Relationships: []
+      }
       user_app_grants: {
         Row: {
           access_token_hash: string
@@ -2027,6 +2641,66 @@ export type Database = {
           id?: string
           metadata?: Json | null
           user_id?: string
+        }
+        Relationships: []
+      }
+      wages: {
+        Row: {
+          base_year: number | null
+          country: string
+          currency: string
+          fetched_at: string
+          id: string
+          inserted_at: string
+          measure: string
+          period_end: string
+          period_label: string
+          period_start: string
+          provenance: string
+          region: string | null
+          release_date: string | null
+          source_authority: string
+          source_series_id: string | null
+          source_url: string | null
+          value: number
+        }
+        Insert: {
+          base_year?: number | null
+          country: string
+          currency?: string
+          fetched_at?: string
+          id?: string
+          inserted_at?: string
+          measure: string
+          period_end: string
+          period_label: string
+          period_start: string
+          provenance: string
+          region?: string | null
+          release_date?: string | null
+          source_authority: string
+          source_series_id?: string | null
+          source_url?: string | null
+          value: number
+        }
+        Update: {
+          base_year?: number | null
+          country?: string
+          currency?: string
+          fetched_at?: string
+          id?: string
+          inserted_at?: string
+          measure?: string
+          period_end?: string
+          period_label?: string
+          period_start?: string
+          provenance?: string
+          region?: string | null
+          release_date?: string | null
+          source_authority?: string
+          source_series_id?: string | null
+          source_url?: string | null
+          value?: number
         }
         Relationships: []
       }
