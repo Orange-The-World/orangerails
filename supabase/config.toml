@@ -1,3 +1,4 @@
+# Edge function redeploy marker
 project_id = "fzwmnzmtqidumdqjdddz"
 
 # Functions deployed with verify_jwt = false do their OWN auth at the
