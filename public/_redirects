@@ -12,11 +12,12 @@
 # keep routing visitors through this redirect even after docs.* has
 # its own dedicated deployment. 302 keeps the redirect transitional.
 
-# Probe rule: if /redir-probe-2026 returns 302 to /docs/quickstart, the
-# parser is reading this file. If it returns 200 (SPA fallback), the
-# file is not being parsed at all and the docs.* rules below would
-# never fire either.
-/redir-probe-2026 /docs/quickstart 302
+# Probe rule: if /redir-probe-2026 returns 302 to /docs, the parser is
+# reading this file. If it returns 200 (SPA fallback), the file is not
+# being parsed at all and the docs.* rules below would never fire
+# either. The target is /docs, an allowlisted route below, so a client
+# that follows the redirect lands on a real page instead of a 404.
+/redir-probe-2026 /docs 302
 
 # Domain-prefix form. This matches for any visitor on the docs.* host
 # even though that host is attached to this same orangerails-prod
@@ -29,6 +30,18 @@
 # fixes; removing it is correct rather than repointing it, because a rule
 # that can never match but looks load-bearing misleads the next reader.
 https://docs.orangerails.com/* https://connect.orangerails.com/docs/:splat 302
+
+# --- /docs/* soft-404 fix (OR-T0422) ---
+# An unscoped SPA catch-all (below) means any unknown /docs/* slug
+# returns 200 with the bare app shell instead of a real 404, which
+# poisons link checks that rely on status codes. These three routes
+# are the only ones that actually exist under src/routes/docs; every
+# other /docs/* path should be a real 404, not a fake 200. This block
+# MUST stay above the blanket catch-all: first match wins.
+/docs /index.html 200
+/docs/xpub-export /index.html 200
+/docs/strike-csv /index.html 200
+/docs/* /404.html 404
 
 # SPA deep-link fallback. MUST be the last rule so the specific rules
 # above match first. Cloudflare Pages serves any real static asset
