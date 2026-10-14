@@ -19,7 +19,13 @@ import {
   assertEquals,
   assertNotEquals,
 } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { buildScanRangeArgs, recordScanRange } from './scan_range.ts';
+import {
+  buildScanRangeArgs,
+  classifyScanRangeError,
+  recordScanRange,
+  reportScanRangeOutcome,
+  UNKNOWN_ERROR_CODE,
+} from './scan_range.ts';
 
 const CONN_ID = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb';
 
@@ -59,12 +65,14 @@ Deno.test(
   },
 );
 
-Deno.test('payload shape matches the 4-arg record_stealth_scan_range signature', () => {
+Deno.test('payload shape matches the 5-arg record_stealth_scan_range signature (OR-T2457 added p_scan_generation)', () => {
+  const GEN = 'cccccccc-cccc-cccc-cccc-cccccccccccc';
   const args = buildScanRangeArgs({
     connection_id: CONN_ID,
     app_user_id: CALLER,
     last_block_scanned: 900_100,
     from_height: 900_000,
+    scan_generation: GEN,
   });
 
   assertEquals(args, {
@@ -72,6 +80,7 @@ Deno.test('payload shape matches the 4-arg record_stealth_scan_range signature',
     p_from_height: 900_000,
     p_to_height: 900_100,
     p_app_user_id: CALLER,
+    p_scan_generation: GEN,
   });
 });
 
@@ -118,24 +127,85 @@ Deno.test('no from_height: opt-out, no RPC is issued at all', async () => {
   assertEquals(called, false);
 });
 
-Deno.test('a rejected range is logged, not thrown: the cursor write must stand', async () => {
+Deno.test('a rejected range is logged, not thrown, and classified as rejected: the cursor write must stand', async () => {
   const client = {
     rpc() {
-      // What an ownership rejection from the database looks like here.
+      // What an ownership rejection from the database looks like here: BOTH
+      // the P0001 code and the ownership marker in the message. Either one
+      // missing makes classifyScanRangeError call this 'failed' instead, per
+      // the discriminating cases below.
       return Promise.resolve({
-        error: { message: 'record_stealth_scan_range: caller does not own connection' },
+        error: {
+          code: 'P0001',
+          message: 'record_stealth_scan_range: caller does not own connection',
+        },
       });
     },
   };
 
-  // Must not throw. The preceding cursor write is the safe fallback (DL-1478),
-  // and nothing was written by the rejected call.
-  await recordScanRange(client, {
+  // Must not throw AND must be classified as rejected. "Does not throw" alone
+  // proves nothing here: recordScanRange never throws by design, so every
+  // outcome, including a broken deployment, satisfies that alone.
+  const outcome = await recordScanRange(client, {
     connection_id: CONN_ID,
     app_user_id: CALLER,
     last_block_scanned: 900_100,
     from_height: 900_000,
   });
+  assertEquals(outcome.status, 'rejected');
+});
+
+/**
+ * classifyScanRangeError, tested directly. These are the four cases DL-1663
+ * itself named as indistinguishable before this fix: an ownership rejection
+ * must stay quiet, and PGRST202, 42501 and a code-less error must all read
+ * loud. A test that only checks "does not throw" cannot tell these apart,
+ * which is exactly how the original defect (a broken deployment reading as a
+ * healthy sync) went unseen for ten weeks.
+ */
+
+Deno.test('classifyScanRangeError: P0001 + ownership marker is rejected (the only quiet case)', () => {
+  const outcome = classifyScanRangeError({
+    code: 'P0001',
+    message: 'record_stealth_scan_range: caller user-x does not own connection conn-y',
+  });
+  assertEquals(outcome.status, 'rejected');
+  assertEquals(outcome.code, 'P0001');
+});
+
+Deno.test('classifyScanRangeError: PGRST202 (missing/mismatched function, a broken deployment) is failed', () => {
+  const outcome = classifyScanRangeError({
+    code: 'PGRST202',
+    message: 'Could not find the function public.record_stealth_scan_range(...) in the schema cache',
+  });
+  assertEquals(outcome.status, 'failed');
+  assertEquals(outcome.code, 'PGRST202');
+});
+
+Deno.test('classifyScanRangeError: 42501 (permission denied) is failed', () => {
+  const outcome = classifyScanRangeError({
+    code: '42501',
+    message: 'permission denied for function record_stealth_scan_range',
+  });
+  assertEquals(outcome.status, 'failed');
+  assertEquals(outcome.code, '42501');
+});
+
+Deno.test('classifyScanRangeError: no code at all is failed with UNKNOWN_ERROR_CODE, never mistaken for rejected', () => {
+  const outcome = classifyScanRangeError({
+    message: 'record_stealth_scan_range: caller does not own connection',
+  });
+  assertEquals(outcome.status, 'failed');
+  assertEquals(outcome.code, UNKNOWN_ERROR_CODE);
+});
+
+Deno.test("classifyScanRangeError: P0001 from the guard's OTHER branch (connection not found) is failed, not rejected", () => {
+  const outcome = classifyScanRangeError({
+    code: 'P0001',
+    message: 'record_stealth_scan_range: connection conn-y not found or has no owner',
+  });
+  assertEquals(outcome.status, 'failed');
+  assertEquals(outcome.code, 'P0001');
 });
 
 Deno.test('opt-out boundary: from_height past last_block_scanned does not record', () => {
@@ -191,4 +261,54 @@ Deno.test('records at the boundary: from_height 0 is a genesis-start scan, not a
   });
   assertEquals(args?.p_from_height, 0);
   assertEquals(args?.p_app_user_id, CALLER);
+});
+
+// --- OR-T0645 / OR-C1710: index.ts wiring ---
+//
+// reportScanRangeOutcome is the function index.ts calls to turn a 'failed'
+// outcome into both a Sentry report and the scan_range_failed response field.
+// This repo has no HTTP-level integration test for this handler, so these two
+// tests are the closest available proof that deleting the failed-branch wiring
+// in index.ts goes red: reportScanRangeOutcome IS that wiring, unit-tested
+// directly.
+
+Deno.test('reportScanRangeOutcome: a failed outcome reports exactly once, code only, and sets scan_range_failed', () => {
+  const calls: Array<{ message: string; fnName: string }> = [];
+  const req = new Request('https://example.com/or-stealth-envelope-update');
+
+  const fields = reportScanRangeOutcome(
+    { status: 'failed', code: '42501', message: 'permission denied for app_user_id 11111111-1111-1111-1111-111111111111' },
+    'or-stealth-envelope-update',
+    req,
+    (err, fnName) => {
+      calls.push({ message: err.message, fnName });
+    },
+  );
+
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].fnName, 'or-stealth-envelope-update');
+  assertEquals(calls[0].message, 'record_stealth_scan_range failed: code=42501');
+  // The driver message (which carried an app_user_id above) must never reach
+  // the reported error. Only the code may leave the function.
+  assertEquals(calls[0].message.includes('app_user_id'), false);
+  assertEquals(fields, { scan_range_failed: { code: '42501' } });
+});
+
+Deno.test('reportScanRangeOutcome: recorded, rejected and skipped stay exactly as quiet as before this ticket', () => {
+  const req = new Request('https://example.com/or-stealth-envelope-update');
+  let reportCalled = false;
+  const report = () => { reportCalled = true; };
+
+  for (
+    const outcome of [
+      { status: 'recorded' as const },
+      { status: 'rejected' as const, code: 'P0001' },
+      { status: 'skipped' as const },
+    ]
+  ) {
+    const fields = reportScanRangeOutcome(outcome, 'or-stealth-envelope-update', req, report);
+    assertEquals(fields, {});
+  }
+
+  assertEquals(reportCalled, false);
 });

@@ -104,6 +104,8 @@ describe.runIf(RUN)('OR-T1114: grantCoAdmin takes workspace_key_id from the serv
     noVaultId: '',
     ownerPassword: '',
     ownerSaltB64: '',
+    ownerVerifierCiphertext: '',
+    ownerMek: null as CryptoKey | null,
     ownerSigPubB64: '',
     targetKemPubB64: '',
     ownerClient: null as ReturnType<typeof createClient> | null,
@@ -144,7 +146,13 @@ describe.runIf(RUN)('OR-T1114: grantCoAdmin takes workspace_key_id from the serv
       .eq('user_id', userId);
     if (pqcErr) throw new Error(`Seed PQC material failed: ${pqcErr.message}`);
 
-    return { saltB64, kemPublicKey: pqc.kem_public_key, sigPublicKey: pqc.sig_public_key };
+    return {
+      saltB64,
+      mek,
+      verifierCiphertext,
+      kemPublicKey: pqc.kem_public_key,
+      sigPublicKey: pqc.sig_public_key,
+    };
   }
 
   async function signedInClient(email: string, password: string) {
@@ -181,6 +189,8 @@ describe.runIf(RUN)('OR-T1114: grantCoAdmin takes workspace_key_id from the serv
 
     const owner = await seedV1Vault(fixture.ownerId, fixture.ownerPassword);
     fixture.ownerSaltB64 = owner.saltB64;
+    fixture.ownerVerifierCiphertext = owner.verifierCiphertext;
+    fixture.ownerMek = owner.mek;
     fixture.ownerSigPubB64 = owner.sigPublicKey;
 
     // The recipient needs a vault only for its KEM public key.
@@ -219,6 +229,10 @@ describe.runIf(RUN)('OR-T1114: grantCoAdmin takes workspace_key_id from the serv
         ownerUserId: fixture.ownerId,
         ownerSaltB64: fixture.ownerSaltB64,
         ownerPassword: fixture.ownerPassword,
+        ownerVerifierCiphertext: fixture.ownerVerifierCiphertext,
+        ownerKeyVersion: 1,
+        ownerEncMekCiphertext: null,
+        vaultMek: fixture.ownerMek!,
         ownerSigSecretWrapped: await sigSecretWrappedFor(fixture.ownerId),
         targetUserId: fixture.targetId,
         targetKemPubB64: fixture.targetKemPubB64,
@@ -292,13 +306,20 @@ describe.runIf(RUN)('OR-T1114: grantCoAdmin takes workspace_key_id from the serv
     'a caller with no vault row is refused before anything is signed',
     async () => {
       // allocate_workspace_key raises when the caller has no user_vault_meta
-      // row. The grant must stop there. The salt and password below belong to
-      // the owner and are only there to get as far as the RPC.
+      // row. The grant must stop there. The salt, password, verifier and MEK
+      // below all belong to the owner and are only there to get as far as the
+      // RPC: confirmVaultPassword runs before the RPC call and must succeed
+      // on some self-consistent vault material, and noVaultId has none of its
+      // own, so the owner's own (self-consistent) values stand in.
       await expect(
         grantCoAdmin({
           ownerUserId: fixture.noVaultId,
           ownerSaltB64: fixture.ownerSaltB64,
           ownerPassword: fixture.ownerPassword,
+          ownerVerifierCiphertext: fixture.ownerVerifierCiphertext,
+          ownerKeyVersion: 1,
+          ownerEncMekCiphertext: null,
+          vaultMek: fixture.ownerMek!,
           ownerSigSecretWrapped: await sigSecretWrappedFor(fixture.ownerId),
           targetUserId: fixture.targetId,
           targetKemPubB64: fixture.targetKemPubB64,

@@ -26,14 +26,53 @@ user-facing.
 | Stealth Sync (`src/stealth/lib/`) | LDK connector (`src/connectors/ldk/`) | Role |
 |---|---|---|
 | `derive.ts` | `derive.ts` | Client-side seed + channel-key derivation (`deriveOrLdkKey`); no key material leaves the client. |
-| `seal.ts`   | `seal.ts`   | The ZKA boundary, **unchanged primitives**: `sealEnvelope` / `unsealEnvelope` / `blindIndex`. Wraps channel-state backups + payment records. |
+| `seal.ts`   | `seal.ts`   | The ZKA boundary, on the same audited AES-256-GCM / HMAC-SHA-256 core: `sealEnvelope` / `unsealEnvelope`, plus this connector's own blind index functions over the funding outpoint (`outpoint_bidx`, see 3) and the payment hash (`payment_bidx`, see 3.5). Those mirror `computeTxidBlindIndex`, NOT the deprecated `blindIndex` alias (see below). Wraps channel-state backups + payment records. |
 | `sync.ts`   | `sync.ts`   | `runSync` client-side scan over channel monitors / payment records → sealed payload before upload. |
 | `postmessage.ts` | `postmessage.ts` | Widget/app protocol; `deriveOrLdkKey(mek)`. |
 | `supabase/functions/or-stealth-*` | `supabase/functions/or-ldk-*` | Edge functions store `SealedEnvelope` + blind index only. **No decrypt path.** |
 
-**Key derivation:** HKDF from the client MEK with a fixed info string
-`'or-ldk-v1'` (Stealth uses `'or-stealth-v1'`). Client-only, deterministic, no
-server-issued salt.
+**Key derivation, and the separate label each blind index needs.** HKDF from
+the client MEK with a fixed info string `'or-ldk-v1'` (Stealth uses
+`'or-stealth-v1'`) derives the **sealing** key: the one AES-256-GCM uses to
+encrypt and decrypt envelopes. Client-only, deterministic, no server-issued
+salt.
+
+The blind indexes do **not** use that key. Each is an HMAC-SHA-256 under its
+own HKDF subkey, derived from the same client MEK with its own info label,
+distinct from the sealing label and from each other:
+
+```
+'or-ldk-v1'                   sealing key, AES-256-GCM (envelopes)
+'or-ldk/outpoint-index/v1'    subkey for outpoint_bidx (3)
+'or-ldk/payment-index/v1'     subkey for payment_bidx  (3.5)
+```
+
+Those three labels are binding on 3 and 3.5. A wiring PR that signs an index
+under the sealing key, or under the client MEK directly, or that reuses one
+label for both indexes, fails this section whatever else it gets right.
+
+**Why this is pinned here instead of left to the implementer.** The mirrored
+file says it in its own words. `src/stealth/lib/seal.ts` derives its txid index
+subkey with `info="or-stealth/blind-index/v1"` and records the reason next to
+the derivation: "One key doing both jobs is the classic way a side channel opens
+later." That file also carries the counter-example, `computeConnectionBlindIndex`,
+which signs under the client key directly. It is kept that way for exactly one
+stated reason: connection rows already in production were indexed that way, and
+changing the derivation would orphan them. This connector is pre-audit scaffold
+(see the status line at the top of this document, plus 3.3 and 3.5), so it has
+no already-indexed data and therefore no reason to inherit that exception.
+
+**Do not wire the `blindIndex` export.** `src/stealth/lib/seal.ts` exports
+`blindIndex` only as a `@deprecated` alias for `computeTxidBlindIndex`, kept
+until `sync.ts` can be edited safely, and its own comment says not to add a
+second call site. It also resolves to the **txid** index, whose guard demands
+canonical lowercase hex of 64 characters. A payment hash rendered as lowercase
+hex is 64 characters, so a payment hash passed to that name would satisfy the
+guard by coincidence rather than being refused: the wrong call would not be
+caught at runtime the way the guard is meant to catch it. Call
+`computeTxidBlindIndex` when the txid index is genuinely what is wanted, and
+otherwise use this connector's own index functions named in the mirror map
+above.
 
 **Seal primitives (VERIFIED baseline):** AES-256-GCM, fresh IV per envelope,
 client-supplied 32-byte key, HMAC-SHA-256 blind index, zero server-side key
@@ -102,15 +141,20 @@ upsert so a concurrent restore cannot interleave. Keyed on the composite
 `(user_id, outpoint_bidx)`:
 
 ```sql
-INSERT INTO channel_state (user_id, outpoint_bidx, update_id, sealed_blob)
-VALUES (:user_id, :bidx, :new_id, :blob)
+INSERT INTO channel_state (user_id, outpoint_bidx, update_id, seal_version, sealed_iv, sealed_ct)
+VALUES (:user_id, :bidx, :new_id, :seal_version, :sealed_iv, :sealed_ct)
 ON CONFLICT (user_id, outpoint_bidx) DO UPDATE
-  SET update_id = EXCLUDED.update_id,
-      sealed_blob = EXCLUDED.sealed_blob,
-      updated_at  = now()
+  SET update_id    = EXCLUDED.update_id,
+      seal_version = EXCLUDED.seal_version,
+      sealed_iv    = EXCLUDED.sealed_iv,
+      sealed_ct    = EXCLUDED.sealed_ct
   WHERE channel_state.update_id < EXCLUDED.update_id
 RETURNING update_id;
 ```
+
+The envelope is stored as three columns on the live table, not one
+`sealed_blob` blob: `seal_version`, `sealed_iv`, `sealed_ct`. That is the
+table as it already exists (§3.3), so it is what the wiring binds to.
 
 The `WHERE ... < EXCLUDED.update_id` lives **inside** the ON CONFLICT, so the
 compare-and-set is one atomic op, not application logic. `:user_id` is taken
@@ -210,20 +254,67 @@ fix for a live exposure and should not be cited as evidence of one.
 
 **What that rests on, and how to re-check it.** The database objects were
 checked by querying the databases. They were not inferred from this repository,
-and a code search is not evidence for this claim in either direction. §3.3 is
-why that distinction is load-bearing rather than pedantic: `channel_state` and
-its unique index already exist in the database while the wiring PR ships zero
-DDL, so schema state runs ahead of the diff, and a document that says so cannot
-then make a schema claim out of the diff two sections later. To re-check this
-line, query `information_schema.columns` in the dev and production projects for
-a column that could hold a Lightning payment value, and report which projects
-were reached: a project that could not be reached is not a project that came
-back clean.
+and a code search is not evidence about a database object in either direction.
+§3.3 is why that distinction is load-bearing rather than pedantic:
+`channel_state` and its unique index already exist in the database while the
+wiring PR ships zero DDL, so schema state runs ahead of the diff, and a document
+that says so cannot then make a schema claim out of the diff two sections later.
 
-Seven consequences, all checkable at review. Read this as the complete list as it
-stands: if a proposal satisfies every bullet and still lets the server learn the
+The claim above reaches over three kinds of object, and one query does not reach
+all three. Re-check it kind by kind, in both the dev and the production project,
+and report which projects were reached: a project that could not be reached is
+not a project that came back clean.
+
+- **Types, tables, views (including materialized views) and their columns:**
+  query `information_schema.columns` for an ordinary table or view column.
+  PostgreSQL omits materialized views from `information_schema` entirely, so
+  that query alone reports clean on a narrower basis than this claim. Also
+  query the catalog directly: `pg_class` joined to `pg_attribute` (relations
+  filtered to `relkind in ('r','v','m','p','f')`) reaches ordinary tables,
+  views, materialized views, partitioned tables and foreign tables alike, and
+  is what actually finds a column a materialized view is storing. A composite
+  type is a separate class again: it declares attributes rather than columns
+  and needs its own pair, `pg_type` joined to `pg_attribute`, for the `type`
+  half of the sentence.
+- **Functions and RPCs:** query `pg_proc` directly. `information_schema.routines`
+  and `pg_proc` are not interchangeable: Postgres does not guarantee they agree,
+  and a routine can exist in a non-system schema with no row in
+  `information_schema.routines` at all, so treating the two as an "or" choice
+  understates what exists. Query `pg_proc`, and use `information_schema.routines`
+  only as a cross-check, never as the sole source. `information_schema.columns`
+  does not list a function or an RPC at all, so a columns-only sweep cannot
+  confirm this part of the claim however clean it comes back.
+- **Edge functions:** read the deployed function list for the project. An edge
+  function is not a database object, so no catalog query reaches it. That list
+  is an inventory of what is deployed rather than a search of this repository,
+  and this is the one kind here where the repository is on the evidence path at
+  all: the deployed list says which functions exist, and the source of a
+  function on that list says what it handles.
+
+**What the claim rests on today, so nobody has to reconstruct it.** In the dev
+project the sweep covered types, tables, columns, views, functions and RPCs. In
+the production project it now also covers functions, RPCs and the deployed edge
+function list, alongside columns: nothing holding a Lightning payment value was
+found in production functions, RPCs or edge functions either, closing the thin
+spot an earlier version of this section left open. The enumeration itself is
+recorded on the tracking ticket, not here, so this section stays a design
+constraint rather than a running log of checks.
+
+Seven consequences, all checkable at review. Read this as the complete list **for
+the LDK payment record surface** as it stands: if a proposal touches that surface,
+satisfies every bullet, and still lets the server learn a Lightning payment
 amount, that is a defect in this list, and the fix is an edit to this section on
-the bar set in the last paragraph, not a judgement made at review time.
+the bar set at the close of it (a founder decision plus an Auditor pass), not a
+judgement made at review time.
+
+That scope is deliberate and it cuts both ways. A cleartext amount that reaches
+the server by some **other** surface is out of this list's reach and is governed
+elsewhere, so a green walk of the seven bullets is a statement about the LDK
+payment record and not a clean bill of health for the product. What the list does
+bind wherever the row lands is the seventh consequence: a Lightning payment
+amount is never recorded on a pre-existing payment, billing or invoice surface,
+and reusing a table that already exists relaxes nothing. Narrowing the closedness
+claim is not licence to route a Lightning amount around it.
 
 - **No amount column.** A payment record row carries a blind index, a seal
   version, the IV and the ciphertext, and nothing that describes value. If a
@@ -266,7 +357,7 @@ the bar set in the last paragraph, not a judgement made at review time.
 check rests on what counts as describing value, and §3.3 is why that is not
 enough: `channel_state` and its unique index already exist in the dev database
 and the wiring PR ships zero DDL, so a reviewer holding the wiring PR can have
-no schema in the diff to check against. Two requirements turn the check into an
+no schema in the diff to check against. Three requirements turn the check into an
 enumeration:
 
 - **The payment record DDL arrives as a migration pull request in this
@@ -277,13 +368,69 @@ enumeration:
   `seal_version`, `iv`, `ciphertext`, `created_at`, `updated_at`. Anything
   outside that list fails, whatever it is named and whatever it is said to hold.
   Widening the list is a change to this section, not a reviewer's call.
+- **`payment_bidx` is keyed on the payment hash.** It is pinned here the same
+  way the channel blind index is pinned on the funding outpoint in §3, and for
+  the same reason: a blind index is a grouping oracle over whatever it is
+  derived from, so "index terms stay on the stable identifiers" above is a
+  constraint and not a specification. A payment has several stable identifiers
+  and they do not have the same leak profile. Keyed on the destination node,
+  for instance, `payment_bidx` satisfies every consequence above, holds no
+  value and reveals no amount, and still sorts a user's rows into groups that
+  share a destination. Keyed on the payment hash it groups nothing beyond a
+  single payment: a payment hash is fixed for the life of one payment and is
+  not shared across payments, and because the index is computed under its own
+  domain-separated subkey derived from the user's own MEK (§2), distinct from
+  the key that seals payment envelopes so that one key doing both jobs cannot
+  become a side channel later, two users paying the same invoice do not
+  produce the same term. Choosing a different term is a change to this
+  section rather than an implementer's call, and the disclosure below has to
+  change with it.
 
-Both of those requirements describe a table that does not exist yet, and neither
-one fires on a table that already does: a write to a surface that is already
-there ships no DDL, so it raises no migration pull request, and it adds no
-column, so the allowed column set is never consulted. That limit is the reason
-the last consequence above is stated on its own rather than left to be read out
-of these two.
+The first two of those requirements describe a table that does not exist yet,
+and neither one fires on a table that already does: a write to a surface that
+is already there ships no DDL, so it raises no migration pull request, and it
+adds no column, so the allowed column set is never consulted. The keying
+requirement is not DDL shaped and is not exempted the same way: it constrains
+what the index term is derived from, wherever the row lands, including a
+surface that already exists. That is why the last consequence above is stated
+on its own rather than left to be read out of the other two.
+
+**Metadata trade-off, on the same terms as §3.2 (3).** This disclosure assumes
+a payment record is one row per **logical** payment: a payment split across
+paths (a multi-path payment) shares one payment hash across its parts and is
+written as one row, never one row per part. That assumption is binding, not
+incidental. Without it, rows sharing `payment_bidx` would be parts of one split
+payment rather than a retry of a whole one, the colliding row count would be the
+part count, and how a payment was split would correlate with its size relative
+to the sender's channel capacity, a magnitude signal reaching the server in the
+same paragraph that says no amount leaks. One row per logical payment is what
+closes that gap, and it is the row shape the rest of this paragraph assumes.
+
+Every consequence above
+is about **value**, and none of them is about **existence**. A payment record
+row on the allowed column set carries a `payment_bidx` and a `created_at`, so
+the server can count how many Lightning payments a user made and see when each
+row appeared, with every bullet above satisfied and every payload sealed. It can
+also see when two rows carry the same `payment_bidx`, which on the term pinned
+above means the same payment written twice, a retry or a re-send, and not two
+payments to the same party. It cannot group a user's rows by who was paid, and
+that is a property of the pinned term rather than of the bullets: a term stable
+across many payments would pass every bullet and group them anyway. That is the
+same class of exposure §3.2 (3) records for per-channel update cadence, two
+subsections earlier in this document, and it is written here rather than left to
+be inferred from there. Bounded and accepted, on that term: payment count,
+per-row timing and same-payment collisions are observable, and no amount, fee,
+balance, counterparty or destination leaks. Reducing it further is a different
+design, not a tightening of the bullets above: padding the table with decoy rows,
+batching writes so a row's arrival is not a payment's timing, or coarsening
+`created_at` to a window. None of those is proposed here, and each carries its
+own cost, so the exposure is accepted rather than engineered away. **This
+observable pattern is personal financial behavior metadata under GDPR / Law-25
+and must be disclosed in the privacy policy before any payment record path
+ships to users** (tracked with Compliance; not a blocker on this section or on
+the wiring PR). Nothing is observable today: per the paragraph above, no
+Lightning payment record exists, so this states what becomes observable the
+moment one is built.
 
 The trade-off, stated rather than discovered later: sealing the amount means
 the server cannot sort, filter, aggregate or report on value. Any product
@@ -388,7 +535,7 @@ src/connectors/ldk/
   index.ts           ← public surface (mirrors coinbase/index.ts shape)
   types.ts           ← SealedEnvelope, ChannelStateRecord, PersistOutcome
   derive.ts          ← deriveOrLdkKey (HKDF, info='or-ldk-v1')  [stub]
-  seal.ts            ← sealEnvelope/unsealEnvelope/blindIndex re-export plan  [stub]
+  seal.ts            ← sealEnvelope/unsealEnvelope + outpoint_bidx/payment_bidx index functions  [stub]
   persist.ts         ← persist-before-ack + watermark classification  [stub]
   persist.test.ts    ← watermark/idempotency classification tests  [real tests]
 supabase/functions/or-ldk-channel-state/
