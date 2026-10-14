@@ -8,14 +8,121 @@
  *   - strikeSubscriptionErrorMarker  (no I/O, maps an error string to a marker)
  *   - resolveInvoiceWallet           (async, but only calls crypto + a Map lookup)
  *
- * drainStrikeQueue requires a live SupabaseClient and a Strike API and is not
- * unit-tested here.
+ * drainStrikeQueue as a whole still needs a live SupabaseClient and a Strike
+ * API for its provider-facing branches (invoice/payment/etc lookups) and is
+ * not fully exercised here. Its mark-processed database-write failure path
+ * (OR-T0335) IS covered below: routing every fixture event through the
+ * unrecognized-event_type branch never calls the Strike API, so that one
+ * write can be driven with a minimal fake SupabaseClient.
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { strikeSubscriptionErrorMarker, resolveInvoiceWallet } from './queue.ts';
+import {
+  strikeSubscriptionErrorMarker,
+  resolveInvoiceWallet,
+  detectSystemicFailure,
+  drainStrikeQueue,
+  SYSTEMIC_FAILURE_THRESHOLD,
+  type DrainConnection,
+} from './queue.ts';
 import { computeWalletFingerprint } from '../../account-fingerprint.ts';
 import { toByteaHex } from '../../bytea.ts';
+
+// ---------- drainStrikeQueue: mark-processed write failure trips the breaker ----------
+//
+// OR-T0335's incident was "one bad database write failed systemically" --
+// the drain marking a whole batch processed in one .update() call, not a
+// per-event Strike API error. That write is the only I/O in drainStrikeQueue
+// that does not require a live Strike API: giving every fixture event an
+// unrecognized event_type routes it through the "unknown, log + skip + mark
+// processed" branch, which calls no Strike function at all. That lets the
+// mark-processed path be exercised with a minimal fake client instead of a
+// live SupabaseClient + Strike API, which is what the file header above says
+// this function otherwise needs.
+
+// deno-lint-ignore no-explicit-any
+function fakeStrikeEventsClient(events: any[], markError: { message: string } | null): any {
+  return {
+    // deno-lint-ignore no-explicit-any
+    from(table: string): any {
+      if (table !== 'strike_webhook_events') {
+        throw new Error(`fakeStrikeEventsClient: unexpected table "${table}"`);
+      }
+      return {
+        select() { return this; },
+        eq() { return this; },
+        is() { return this; },
+        order() { return this; },
+        limit() { return Promise.resolve({ data: events, error: null }); },
+        update() { return this; },
+        in() { return Promise.resolve({ error: markError }); },
+      };
+    },
+  };
+}
+
+function fixtureEvents(n: number): { id: string; event_type: string; entity_id: string }[] {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `evt-${i}`,
+    event_type: 'unrecognized.test-only',
+    entity_id: `ent-${i}`,
+  }));
+}
+
+/** A connection with a subscription checked "now", so drainStrikeQueue skips
+ * both the liveness check and subscription creation and goes straight to
+ * draining -- the only path this fixture needs to exercise. */
+function fixtureConnection(): DrainConnection {
+  return {
+    id: 'conn-test-1',
+    strike_subscription_id: 'sub-test-1',
+    last_sync_cursor: null,
+    needs_resubscribe: false,
+    subscription_checked_at: new Date().toISOString(),
+  };
+}
+
+Deno.test('drainStrikeQueue: mark-processed failure at threshold trips the breaker', async () => {
+  const events = fixtureEvents(SYSTEMIC_FAILURE_THRESHOLD);
+  const result = await drainStrikeQueue({
+    serviceClient: fakeStrikeEventsClient(events, { message: 'connection terminated unexpectedly' }),
+    connection: fixtureConnection(),
+    credentials: { api_key: 'test-key-not-real' },
+    webhookBaseUrl: 'https://example.test/or-strike-webhook',
+    walletsByFingerprintHex: new Map(),
+    subaccountId: 'sub-1',
+  });
+  assertEquals(result.breakerTripped, true);
+  assertEquals(result.tripReason, 'DB_WRITE_FAILED');
+});
+
+Deno.test('drainStrikeQueue: mark-processed failure below threshold does not trip the breaker', async () => {
+  const events = fixtureEvents(SYSTEMIC_FAILURE_THRESHOLD - 1);
+  const result = await drainStrikeQueue({
+    serviceClient: fakeStrikeEventsClient(events, { message: 'connection terminated unexpectedly' }),
+    connection: fixtureConnection(),
+    credentials: { api_key: 'test-key-not-real' },
+    webhookBaseUrl: 'https://example.test/or-strike-webhook',
+    walletsByFingerprintHex: new Map(),
+    subaccountId: 'sub-1',
+  });
+  assertEquals(result.breakerTripped, undefined);
+  assertEquals(result.tripReason, undefined);
+});
+
+Deno.test('drainStrikeQueue: mark-processed succeeds -- no breaker, no false alarm', async () => {
+  const events = fixtureEvents(SYSTEMIC_FAILURE_THRESHOLD);
+  const result = await drainStrikeQueue({
+    serviceClient: fakeStrikeEventsClient(events, null),
+    connection: fixtureConnection(),
+    credentials: { api_key: 'test-key-not-real' },
+    webhookBaseUrl: 'https://example.test/or-strike-webhook',
+    walletsByFingerprintHex: new Map(),
+    subaccountId: 'sub-1',
+  });
+  assertEquals(result.breakerTripped, undefined);
+  assertEquals(result.transactions, []);
+});
 
 const ENV_KEY_NAME = 'OR_ACCT_FINGERPRINT_KEY_V1';
 Deno.env.set(ENV_KEY_NAME, 'test-key-not-a-real-secret');
@@ -62,6 +169,33 @@ Deno.test('strikeSubscriptionErrorMarker: unknown -> generic fallback', () => {
     strikeSubscriptionErrorMarker('Strike 500 Internal Server Error'),
     'STRIKE_SUBSCRIPTION_FAILED',
   );
+});
+
+// ---------- detectSystemicFailure ----------
+// These tests satisfy OR-T0335 acceptance criterion: "the assertion must be
+// watched going red". To see the failure: change the threshold arg from 3 to 4
+// in the 'at threshold' test. Output: "Expected: "AUTH_ERROR" Actual: null".
+
+Deno.test('detectSystemicFailure: empty map -> null', () => {
+  assertEquals(detectSystemicFailure(new Map(), 3), null);
+});
+
+Deno.test('detectSystemicFailure: single reason below threshold -> null', () => {
+  assertEquals(detectSystemicFailure(new Map([['AUTH_ERROR', 2]]), 3), null);
+});
+
+Deno.test('detectSystemicFailure: single reason at threshold -> returns reason', () => {
+  assertEquals(detectSystemicFailure(new Map([['AUTH_ERROR', 3]]), 3), 'AUTH_ERROR');
+});
+
+Deno.test('detectSystemicFailure: multiple reasons none at threshold -> null', () => {
+  const m = new Map([['AUTH_ERROR', 2], ['NETWORK_ERROR', 2]]);
+  assertEquals(detectSystemicFailure(m, 3), null);
+});
+
+Deno.test('detectSystemicFailure: one reason at threshold among others -> returns it', () => {
+  const m = new Map([['AUTH_ERROR', 3], ['NETWORK_ERROR', 1]]);
+  assertEquals(detectSystemicFailure(m, 3), 'AUTH_ERROR');
 });
 
 // ---------- resolveInvoiceWallet ----------
