@@ -628,7 +628,7 @@ Plaid holds your bank credentials in a form they can decrypt. If Plaid is breach
 
 **Q: Does this work with all Bitcoin providers?**
 
-V1 supports Blink, Kraken, BTCPay, and xpub-based watch-only wallets. Additional adapters (LND, Core Lightning, Sparrow, Mesh, Coinbase, Strike, Fedi, Braiins Pool, Ocean Pool, Swan, River, ViaBTC) are on the roadmap. The adapter SDK is public, the community can add providers.
+V1 supports Blink, Kraken, BTCPay, and xpub-based watch-only wallets. ViaBTC Pool ships as a beta mining adapter (API key + HMAC secret, payout and reward history). Additional adapters (LND, Core Lightning, Sparrow, Mesh, Coinbase, Strike, Fedi, Braiins Pool, Ocean Pool, Swan, River) are on the roadmap. The adapter SDK is public, the community can add providers.
 
 **Q: What happens if OrangeRails shuts down?**
 
