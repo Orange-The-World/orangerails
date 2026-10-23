@@ -1,9 +1,13 @@
 /**
  * connection.errored fan-out for or-quiltt-sync.
  *
- * Called after reconcileConnectionError has flipped the OR connection to
- * error. Enqueues one connection.errored webhook_delivery row for the
- * connection's platform, which or-webhook-dispatch then delivers.
+ * Called after reconcileConnectionError returns without an error. That does
+ * not mean the connection was flipped to error: reconcile also returns early
+ * when it finds no row, finds an ambiguous legacy row, or sees that a newer
+ * successful sync already healed the connection. So this helper reads the
+ * connection itself and sends only while it is in status error. Then it
+ * enqueues one connection.errored webhook_delivery row for the connection's
+ * platform, which or-webhook-dispatch delivers.
  *
  * Rules, each pinned by a test in connection-errored.test.ts:
  *   - Quiltt only. Other providers are a follow-on.
@@ -11,14 +15,18 @@
  *     record.id or when no OR connections row matches it. The boundary
  *     cases: the mapping-miss fallback in the drain loop never reaches here
  *     because it has no platform or subaccount.
+ *   - Sends nothing, and logs one line, when the matched connection is not in
+ *     status error, for example because a newer successful sync already healed
+ *     it. A false reconnect signal is worse than a late one, and it would also
+ *     start the 24 hour window and hide a real error behind it.
  *   - Sends nothing when the platform has no webhook_url (no opt-in), the
  *     same rule as the sync.completed fan-out.
  *   - At most one event per connection in any rolling 24 hours, decided by
  *     looking for an existing outbox row, whatever its delivery state. That
  *     makes a replayed or retried inbox event harmless.
- *   - Best-effort: returns an outcome and never throws. The connection is
- *     already reconciled, and failing the inbox event here would retry the
- *     reconcile, which could flip a recovered connection back to error.
+ *   - Best-effort: returns an outcome and never throws. The reconcile step
+ *     has already run, and failing the inbox event here would retry it, which
+ *     could flip a recovered connection back to error.
  *
  * Known limit: the 24 hour check is a read followed by an insert, with no
  * unique index behind it, so two drains handling two events for the same
@@ -40,6 +48,7 @@ export type ConnectionErroredOutcome =
   | 'enqueued'
   | 'no-record-id'
   | 'no-connection-row'
+  | 'not-in-error'
   | 'no-webhook-url'
   | 'within-window'
   | 'failed';
@@ -72,13 +81,19 @@ export async function enqueueConnectionErrored(
 
     const conn = await client
       .from('connections')
-      .select('id')
+      .select('id, status')
       .eq('subaccount_id', subaccountId)
       .eq('provider_type', 'quiltt')
       .eq('quiltt_connection_id', quilttConnectionId)
       .maybeSingle();
     if (conn.error) return fail(`connection lookup: ${conn.error.message}`);
     if (!conn.data) return skip('no-connection-row', 'no OR connections row for this event');
+    // reconcileConnectionError also returns without writing when a newer successful sync
+    // already healed the connection, so the row can be active here. Only a connection that
+    // is in error right now is told to the integrator.
+    if (conn.data.status !== 'error') {
+      return skip('not-in-error', `connection status is ${String(conn.data.status)}, not error`);
+    }
 
     const plat = await client
       .from('platforms')
