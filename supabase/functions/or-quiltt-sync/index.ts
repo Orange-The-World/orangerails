@@ -420,7 +420,10 @@ export async function handleEvent(
     const reconcileErr = await reconcileConnectionError(client, ev, subaccountId);
     if (reconcileErr) return reconcileErr;
     // Tell the integrator the connection is broken (connection.errored). Best-effort:
-    // the row is already reconciled, so a failure here must not retry this event.
+    // a failure here must not retry this event, which would run the reconcile again.
+    // The reconcile above also returns null without writing (no row, an ambiguous legacy
+    // row, or a newer success already healed it), so the enqueue checks the row is in
+    // status error itself before it sends anything.
     await enqueueConnectionErrored(client, ev, platformId, subaccountId);
     return 'processed';
   }
