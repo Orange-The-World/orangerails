@@ -30,12 +30,13 @@ interface Fake {
 function fakeClient(fake: Fake) {
   const inserted: Row[] = [];
   const filters: Array<[string, string, unknown]> = [];
+  const selects: Array<[string, string | undefined]> = [];
   const client = {
     from(table: string) {
       let isInsert = false;
       // deno-lint-ignore no-explicit-any
       const q: any = {
-        select: () => q,
+        select: (cols?: string) => (selects.push([table, cols]), q),
         eq: (col: string, val: unknown) => (filters.push([table, col, val]), q),
         gte: (col: string, val: unknown) => (filters.push([table, col, val]), q),
         limit: () => q,
@@ -58,7 +59,7 @@ function fakeClient(fake: Fake) {
       return q;
     },
   };
-  return { client: client as unknown as SupabaseClient, inserted, filters };
+  return { client: client as unknown as SupabaseClient, inserted, filters, selects };
 }
 
 const ev = (
@@ -67,6 +68,8 @@ const ev = (
 ) => ({ event_id: 'evt-1', event_type: type, payload });
 
 const HOOK = { webhook_url: 'https://example.test/hook' };
+// The OR connections row the sender finds: reconcile has put it in error.
+const ERRORED = { id: 'or-conn-1', status: 'error' };
 const NOW = Date.parse('2026-10-24T12:00:00.000Z');
 
 Deno.test('reason mapping: only the repairable subtype is repairable and the list stays closed', () => {
@@ -92,9 +95,11 @@ Deno.test('payload is { type, data } with exactly the four contract fields', () 
 });
 
 Deno.test('enqueues one row carrying the OR connection id, not the Quiltt id', async () => {
-  const { client, inserted } = fakeClient({ connection: { id: 'or-conn-1' }, platform: HOOK });
+  const { client, inserted, selects } = fakeClient({ connection: ERRORED, platform: HOOK });
   const out = await enqueueConnectionErrored(client, ev(), 'plat-1', 'sub-1', () => NOW);
   assertEquals(out, 'enqueued');
+  // The lookup must ask for status: without it every row would read as not in error.
+  assertEquals(selects.some(([t, cols]) => t === 'connections' && String(cols).includes('status')), true);
   assertEquals(inserted, [{
     platform_id: 'plat-1',
     subaccount_id: 'sub-1',
@@ -113,7 +118,7 @@ Deno.test('enqueues one row carrying the OR connection id, not the Quiltt id', a
 
 Deno.test('sends nothing when one is already queued for the connection in the last 24 hours', async () => {
   const { client, inserted, filters } = fakeClient({
-    connection: { id: 'or-conn-1' },
+    connection: ERRORED,
     platform: HOOK,
     recent: [{ id: 'delivery-1' }],
   });
@@ -129,7 +134,7 @@ Deno.test('sends nothing when one is already queued for the connection in the la
 
 Deno.test('sends nothing, and reads nothing, when the event has no record.id', async () => {
   for (const payload of [{ record: null }, { record: {} }, {}, null]) {
-    const { client, inserted, filters } = fakeClient({ connection: { id: 'or-conn-1' }, platform: HOOK });
+    const { client, inserted, filters } = fakeClient({ connection: ERRORED, platform: HOOK });
     const out = await enqueueConnectionErrored(client, ev(undefined, payload), 'plat-1', 'sub-1', () => NOW);
     assertEquals(out, 'no-record-id');
     assertEquals(inserted.length, 0);
@@ -143,16 +148,30 @@ Deno.test('sends nothing when no OR connections row matches the Quiltt connectio
   assertEquals(inserted.length, 0);
 });
 
+Deno.test('sends nothing when the matched connection is not in error, for example already healed', async () => {
+  // reconcileConnectionError returns without writing when a newer successful sync already
+  // healed the connection. The row is active, so a reconnect signal would be false, and it
+  // would also start the 24 hour window and hide a real error behind it.
+  for (const status of ['active', 'pending', null]) {
+    const { client, inserted, filters } = fakeClient({ connection: { id: 'or-conn-1', status }, platform: HOOK });
+    const out = await enqueueConnectionErrored(client, ev(), 'plat-1', 'sub-1', () => NOW);
+    assertEquals(out, 'not-in-error');
+    assertEquals(inserted.length, 0);
+    // It stops at the connection lookup: no platform read, no outbox read.
+    assertEquals(filters.some(([t]) => t !== 'connections'), false);
+  }
+});
+
 Deno.test('sends nothing when the platform has no webhook_url', async () => {
   for (const platform of [{ webhook_url: null }, { webhook_url: '' }, null]) {
-    const { client, inserted } = fakeClient({ connection: { id: 'or-conn-1' }, platform });
+    const { client, inserted } = fakeClient({ connection: ERRORED, platform });
     assertEquals(await enqueueConnectionErrored(client, ev(), 'plat-1', 'sub-1', () => NOW), 'no-webhook-url');
     assertEquals(inserted.length, 0);
   }
 });
 
 Deno.test('an insert failure is reported as failed and not thrown', async () => {
-  const { client } = fakeClient({ connection: { id: 'or-conn-1' }, platform: HOOK, insertError: 'boom' });
+  const { client } = fakeClient({ connection: ERRORED, platform: HOOK, insertError: 'boom' });
   assertEquals(await enqueueConnectionErrored(client, ev(), 'plat-1', 'sub-1', () => NOW), 'failed');
 });
 
