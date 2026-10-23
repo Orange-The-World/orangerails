@@ -13,6 +13,10 @@
  * same helper accepts a token GoTrue accepts, so the refusals are not a helper
  * that always says no.
  *
+ * Deadline (OR-T0421 step 5): a GoTrue that never answers is refused with 401
+ * inside the deadline. The stub honours the abort signal; the test fails if the
+ * call is not aborted or the refusal takes 400 ms or more.
+ *
  * Structure: index.ts is not importable because it calls Deno.serve at import
  * time. The order is therefore pinned by reading its source: the token check
  * must come before the body is read and before the method switch.
@@ -91,7 +95,7 @@ Deno.test('positive control: the same token passes when GoTrue accepts it', asyn
 });
 
 Deno.test('any non-200 from GoTrue is a refusal', async () => {
-  for (const status of [201, 204, 400, 403, 404, 500, 503]) {
+  for (const status of [201, 204, 400, 403, 404, 429, 500, 503]) {
     const gotrue = stubGoTrue(status);
     const result = await authenticateRequest(rpcRequest('ping', FORGED), {
       supabaseUrl: SUPABASE_URL,
@@ -108,6 +112,37 @@ Deno.test('GoTrue unreachable fails closed', async () => {
   });
   assertEquals(result.ok, false);
   if (!result.ok) assertEquals(result.status, 401);
+});
+
+Deno.test('a GoTrue that never answers is refused with 401 inside the deadline', async () => {
+  let aborted = false;
+  let safety: number | undefined;
+  const hangingFetch = (_url: string, init: RequestInit) =>
+    new Promise<Response>((resolve, reject) => {
+      // Safety net: if the code under test sets no deadline, answer 200 after a
+      // second so this test fails on the assertions below instead of hanging CI.
+      safety = setTimeout(() => resolve(new Response('{}', { status: 200 })), 1000);
+      init.signal?.addEventListener('abort', () => {
+        aborted = true;
+        clearTimeout(safety);
+        reject(new DOMException('The signal has been aborted', 'AbortError'));
+      });
+    });
+  const started = performance.now();
+  try {
+    const result = await authenticateRequest(rpcRequest('initialize', FORGED), {
+      supabaseUrl: SUPABASE_URL,
+      anonKey: 'anon-key',
+      fetchImpl: hangingFetch
+    });
+    const elapsed = performance.now() - started;
+    assertEquals(result.ok, false);
+    if (!result.ok) assertEquals(result.status, 401);
+    assert(aborted, 'the call to GoTrue must be aborted, not left hanging');
+    assert(elapsed < 400, `expected a refusal in under 400 ms, took ${Math.round(elapsed)} ms`);
+  } finally {
+    clearTimeout(safety);
+  }
 });
 
 Deno.test('a missing header or a malformed token is refused without asking GoTrue', async () => {
