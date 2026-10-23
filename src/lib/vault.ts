@@ -299,23 +299,34 @@ export function isPasswordAcceptable(
 }
 
 // ------------------------------------------------------------------
-// Raw MEK bytes , for the co-admin grant flow only.
+// The password stretch , raw Argon2id output. NOT the MEK.
 // ------------------------------------------------------------------
 
 /**
- * Re-run Argon2id and return the raw 32-byte hash.
+ * Run Argon2id over the vault password and return the raw 32-byte hash.
  *
- * This is the ONLY sanctioned way to get extractable key material from the
- * vault password. It is used exclusively in the co-admin grant flow, where
- * the owner must re-confirm their vault password so the browser can
- * concatenate credentials+transactions subkeys into a 64-byte blob and wrap
- * it for the recipient's PQC public key.
+ * THIS IS NOT THE MASTER KEY, and the name has misled a caller before. On a
+ * key-version-2 vault, which is what setupVault creates, the master key is 32
+ * random bytes and this output is only the KEK that wraps it. Data subkeys
+ * derived from this value decrypt nothing, and PQC secrets do not unwrap under
+ * it. It is the master key ONLY on a legacy key-version-1 vault, where the two
+ * happen to coincide.
  *
- * The returned bytes are transient: callers must derive subkeys from them
- * immediately and then let the array be garbage-collected. Never persist or
- * log the returned value.
+ * ITS ONLY CALLER IS deriveKek, immediately below. That is the correct use and
+ * the intended one. Anything that needs key material should take the unlocked
+ * MEK CryptoKey from VaultContext instead.
  *
- * @param password   The user's vault password (re-confirmed in the dialog).
+ * "BUT I NEED RAW BYTES." No. A non-extractable HKDF CryptoKey supports
+ * crypto.subtle.deriveBits, which returns raw bits; non-extractability blocks
+ * exporting the key itself, not deriving output from it. deriveSubkey in
+ * key-derivation.ts has always relied on that. The co-admin grant came back
+ * here on exactly this misunderstanding and built its subkeys out of the wrong
+ * key on every vault the product creates.
+ *
+ * The returned bytes are transient: use them immediately and let the array be
+ * garbage-collected. Never persist or log the returned value.
+ *
+ * @param password   The user's vault password.
  * @param saltBase64 The per-user salt (from user_vault_meta.vault_salt).
  */
 export async function deriveMekRaw(password: string, saltBase64: string): Promise<Uint8Array> {

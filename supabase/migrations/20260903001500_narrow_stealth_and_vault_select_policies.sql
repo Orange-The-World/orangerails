@@ -84,7 +84,58 @@
 -- which file caused it. The timestamp is what enforces it, so do not renumber
 -- this file below 20260903000000.
 --
--- ROLLBACK
+-- ---------------------------------------------------------------------------
+-- PORTABILITY. EVERY STATEMENT IS GUARDED ON THE TABLE EXISTING, AND THE
+-- EXPECTED SETS ARE BUILT FROM WHAT THE CLUSTER ACTUALLY HOLDS.
+-- ---------------------------------------------------------------------------
+--
+-- The table list above was measured on ONE cluster, and the two clusters do
+-- not hold the same set of tables. Measured against the production cluster on
+-- 2026-09-02: to_regclass('public.stealth_utxos') returns null there, so that
+-- table does not exist, while the other five tables in this file do exist and
+-- each carries a policy under exactly the name used here, all still addressed
+-- to public. Twenty one tables differ between the two clusters in total, so
+-- this is a standing condition and not a one off.
+--
+-- PostgreSQL has no ALTER POLICY ... IF EXISTS form, so the statement cannot be
+-- guarded inline and a bare ALTER POLICY on an absent table raises 42P01. The
+-- deploy applies migration files one at a time in version order and exits on
+-- the first failure, so a single unguarded statement here would leave the
+-- production cluster with every earlier file in the batch applied and every
+-- later one not: a partially applied schema, and a policy baseline that no
+-- longer matches the cluster it describes. Each ALTER POLICY is therefore
+-- wrapped in a to_regclass check that raises a NOTICE when it skips, so a skip
+-- is visible in the deploy log rather than silent.
+--
+-- Guarding the statements is not enough on its own, and this is the part that
+-- is easy to miss. The self checks below are still EXACT SET equalities, which
+-- is the whole point of them: an absence test passes while something new and
+-- unnoticed appears next to what it checked. But the expected sets are now
+-- BUILT from the tables present on the cluster instead of written out as
+-- string literals. A literal would demand a member that can never appear where
+-- the table is absent, so the assertion would raise there even with every
+-- statement correctly guarded. Built this way the assertion still proves an
+-- exact set on each cluster, which is the property worth keeping.
+--
+-- WHY THE ASSERTIONS READ pg_class.relname RATHER THAN polrelid::regclass::text.
+-- The text form of a regclass omits the schema only when that schema is on the
+-- search path, so the same query answers stealth_utxos on one connection and
+-- public.stealth_utxos on another. The deploy applies this file over the
+-- management API and does not set a search path, so the comparison is made
+-- against pg_class.relname with the namespace named explicitly instead. This
+-- is a portability fix in the same class as the guards: it removes a dependency
+-- on the session that runs the file.
+--
+-- THIS FILE DOES NOT CREATE stealth_utxos WHERE IT IS MISSING. Creating a table
+-- on a cluster in order to satisfy a policy migration is a schema change
+-- wearing a bug fix costume. 20260504000000_stealth_sync, which both clusters
+-- have applied, creates only stealth_connections and stealth_transactions, so
+-- it is not the origin of this table, and no file in the pending backlog
+-- creates it either. Where it came from is not understood well enough to
+-- reproduce, and answering that is separate work.
+--
+-- ROLLBACK. Run only the lines whose table exists on the cluster you are
+-- rolling back, for exactly the reason above.
 --
 --   ALTER POLICY "Owners can read their stealth connections"
 --     ON public.stealth_connections TO public;
@@ -99,55 +150,119 @@
 --   ALTER POLICY "Recipients can read their own wrapped data keys"
 --     ON public.wrapped_data_keys TO public;
 
-ALTER POLICY "Owners can read their stealth connections"
-  ON public.stealth_connections TO authenticated;
+DO $$ BEGIN
+  IF to_regclass('public.stealth_connections') IS NULL THEN
+    RAISE NOTICE 'stealth and vault policy narrowing: public.stealth_connections not present, skipped';
+  ELSE
+    EXECUTE 'ALTER POLICY "Owners can read their stealth connections" ON public.stealth_connections TO authenticated';
+  END IF;
+END $$;
 
-ALTER POLICY "Owners can read their stealth scan ranges"
-  ON public.stealth_scan_ranges TO authenticated;
+DO $$ BEGIN
+  IF to_regclass('public.stealth_scan_ranges') IS NULL THEN
+    RAISE NOTICE 'stealth and vault policy narrowing: public.stealth_scan_ranges not present, skipped';
+  ELSE
+    EXECUTE 'ALTER POLICY "Owners can read their stealth scan ranges" ON public.stealth_scan_ranges TO authenticated';
+  END IF;
+END $$;
 
-ALTER POLICY "Owners can read their stealth transactions"
-  ON public.stealth_transactions TO authenticated;
+DO $$ BEGIN
+  IF to_regclass('public.stealth_transactions') IS NULL THEN
+    RAISE NOTICE 'stealth and vault policy narrowing: public.stealth_transactions not present, skipped';
+  ELSE
+    EXECUTE 'ALTER POLICY "Owners can read their stealth transactions" ON public.stealth_transactions TO authenticated';
+  END IF;
+END $$;
 
-ALTER POLICY "owner read via connection"
-  ON public.stealth_utxos TO authenticated;
+DO $$ BEGIN
+  IF to_regclass('public.stealth_utxos') IS NULL THEN
+    RAISE NOTICE 'stealth and vault policy narrowing: public.stealth_utxos not present, skipped';
+  ELSE
+    EXECUTE 'ALTER POLICY "owner read via connection" ON public.stealth_utxos TO authenticated';
+  END IF;
+END $$;
 
-ALTER POLICY "workspace_admins: owner and admin can read their rows"
-  ON public.workspace_admins TO authenticated;
+DO $$ BEGIN
+  IF to_regclass('public.workspace_admins') IS NULL THEN
+    RAISE NOTICE 'stealth and vault policy narrowing: public.workspace_admins not present, skipped';
+  ELSE
+    EXECUTE 'ALTER POLICY "workspace_admins: owner and admin can read their rows" ON public.workspace_admins TO authenticated';
+  END IF;
+END $$;
 
-ALTER POLICY "Recipients can read their own wrapped data keys"
-  ON public.wrapped_data_keys TO authenticated;
+DO $$ BEGIN
+  IF to_regclass('public.wrapped_data_keys') IS NULL THEN
+    RAISE NOTICE 'stealth and vault policy narrowing: public.wrapped_data_keys not present, skipped';
+  ELSE
+    EXECUTE 'ALTER POLICY "Recipients can read their own wrapped data keys" ON public.wrapped_data_keys TO authenticated';
+  END IF;
+END $$;
 
 -- Self check. Both halves are EQUALITIES rather than absence tests. An absence
 -- test passes while something new and unnoticed appears next to what it
 -- checked, which is the failure this whole series of migrations exists to
--- catch.
+-- catch. The expected sides are built from the tables this cluster holds, so
+-- the equality is still exact where a table is missing rather than being
+-- weakened into an "at least" test.
 DO $$
 DECLARE
   six CONSTANT text[] := ARRAY[
     'stealth_connections','stealth_scan_ranges','stealth_transactions',
     'stealth_utxos','workspace_admins','wrapped_data_keys'];
-  expected_authenticated CONSTANT text :=
-    'stealth_connections|Owners can read their stealth connections, '
-    'stealth_scan_ranges|Owners can read their stealth scan ranges, '
-    'stealth_transactions|Owners can read their stealth transactions, '
-    'stealth_utxos|owner read via connection, '
-    'workspace_admins|workspace_admins: owner and admin can read their rows, '
-    'wrapped_data_keys|Recipients can read their own wrapped data keys';
-  expected_public CONSTANT text :=
-    'workspace_admins|workspace_admins: owner can delete, '
-    'workspace_admins|workspace_admins: owner can insert, '
-    'wrapped_data_keys|wrapped_data_keys: owner can delete their wrapped keys, '
-    'wrapped_data_keys|wrapped_data_keys: owner can insert for admins';
+  -- The six read policies this file narrows, and the four write policies it
+  -- deliberately leaves addressed to public, as table|policy pairs so that the
+  -- expected sets can be filtered by what is present. The pairs are written out
+  -- literally on purpose: they are a measurement, and this must never become a
+  -- query over whatever policies happen to exist, which would assert nothing.
+  read_policies CONSTANT text[] := ARRAY[
+    'stealth_connections|Owners can read their stealth connections',
+    'stealth_scan_ranges|Owners can read their stealth scan ranges',
+    'stealth_transactions|Owners can read their stealth transactions',
+    'stealth_utxos|owner read via connection',
+    'workspace_admins|workspace_admins: owner and admin can read their rows',
+    'wrapped_data_keys|Recipients can read their own wrapped data keys'];
+  write_policies CONSTANT text[] := ARRAY[
+    'workspace_admins|workspace_admins: owner can delete',
+    'workspace_admins|workspace_admins: owner can insert',
+    'wrapped_data_keys|wrapped_data_keys: owner can delete their wrapped keys',
+    'wrapped_data_keys|wrapped_data_keys: owner can insert for admins'];
+  expected_authenticated text;
+  expected_public text;
+  absent text;
   actual text;
 BEGIN
+  -- 0. Say out loud which of the six this cluster does not have. Everything
+  --    below is scoped to what is present, so a reader of the deploy log needs
+  --    to be able to see what was excluded and why the sets are shorter.
+  SELECT string_agg(t, ', ' ORDER BY t) INTO absent
+    FROM unnest(six) AS s(t)
+   WHERE to_regclass('public.' || t) IS NULL;
+
+  IF absent IS NOT NULL THEN
+    RAISE NOTICE 'stealth and vault policy narrowing: table(s) not present on this cluster, so they were skipped above and are excluded from the assertions below: %', absent;
+  END IF;
+
+  SELECT coalesce(string_agg(e, ', ' ORDER BY split_part(e, '|', 1), split_part(e, '|', 2)), 'NONE')
+    INTO expected_authenticated
+    FROM unnest(read_policies) AS r(e)
+   WHERE to_regclass('public.' || split_part(e, '|', 1)) IS NOT NULL;
+
+  SELECT coalesce(string_agg(e, ', ' ORDER BY split_part(e, '|', 1), split_part(e, '|', 2)), 'NONE')
+    INTO expected_public
+    FROM unnest(write_policies) AS w(e)
+   WHERE to_regclass('public.' || split_part(e, '|', 1)) IS NOT NULL;
+
   -- 1. Every policy on these six tables that is still TO public must be one of
   --    the four write policies named above. Six read policies moved; nothing
   --    else on these tables may be addressed to public.
-  SELECT coalesce(string_agg(t || '|' || n, ', ' ORDER BY t, n), 'NONE') INTO actual
-    FROM (SELECT p.polrelid::regclass::text AS t, p.polname AS n
-            FROM pg_policy p
-           WHERE p.polrelid::regclass::text = ANY(six)
-             AND p.polroles = '{0}'::oid[]) s;
+  SELECT coalesce(string_agg(c.relname || '|' || p.polname, ', ' ORDER BY c.relname, p.polname), 'NONE')
+    INTO actual
+    FROM pg_policy p
+    JOIN pg_class c ON c.oid = p.polrelid
+    JOIN pg_namespace ns ON ns.oid = c.relnamespace
+   WHERE ns.nspname = 'public'
+     AND c.relname = ANY(six)
+     AND p.polroles = '{0}'::oid[];
 
   IF actual IS DISTINCT FROM expected_public THEN
     RAISE EXCEPTION
@@ -155,14 +270,18 @@ BEGIN
       actual, expected_public;
   END IF;
 
-  -- 2. The policies now addressed to the logged in role must be exactly the six
-  --    this file names. Not "at least": a set comparison also catches a policy
-  --    somebody else narrowed, or one added under a name nobody here knows.
-  SELECT coalesce(string_agg(t || '|' || n, ', ' ORDER BY t, n), 'NONE') INTO actual
-    FROM (SELECT p.polrelid::regclass::text AS t, p.polname AS n
-            FROM pg_policy p
-           WHERE p.polrelid::regclass::text = ANY(six)
-             AND p.polroles = ARRAY['authenticated'::regrole::oid]) s;
+  -- 2. The policies now addressed to the logged in role must be exactly the
+  --    ones this file names ON THE TABLES THIS CLUSTER HAS. Not "at least": a
+  --    set comparison also catches a policy somebody else narrowed, or one
+  --    added under a name nobody here knows.
+  SELECT coalesce(string_agg(c.relname || '|' || p.polname, ', ' ORDER BY c.relname, p.polname), 'NONE')
+    INTO actual
+    FROM pg_policy p
+    JOIN pg_class c ON c.oid = p.polrelid
+    JOIN pg_namespace ns ON ns.oid = c.relnamespace
+   WHERE ns.nspname = 'public'
+     AND c.relname = ANY(six)
+     AND p.polroles = ARRAY['authenticated'::regrole::oid];
 
   IF actual IS DISTINCT FROM expected_authenticated THEN
     RAISE EXCEPTION
@@ -170,27 +289,31 @@ BEGIN
       actual, expected_authenticated;
   END IF;
 
-  -- 3. The six must still be permissive SELECT policies. Narrowing the role is
-  --    not allowed to have changed anything else about them, and a restrictive
-  --    policy grants nothing at all, so this is not a formality.
-  SELECT coalesce(string_agg(t || '|' || n, ', ' ORDER BY t, n), 'NONE') INTO actual
-    FROM (SELECT p.polrelid::regclass::text AS t, p.polname AS n
-            FROM pg_policy p
-           WHERE p.polrelid::regclass::text = ANY(six)
-             AND p.polroles = ARRAY['authenticated'::regrole::oid]
-             AND p.polcmd = 'r'
-             AND p.polpermissive) s;
+  -- 3. Those policies must still be permissive SELECT policies. Narrowing the
+  --    role is not allowed to have changed anything else about them, and a
+  --    restrictive policy grants nothing at all, so this is not a formality.
+  SELECT coalesce(string_agg(c.relname || '|' || p.polname, ', ' ORDER BY c.relname, p.polname), 'NONE')
+    INTO actual
+    FROM pg_policy p
+    JOIN pg_class c ON c.oid = p.polrelid
+    JOIN pg_namespace ns ON ns.oid = c.relnamespace
+   WHERE ns.nspname = 'public'
+     AND c.relname = ANY(six)
+     AND p.polroles = ARRAY['authenticated'::regrole::oid]
+     AND p.polcmd = 'r'
+     AND p.polpermissive;
 
   IF actual IS DISTINCT FROM expected_authenticated THEN
     RAISE EXCEPTION
-      'stealth and vault tables: the six narrowed policies are no longer all permissive SELECT policies, found [%]',
+      'stealth and vault tables: the narrowed policies are no longer all permissive SELECT policies, found [%]',
       actual;
   END IF;
 
   -- 4. The anonymous role must still hold SELECT and nothing more on these six.
   --    This is what makes leaving four TO public write policies in place safe:
   --    they are unreachable for want of a privilege. If that ever stops being
-  --    true, this file is the wrong shape and should say so out loud.
+  --    true, this file is the wrong shape and should say so out loud. A table
+  --    that is not present simply does not match, so this needs no guard.
   SELECT coalesce(string_agg(DISTINCT c.relname || ':' || a.privilege_type, ', '), 'NONE') INTO actual
     FROM pg_class c
     JOIN pg_namespace ns ON ns.oid = c.relnamespace,
@@ -220,4 +343,6 @@ BEGIN
     RAISE EXCEPTION
       'or_agent_reader no longer bypasses row level security, so narrowing these policies can hide rows from the restricted read role';
   END IF;
+
+  RAISE NOTICE 'stealth and vault policy narrowing: end state verified. The read policies on every one of the six tables this cluster holds are addressed to authenticated and are still permissive SELECT policies, the only policies left addressed to public on those tables are the four write policies, and the anonymous role holds SELECT and nothing more.';
 END $$;

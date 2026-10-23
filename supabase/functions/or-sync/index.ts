@@ -1288,6 +1288,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
           // Polling cursor takes precedence (it's a real timestamp, 'or-sync'));
           // drain.next_cursor is unused under the webhook model.
           next_cursor = poll.next_cursor ?? drain.next_cursor;
+          // The Strike branch was the only one that never read the adapter's
+          // completeness, so `completeness` stayed at its 'active' default and
+          // a poll that lost a source was still written as a healthy sync.
+          // The two non-Strike branches below have always done this.
+          completeness = readSyncCompleteness(poll);
         } else if (sourceWallets && sourceWallets.length > 0) {
           const walletIds = sourceWallets.map((w: { external_wallet_id: string }) => w.external_wallet_id);
           const out = await adapter.syncByWallets(credentials, walletIds, conn.last_sync_cursor ?? null);
