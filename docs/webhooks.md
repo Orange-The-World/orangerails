@@ -35,7 +35,7 @@ load for platforms that haven't opted in).
 
 One row is enqueued per connection that completed successfully — so a
 multi-connection sync produces multiple webhook events, one per
-connection. A connection that fails does not emit `sync.completed`; it emits `connection.errored` instead (below). Empty syncs
+connection. A connection that fails does not emit `sync.completed`. If the provider reports an explicit error for it, `connection.errored` may be sent instead (below). Empty syncs
 (`synced_count: 0`) still emit; consumers that want only non-empty
 events can filter on the field.
 
@@ -62,7 +62,7 @@ After all consumers migrate to `@orangerails/webhooks` (target end Q3 2026), the
 
 ### `connection.errored`
 
-Sent when a connection reports an explicit error from its provider and cannot sync until the problem is resolved. It lets an integrator tell the end user, for example with a reconnect prompt, instead of showing stale numbers with no explanation. Today it is sent for connections that sync through Quiltt. Other providers will use the same shape.
+Sent when a connection reports an explicit error from its provider and cannot sync until the problem is resolved. It lets an integrator tell the end user, for example with a reconnect prompt, instead of showing stale numbers with no explanation. It applies to connections that sync through Quiltt. Other providers will use the same shape.
 
 The payload is `{ type, data }` only. This event has no legacy flat fields.
 
