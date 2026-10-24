@@ -38,7 +38,13 @@ permissions:
 
 jobs:
   webhooks-package:
-    name: Webhooks package (typecheck, test, build)
+    # One job per script, so a red check names what failed and one failure cannot hide the
+    # others (a single job stops at its first failing step).
+    name: Webhooks package (${{ matrix.script }})
+    strategy:
+      fail-fast: false
+      matrix:
+        script: [typecheck, test, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     defaults:
@@ -52,11 +58,5 @@ jobs:
         # No lockfile in the package, so this is install and not ci. See the header.
         run: npm install --no-audit --no-fund
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Test
-        run: npm test
-
-      - name: Build
-        run: npm run build
+      - name: Run ${{ matrix.script }}
+        run: npm run ${{ matrix.script }}
