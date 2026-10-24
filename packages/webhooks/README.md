@@ -30,10 +30,12 @@ try {
   });
 
   // event.id   , UUID from X-OR-Event-Id, use for consumer side dedupe
-  // event.type , typed union ('sync.completed' | future event types)
+  // event.type , typed union ('sync.completed' | 'connection.errored')
   // event.data , typed payload matching event.type
   if (event.type === "sync.completed") {
     await enqueueSync(event.data.subaccount_id, event.data.connection_id);
+  } else if (event.type === "connection.errored" && event.data.repairable) {
+    await showReconnectPrompt(event.data.connection_id);
   }
 } catch (err) {
   // SignatureVerificationError (or subclass) , payload should not be trusted
@@ -77,6 +79,8 @@ import {
   MissingSignatureError,
   type Event,
   type SyncCompletedEvent,
+  type ConnectionErroredEvent,
+  type ConnectionErroredReasonCode,
   type EventType,
   computeHmacSha256Hex,
   timingSafeEqualHex,
@@ -107,6 +111,36 @@ interface SyncCompletedEvent {
   };
 }
 ```
+
+### `connection.errored`
+
+Sent when a connection reports an explicit error and cannot sync until it is resolved. Use it to tell the end user instead of showing stale data.
+
+```ts
+interface ConnectionErroredEvent {
+  id: string;
+  type: "connection.errored";
+  data: {
+    subaccount_id: string;
+    connection_id: string;
+    reason_code: ConnectionErroredReasonCode;
+    repairable: boolean;
+  };
+}
+
+type ConnectionErroredReasonCode =
+  | "USER_ACTION_REQUIRED"
+  | "INSTITUTION_ERROR"
+  | "PROVIDER_ERROR"
+  | "SERVICE_ERROR"
+  | "UNKNOWN";
+```
+
+- The payload is exactly these four fields. `reason_code` is a closed list, so it never carries provider text.
+- `repairable` is `true` only when reconnecting is the documented fix. Show a reconnect prompt only for `true`. `false` does not mean the connection recovers by itself.
+- At most one per connection in any rolling 24 hours. Key your handling on `connection_id` so a repeat is harmless.
+- A later `sync.completed` for the same `connection_id` means it is syncing again.
+- `constructEvent` throws for an event type this version of the SDK does not know. Upgrade the package before relying on a new type, and answer 2xx for event types you do not handle (see `docs/webhooks.md`).
 
 ## Runtime support
 

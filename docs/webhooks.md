@@ -31,10 +31,11 @@ load for platforms that haven't opted in).
 | Event            | Emitted by   | Payload fields                                                |
 |------------------|--------------|---------------------------------------------------------------|
 | `sync.completed` | `or-sync`    | `event`, `subaccount_id`, `connection_id`, `synced_count`, `ts` |
+| `connection.errored` | `or-quiltt-sync` | `subaccount_id`, `connection_id`, `reason_code`, `repairable` |
 
 One row is enqueued per connection that completed successfully — so a
 multi-connection sync produces multiple webhook events, one per
-connection. Failed connections do not emit. Empty syncs
+connection. A connection that fails does not emit `sync.completed`; it emits `connection.errored` instead (below). Empty syncs
 (`synced_count: 0`) still emit; consumers that want only non-empty
 events can filter on the field.
 
@@ -58,6 +59,46 @@ Example payload (dual-shape — both flat and nested fields are emitted during t
 ```
 
 After all consumers migrate to `@orangerails/webhooks` (target end Q3 2026), the top-level `event` and flat fields will be removed and only `{ type, data }` will remain — matching Stripe / Linear / Shopify convention.
+
+### `connection.errored`
+
+Sent when a connection reports an explicit error from its provider and cannot sync until the problem is resolved. It lets an integrator tell the end user, for example with a reconnect prompt, instead of showing stale numbers with no explanation. Today it is sent for connections that sync through Quiltt. Other providers will use the same shape.
+
+The payload is `{ type, data }` only. This event has no legacy flat fields.
+
+```json
+{
+  "type": "connection.errored",
+  "data": {
+    "subaccount_id": "11111111-1111-1111-1111-111111111111",
+    "connection_id": "22222222-2222-2222-2222-222222222222",
+    "reason_code": "USER_ACTION_REQUIRED",
+    "repairable": true
+  }
+}
+```
+
+`data` is exactly these four fields. It never carries a raw provider message, free text, an amount or an institution name.
+
+| `reason_code`          | `repairable` | Meaning                                                                          |
+|------------------------|--------------|----------------------------------------------------------------------------------|
+| `USER_ACTION_REQUIRED` | `true`       | The end user must complete the provider's reconnect flow before syncing resumes. |
+| `INSTITUTION_ERROR`    | `false`      | The provider reports an error with the connected institution.                    |
+| `PROVIDER_ERROR`       | `false`      | The provider reports an error with the connection.                               |
+| `SERVICE_ERROR`        | `false`      | An unexpected error occurred while syncing the connection.                       |
+| `UNKNOWN`              | `false`      | The provider reported an error of a kind this list does not cover.               |
+
+The list is closed. A new code is a change to this contract. Treat a code you do not recognise as `UNKNOWN`.
+
+`repairable: true` means reconnecting is the documented fix. `repairable: false` means reconnecting is not the documented fix. It does not promise that the connection recovers on its own, so do not show a reconnect prompt on a `false` event alone.
+
+When it is sent:
+
+- Only for an explicit error signal from the provider. A connection that is merely quiet or stale does not produce this event.
+- At most one per connection in any rolling 24 hours. A connection that stays in error can produce a repeat about once a day, never more often.
+- Not sent when the error cannot be tied to a connection that OR knows about.
+- A later `sync.completed` for the same `connection_id` means the connection is syncing again. There is no separate recovery event.
+- Handle it as a statement of state keyed by `connection_id`: the connection is in error. A repeat for the same `connection_id` must be harmless. A second delivery with the same `X-OR-Event-Id` is a retry of one event and is dropped, as for every event.
 
 ## Signature scheme
 
@@ -135,3 +176,12 @@ schedule (cron-eligible; recommended every 30-60s).
 Consumers should respond with 2xx as soon as the event is durably
 queued on their side (do not block on downstream work). Anything
 slower than ~10s risks platform-side timeouts and a wasted retry.
+
+### Non-2xx responses and event types you do not handle
+
+This applies to every event type, including `connection.errored`.
+
+- A non-2xx response, a timeout or a connection failure is retried as described above: at most 5 attempts per event, then the row is left in the queue and is not sent again.
+- OR does not know which event types an endpoint handles. An event type your endpoint rejects counts as any other non-2xx and uses the same retry budget.
+- Verify the signature, then answer 2xx for event types you do not handle. Do not return an error just because a type is new to you.
+- For `connection.errored` the volume is bounded. A receiver that rejects every one of them sees at most 5 requests per event, and at most one event per connection in any rolling 24 hours.
