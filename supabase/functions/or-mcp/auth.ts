@@ -11,13 +11,23 @@
  * signature and the expiry and confirms the user still exists, so a forged,
  * expired or revoked token gets a non-200 and the request is refused with
  * 401. Anything other than HTTP 200 is a refusal, including GoTrue being
- * unreachable (fail closed).
+ * unreachable or not answering within GOTRUE_DEADLINE_MS (fail closed). A hung
+ * auth service therefore ends in a fast 401 instead of tying up the function
+ * worker (OR-T0421 step 5).
  *
  * This does not depend on the platform verify_jwt setting for the function.
  *
  * The claims decoded below come from the token payload without a signature
- * check, so they are only trusted once GoTrue has accepted the token.
+ * check. GoTrue accepting the token proves the token is genuine, not that the
+ * claim values are true: they come from user_metadata, which is normally
+ * writable by the user it belongs to. See extractAgentClaims.
  */
+
+/**
+ * How long the GoTrue check may take. Past this the call is aborted and the
+ * request is refused with 401, the same outcome as GoTrue being unreachable.
+ */
+const GOTRUE_DEADLINE_MS = 200;
 
 export type AgentClaims = {
   agent_member_id: string;
@@ -54,6 +64,12 @@ function decodeJwtPayload(jwt: string) {
 function extractAgentClaims(jwt: string): AgentClaims | null {
   const payload = decodeJwtPayload(jwt);
   if (!payload) return null;
+  // Treat these claims as unverified input. GoTrue accepting the token proves
+  // the token is genuine, not that user_metadata values are true: that field
+  // is normally writable by the user it belongs to. They are echo-only today
+  // (orca.ping returns them and decides nothing). Any tool that authorizes on
+  // ownership or membership must read it from a server-side table or from
+  // app_metadata.
   const userMeta = payload.user_metadata ?? {};
   if (!userMeta.is_shadow_agent) return null;
   const agentMemberId = userMeta.agent_member_id;
@@ -74,17 +90,26 @@ function extractAgentClaims(jwt: string): AgentClaims | null {
 async function gotrueAcceptsToken(jwt: string, deps: AuthDeps): Promise<boolean> {
   const doFetch: (url: string, init: RequestInit) => Promise<Response> =
     deps.fetchImpl ?? ((url, init) => fetch(url, init));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), GOTRUE_DEADLINE_MS);
   try {
     const res = await doFetch(`${deps.supabaseUrl}/auth/v1/user`, {
+      signal: controller.signal,
       headers: {
         Authorization: `Bearer ${jwt}`,
         apikey: deps.anonKey || jwt
       }
     });
     await res.body?.cancel().catch(() => {});
+    if (res.status === 429) console.warn('or-mcp auth: GoTrue rate limited the token check (429)');
     return res.status === 200;
   } catch {
+    // Unreachable, or aborted at the deadline: both refuse. Say which, so a
+    // slow auth service shows in the function logs instead of as bare 401s.
+    if (controller.signal.aborted) console.warn(`or-mcp auth: GoTrue did not answer within ${GOTRUE_DEADLINE_MS} ms`);
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
