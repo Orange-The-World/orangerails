@@ -126,6 +126,96 @@ function scanFile(path: string, contents: string): Finding[] {
   return findings;
 }
 
+/**
+ * Multi-line postMessage context scanner.
+ *
+ * For each non-comment line that contains `postMessage(`, collects:
+ *   - Up to 14 non-comment lines of context before it
+ *   - The call text from that line to the matching closing ')', up to 40 lines
+ *
+ * Strips string literals from the collected block, then flags if any
+ * SENSITIVE_NAMES member or any identifier matching /password/i appears in
+ * what remains. This catches build-by-assignment patterns like:
+ *   const payload = {};
+ *   payload.vaultPassword = pw;   // sensitive identifier, different line
+ *   window.opener?.postMessage(payload, origin);
+ * where a same-line rule cannot fire.
+ */
+function scanFileMultiLine(path: string, contents: string): Finding[] {
+  const findings: Finding[] = [];
+  const lines = contents.split('\n');
+
+  function isCommentLine(l: string): boolean {
+    const t = l.trim();
+    return t.startsWith('//') || t.startsWith('*') || t.startsWith('/*');
+  }
+
+  function stripStringLiterals(text: string): string {
+    let s = text.replace(/`(?:[^`\\]|\\.)*`/g, '``');
+    s = s.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+    s = s.replace(/'(?:[^'\\]|\\.)*'/g, "''");
+    return s;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isCommentLine(line)) continue;
+
+    const pmIdx = line.indexOf('postMessage(');
+    if (pmIdx === -1) continue;
+
+    // Collect up to 14 non-comment context lines before this line (in order)
+    const contextBefore: string[] = [];
+    for (let j = i - 1; j >= 0 && contextBefore.length < 14; j--) {
+      if (!isCommentLine(lines[j])) contextBefore.unshift(lines[j]);
+    }
+
+    // Walk from postMessage( to the matching closing ')' (cap 40 lines)
+    const callLines: string[] = [line];
+    let depth = 0;
+    let done = false;
+    for (const ch of line.slice(pmIdx)) {
+      if (ch === '(') depth++;
+      else if (ch === ')') {
+        depth--;
+        if (depth === 0) { done = true; break; }
+      }
+    }
+    if (!done) {
+      for (let k = i + 1; k < lines.length && k - i < 40; k++) {
+        callLines.push(lines[k]);
+        for (const ch of lines[k]) {
+          if (ch === '(') depth++;
+          else if (ch === ')') {
+            depth--;
+            if (depth === 0) { done = true; break; }
+          }
+        }
+        if (done) break;
+      }
+    }
+
+    const block = [...contextBefore, ...callLines].join('\n');
+    const stripped = stripStringLiterals(block);
+
+    let flagged = false;
+    for (const sens of SENSITIVE_NAMES) {
+      if (stripped.includes(sens)) {
+        findings.push({ file: path, line: i + 1, text: line.trim(), sensitive: sens, verb: 'postMessage' });
+        flagged = true;
+        break;
+      }
+    }
+    if (!flagged && /password/i.test(stripped)) {
+      const m = stripped.match(/\b\w*password\w*\b/i);
+      const ident = m ? m[0] : 'password';
+      findings.push({ file: path, line: i + 1, text: line.trim(), sensitive: ident, verb: 'postMessage' });
+    }
+  }
+
+  return findings;
+}
+
 describe('CR-01 , vault_password never leaves the browser (static check)', () => {
   test('no source file routes a sensitive identifier to a leak verb', async () => {
     const files = await listTsFiles(SRC_ROOT);
