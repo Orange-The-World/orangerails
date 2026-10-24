@@ -107,6 +107,7 @@ async function gotrueAcceptsToken(jwt: string, deps: AuthDeps): Promise<boolean>
     // Unreachable, or aborted at the deadline: both refuse. Say which, so a
     // slow auth service shows in the function logs instead of as bare 401s.
     if (controller.signal.aborted) console.warn(`or-mcp auth: GoTrue did not answer within ${GOTRUE_DEADLINE_MS} ms`);
+    else console.warn('or-mcp auth: GoTrue check failed with no answer');
     return false;
   } finally {
     clearTimeout(timer);

@@ -48,14 +48,22 @@ const FORGED = [
   'not-the-real-signature'
 ].join('.');
 
+// 204, 205 and 304 are null-body statuses. The Response constructor throws if it is
+// given a body with one of them. That would make a stubbed GoTrue answer of 204 look
+// like a thrown error: refused by the catch, never reaching the status comparison.
+// The answered list records each status the stub really returned, so a test can prove it.
 function stubGoTrue(status: number) {
   const calls: Array<{ url: string; authorization: string | null }> = [];
+  const answered: number[] = [];
+  const nullBody = status === 204 || status === 205 || status === 304;
   const fetchImpl = (url: string, init: RequestInit) => {
     const headers = new Headers(init.headers);
     calls.push({ url, authorization: headers.get('Authorization') });
-    return Promise.resolve(new Response(JSON.stringify({ msg: 'stub' }), { status }));
+    const res = new Response(nullBody ? null : JSON.stringify({ msg: 'stub' }), { status });
+    answered.push(status);
+    return Promise.resolve(res);
   };
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, answered };
 }
 
 function rpcRequest(method: string, token: string | null): Request {
@@ -102,16 +110,29 @@ Deno.test('any non-200 from GoTrue is a refusal', async () => {
       fetchImpl: gotrue.fetchImpl
     });
     assertEquals(result.ok, false, `status ${status} must be refused`);
+    assertEquals(gotrue.answered, [status], `the stub must answer ${status}, not throw, so the refusal comes from the status check`);
   }
 });
 
-Deno.test('GoTrue unreachable fails closed', async () => {
-  const result = await authenticateRequest(rpcRequest('tools/list', FORGED), {
-    supabaseUrl: SUPABASE_URL,
-    fetchImpl: () => Promise.reject(new Error('connection refused'))
-  });
-  assertEquals(result.ok, false);
-  if (!result.ok) assertEquals(result.status, 401);
+Deno.test('GoTrue unreachable fails closed and logs one fixed line', async () => {
+  const warnings: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(' '));
+  };
+  try {
+    const result = await authenticateRequest(rpcRequest('tools/list', FORGED), {
+      supabaseUrl: SUPABASE_URL,
+      fetchImpl: () => Promise.reject(new Error('connection refused'))
+    });
+    assertEquals(result.ok, false);
+    if (!result.ok) assertEquals(result.status, 401);
+  } finally {
+    console.warn = originalWarn;
+  }
+  assertEquals(warnings.length, 1, 'an unreachable GoTrue must leave exactly one log line');
+  assert(!warnings[0].includes('connection refused'), 'the log line must not carry the error text');
+  assert(!warnings[0].includes(FORGED), 'the log line must not carry the token');
 });
 
 Deno.test('a GoTrue that never answers is refused with 401 inside the deadline', async () => {
