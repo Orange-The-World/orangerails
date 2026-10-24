@@ -1,9 +1,11 @@
 /**
  * postMessage verb contract for the /connect widget.
  *
- * Three protections in one file:
+ * Three protections in one file for the opener credential-key handoff:
  *   1. POST_MESSAGE_VERBS is the closed, authoritative allowlist of every
- *      message type the widget may receive from external windows.
+ *      message type the widget may receive via window.opener.postMessage
+ *      during the credential-key exchange. Other inbound channels (e.g. the
+ *      inline Stealth Sync iframe) are governed by separate listeners.
  *   2. PayloadMap types every verb's payload -- no entry may carry a
  *      password-adjacent field. The compile-time _NoPasswordField guard
  *      enforces this on every `tsc --noEmit` run in CI.
@@ -82,30 +84,47 @@ type PayloadMap = {
 // -------------------------------------------------------------------------
 
 /**
- * Mapped type that resolves to `never` if ANY PayloadMap entry ever gains
- * a field named 'password', 'vault_password', or 'raw_password'.
- *
- * The only purpose of this type is the `_guard` const below it. It is
- * intentionally not exported.
+ * Sensitive key substrings matched case-insensitively via Lowercase<K>.
+ * A payload key whose lowercase form contains any of these as a substring
+ * is treated as password-adjacent and triggers the guard.
  */
-type _NoPasswordField = {
-  [V in PostMessageVerb]: 'password' extends keyof PayloadMap[V]
-    ? never
-    : 'vault_password' extends keyof PayloadMap[V]
-      ? never
-      : 'raw_password' extends keyof PayloadMap[V]
-        ? never
-        : true;
+type _SensitiveKeySubstring = 'password' | 'passwd' | 'passphrase' | 'mek' | 'recovery';
+
+/**
+ * Union of keys in T whose Lowercase form contains any _SensitiveKeySubstring.
+ * Resolves to `never` when no such key exists.
+ */
+type _SensitiveKeysOf<T> = {
+  [K in keyof T]-?: K extends string
+    ? Lowercase<K> extends `${string}${_SensitiveKeySubstring}${string}`
+      ? K
+      : never
+    : never;
+}[keyof T];
+
+/**
+ * Union of POST_MESSAGE_VERBS whose PayloadMap entry carries at least one
+ * password-adjacent key (matched case-insensitively by substring). Resolves
+ * to `never` when every verb is clean.
+ *
+ * Note: this guard runs only when `tsc --noEmit` is invoked. CI does not run
+ * `tsc --noEmit` on src/ today (RISK-0007, PR #969), so this is a local
+ * developer check, not an automated gate.
+ */
+type _OffendingVerbs = {
+  [V in PostMessageVerb]: [_SensitiveKeysOf<PayloadMap[V]>] extends [never] ? never : V;
 }[PostMessageVerb];
 
 /**
- * Compile-time assertion. `tsc --noEmit` fails with a type error here if
- * _NoPasswordField ever resolves to `never` (i.e. a payload gained a
- * password-adjacent field). Adding `// @ts-ignore` above this line to
- * silence the error is itself a code-review finding.
+ * Compile-time assertion. `tsc --noEmit` fails with a type error here if any
+ * PayloadMap entry carries a key whose Lowercase form contains 'password',
+ * 'passwd', 'passphrase', 'mek', or 'recovery' as a substring. Adding
+ * `// @ts-ignore` above this line to silence the error is a code-review finding.
  */
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _guard: _NoPasswordField = true;
+const _guard: [_OffendingVerbs] extends [never]
+  ? true
+  : { error: 'A PayloadMap entry carries a password-adjacent key'; verbs: _OffendingVerbs } = true;
 
 // -------------------------------------------------------------------------
 // Layer 1d: Runtime guard helper
