@@ -3,6 +3,6 @@
   "measured": "2026-09-25 against dev project fzwmnzmtqidumdqjdddz, re-queried live (pg_class/pg_attribute) as part of OR-T0835. 55 live base tables in public (views excluded, out of scope); 54 now declared in the type file, matching live column counts table by table. _or_migration_hashes is the one deliberate exception, see its own waiver below.",
   "clears_with": "OR-T0835",
   "waived": {
-    "_or_migration_hashes": { "reason": "live table absent from the type file, new since the 2026-09-12 measurement. No migration file creates it and no code references it (checked branch dev); grant to a custom role (or_agent_reader) shows deliberate provisioning, not accidental. Not present on prod. Needs an owner to formalize with a migration or drop it, see OR-T2728", "ticket": "OR-T2728" }
+    "_or_migration_hashes": { "reason": "OWNED by the deploy workflow, owner DBA, end state decided under OR-T1252: .github/workflows/supabase-deploy.yml creates it (CREATE TABLE IF NOT EXISTS plus ENABLE ROW LEVEL SECURITY, read back before use) ahead of the migration content scan and records one sha256 per migration at first apply. Deliberately NOT a migration file: the scan needs the table before the apply loop runs, and a migration exists only once that loop has applied it. No app code reads it, so it stays out of the generated type file and this waiver stays. Absent on prod until the first prod apply after that workflow change merges; created there with RLS on, no policies.", "ticket": "OR-T1252" }
   }
 }
