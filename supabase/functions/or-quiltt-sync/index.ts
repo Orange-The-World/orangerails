@@ -29,6 +29,7 @@ import { createClient, SupabaseClient } from 'https://esm.sh/@supabase/supabase-
 import { OPK_SEAL_ALG, decodeOpkPublicKey, sealToOpk } from '../_shared/opk-seal.ts';
 import { wrapSentryHandler } from '../_shared/sentry.ts';
 import { buildSyncCompletedPayload } from '../_shared/webhook-events.ts';
+import { enqueueConnectionErrored } from './connection-errored.ts';
 import {
   chooseFallbackConnection,
   chooseProfileId,
@@ -418,6 +419,12 @@ export async function handleEvent(
   if (ev.event_type.startsWith('connection.synced.errored')) {
     const reconcileErr = await reconcileConnectionError(client, ev, subaccountId);
     if (reconcileErr) return reconcileErr;
+    // Tell the integrator the connection is broken (connection.errored). Best-effort:
+    // a failure here must not retry this event, which would run the reconcile again.
+    // The reconcile above also returns null without writing (no row, an ambiguous legacy
+    // row, or a newer success already healed it), so the enqueue checks the row is in
+    // status error itself before it sends anything.
+    await enqueueConnectionErrored(client, ev, platformId, subaccountId);
     return 'processed';
   }
 

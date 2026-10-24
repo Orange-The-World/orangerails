@@ -97,3 +97,71 @@ export function buildSyncCompletedPayload(
     data,
   };
 }
+
+/** Event name for a connection that reports an explicit error. */
+export const CONNECTION_ERRORED = 'connection.errored' as const;
+
+/**
+ * Closed list of reasons. Matches ConnectionErroredReasonCode in
+ * packages/webhooks/src/types.ts EXACTLY, so keep the two in step. Never a
+ * raw provider message or free text.
+ */
+export type ConnectionErroredReasonCode =
+  | 'USER_ACTION_REQUIRED'
+  | 'INSTITUTION_ERROR'
+  | 'PROVIDER_ERROR'
+  | 'SERVICE_ERROR'
+  | 'UNKNOWN';
+
+/**
+ * Map a Quiltt event type to the closed reason code and the repairable flag.
+ *
+ * Only connection.synced.errored.repairable is documented as needing the end
+ * user to reconnect, so only it is repairable. Any other suffix, and the bare
+ * prefix, maps to UNKNOWN: the list stays closed if Quiltt adds a subtype.
+ */
+export function connectionErroredReason(eventType: string): {
+  reasonCode: ConnectionErroredReasonCode;
+  repairable: boolean;
+} {
+  switch (eventType) {
+    case 'connection.synced.errored.repairable':
+      return { reasonCode: 'USER_ACTION_REQUIRED', repairable: true };
+    case 'connection.synced.errored.institution':
+      return { reasonCode: 'INSTITUTION_ERROR', repairable: false };
+    case 'connection.synced.errored.provider':
+      return { reasonCode: 'PROVIDER_ERROR', repairable: false };
+    case 'connection.synced.errored.service':
+      return { reasonCode: 'SERVICE_ERROR', repairable: false };
+    default:
+      return { reasonCode: 'UNKNOWN', repairable: false };
+  }
+}
+
+export interface ConnectionErroredInput {
+  subaccountId: string;
+  /** The OR connections.id, not the provider's connection id. */
+  connectionId: string;
+  reasonCode: ConnectionErroredReasonCode;
+  repairable: boolean;
+}
+
+/**
+ * Build the wire payload for a connection.errored delivery.
+ *
+ * { type, data } only: a new event has no legacy receivers, so there are no
+ * flat fields. `data` is exactly ConnectionErroredEvent['data'] in
+ * packages/webhooks. Do not add fields without changing that type and the
+ * contract in docs/webhooks.md in the same change.
+ */
+export function buildConnectionErroredPayload(input: ConnectionErroredInput) {
+  return {
+    type: CONNECTION_ERRORED,
+    data: {
+      subaccount_id: input.subaccountId,
+      connection_id: input.connectionId,
+      reason_code: input.reasonCode,
+      repairable: input.repairable,
+    },
+  };
+}
