@@ -29,6 +29,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { POST_MESSAGE_VERBS, type PostMessageVerb } from '@/lib/postmessage-contract';
 
 const SRC_ROOT = join(process.cwd(), 'src');
 
@@ -158,20 +159,52 @@ describe('CR-01 , vault_password never leaves the browser (static check)', () =>
     expect(LEAK_VERBS.length).toBeGreaterThan(0);
   });
 
-  test('CR-01 fires on vaultPassword + postMessage (proves the check can go red)', () => {
-    // This is the exact reintroduction path the check was written to catch:
-    // OR-T2704 removed vault_password from an outgoing postMessage payload in
-    // src/routes/connect.tsx. If anyone re-adds it, this test must go red
-    // before the change reaches CI review.
-    const syntheticPath = '/fake/src/routes/connect.tsx';
-    const syntheticContent = [
-      '// normal line',
-      'window.opener.postMessage({ vaultPassword: password }, origin);',
-      '// another normal line',
-    ].join('\n');
-    const findings = scanFile(syntheticPath, syntheticContent);
-    expect(findings).toHaveLength(1);
-    expect(findings[0].sensitive).toBe('vaultPassword');
-    expect(findings[0].verb).toBe('postMessage');
-  });
+  // ---------------------------------------------------------------------------
+  // Per-verb synthetic leak lines.
+  //
+  // Typed as Record<PostMessageVerb, string>: adding a new verb to
+  // POST_MESSAGE_VERBS without a corresponding entry here causes a TypeScript
+  // compile error, forcing the author to write an explicit test case before CI
+  // passes. Test count = allowlist length (enforced by the loop below).
+  // ---------------------------------------------------------------------------
+  const VERB_TEST_LINES: Record<PostMessageVerb, string> = {
+    'or-cred-key-ready':
+      "window.opener.postMessage({ type: 'or-cred-key-ready', vaultPassword: password }, origin);",
+  };
+
+  test(
+    'CR-01 fires on vaultPassword + postMessage for every allowed verb' +
+      ' (test count equals allowlist length)',
+    () => {
+      // This loop is the canonical red-path proof for the verb allowlist:
+      // OR-T2704 removed vault_password from the outgoing postMessage payload;
+      // OR-T2722 adds a structural guard so the check stays current even as
+      // the verb list grows. Adding a verb to POST_MESSAGE_VERBS without
+      // adding a VERB_TEST_LINES entry is a TypeScript error; adding an entry
+      // whose synthetic line does NOT trip CR-01 is caught here at runtime.
+      expect(POST_MESSAGE_VERBS.length).toBeGreaterThan(0);
+      for (const verb of POST_MESSAGE_VERBS) {
+        const syntheticPath = '/fake/src/routes/connect.tsx';
+        const syntheticContent = [
+          '// normal line',
+          VERB_TEST_LINES[verb],
+          '// another normal line',
+        ].join('\n');
+        const findings = scanFile(syntheticPath, syntheticContent);
+        expect(
+          findings.length,
+          `CR-01 did not fire for verb "${verb}" -- ` +
+            `VERB_TEST_LINES['${verb}'] must include a sensitive name on the same line as postMessage`,
+        ).toBeGreaterThan(0);
+        expect(
+          findings.some((f) => f.verb === 'postMessage'),
+          `finding for verb "${verb}" should name postMessage as the leak verb`,
+        ).toBe(true);
+        expect(
+          findings.some((f) => f.sensitive === 'vaultPassword'),
+          `finding for verb "${verb}" should name vaultPassword as the sensitive identifier`,
+        ).toBe(true);
+      }
+    },
+  );
 });
