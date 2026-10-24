@@ -2145,11 +2145,12 @@ jobs:
           # names the same owner.
           #
           # ROW LEVEL SECURITY is enabled in the SAME request that creates the
-          # table, and read back below. Do not rely on the ensure_rls event
-          # trigger: dev has it and prod does not, so a bare CREATE TABLE
-          # passes on dev and would leave RLS off on prod, where the RLS
-          # assertion would then go red. No policies are added: the owner and
-          # service_role bypass RLS, which is all this workflow needs.
+          # table, and read back below. Do not rely on a database-side
+          # trigger to switch RLS on: projects differ in whether they have
+          # one, so a bare CREATE TABLE can pass on one target and leave RLS
+          # off on another, where the RLS assertion would then go red. No
+          # policies are added: the owner and service_role bypass RLS, which
+          # is all this workflow needs.
           #
           # A version applied before this scan existed has no row here and
           # is UNVERIFIABLE for content, the same accepted, disclosed shape
