@@ -224,6 +224,7 @@ describe('CR-01 , vault_password never leaves the browser (static check)', () =>
       if (isAllowed(file)) continue;
       const contents = await readFile(file, 'utf8');
       findings.push(...scanFile(file, contents));
+      findings.push(...scanFileMultiLine(file, contents));
     }
 
     if (findings.length > 0) {
@@ -295,6 +296,118 @@ describe('CR-01 , vault_password never leaves the browser (static check)', () =>
           `finding for verb "${verb}" should name vaultPassword as the sensitive identifier`,
         ).toBe(true);
       }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // Multi-line context scanner fixtures (CR-01 postMessage window rule).
+  //
+  // Each red fixture must produce at least 1 finding; each clean fixture must
+  // produce 0. This proves the rule can both fire and stay silent in one CI
+  // run (neither author nor reviewer has shell access for manual verification).
+  // Fixtures are verbatim lines from the repo per OR-T2722 review note.
+  // ---------------------------------------------------------------------------
+  test(
+    'CR-01 postMessage context rule fires on injected patterns; stays silent on clean code',
+    () => {
+      const FAKE = '/fake/src/routes/connect.tsx';
+
+      // Fixture H: the three pre-fix production lines (OR-T2704 era).
+      // 'password' appears on a line before postMessage(). The same-line rule
+      // misses this; the context window rule catches it.
+      const H = [
+        'const msg: Record<string, unknown> = { type: "or-need-cred-key" };',
+        'if (password) msg.password = password;',
+        'opener.postMessage(msg, openerOrigin);',
+      ].join('\n');
+
+      // Fixture M: connect.tsx L297-300 with vaultPassword added to payload.
+      const M = [
+        'opener.postMessage(',
+        '  { type: "or-need-cred-key", purpose: CRED_KEY_HANDOFF_PURPOSE, vaultPassword: vaultPassword },',
+        '  openerOrigin,',
+        ');',
+      ].join('\n');
+
+      // Fixture V: connect.tsx L1466-1480 with successPayload.vaultPassword
+      // assigned before the send.
+      const V = [
+        '      const successPayload: Record<string, unknown> = {',
+        '        type: "or-link-success",',
+        '        source_wallets: enrichedSourceWallets,',
+        '        subaccount_id: result.subaccount_id,',
+        '        connection_id: result.connection_id,',
+        '      };',
+        '      if (enrichedSourceWallets.length === 1) {',
+        '        const only = enrichedSourceWallets[0];',
+        '        successPayload.sourceWalletId = only.id;',
+        '        successPayload.currency = only.currency;',
+        '        successPayload.walletName = only.label;',
+        '        successPayload.externalId = only.external_wallet_id;',
+        '      }',
+        '      successPayload.vaultPassword = vaultPassword;',
+        '      window.opener?.postMessage(successPayload, targetOrigin);',
+      ].join('\n');
+
+      // Red path: every injected fixture must produce at least 1 finding.
+      expect(
+        scanFileMultiLine(FAKE, H).length,
+        'H (pre-fix lines: password on preceding line): expected >= 1 finding',
+      ).toBeGreaterThan(0);
+      expect(
+        scanFileMultiLine(FAKE, M).length,
+        'M (vaultPassword inside postMessage call): expected >= 1 finding',
+      ).toBeGreaterThan(0);
+      expect(
+        scanFileMultiLine(FAKE, V).length,
+        'V (successPayload.vaultPassword assigned before send): expected >= 1 finding',
+      ).toBeGreaterThan(0);
+
+      // Green path: same blocks without the injected identifier must be silent.
+
+      // H-clean: remove the password assignment line.
+      const H_CLEAN = [
+        'const msg: Record<string, unknown> = { type: "or-need-cred-key" };',
+        'opener.postMessage(msg, openerOrigin);',
+      ].join('\n');
+      expect(
+        scanFileMultiLine(FAKE, H_CLEAN).length,
+        'H-clean (no password line): expected 0 findings',
+      ).toBe(0);
+
+      // M-clean: connect.tsx L297-300 as currently written, no injected field.
+      const M_CLEAN = [
+        'opener.postMessage(',
+        '  { type: "or-need-cred-key", purpose: CRED_KEY_HANDOFF_PURPOSE },',
+        '  openerOrigin,',
+        ');',
+      ].join('\n');
+      expect(
+        scanFileMultiLine(FAKE, M_CLEAN).length,
+        'M-clean (no vaultPassword): expected 0 findings',
+      ).toBe(0);
+
+      // V-clean: connect.tsx L1466-1480 as currently written, no injected assignment.
+      const V_CLEAN = [
+        '      const successPayload: Record<string, unknown> = {',
+        '        type: "or-link-success",',
+        '        source_wallets: enrichedSourceWallets,',
+        '        subaccount_id: result.subaccount_id,',
+        '        connection_id: result.connection_id,',
+        '      };',
+        '      if (enrichedSourceWallets.length === 1) {',
+        '        const only = enrichedSourceWallets[0];',
+        '        successPayload.sourceWalletId = only.id;',
+        '        successPayload.currency = only.currency;',
+        '        successPayload.walletName = only.label;',
+        '        successPayload.externalId = only.external_wallet_id;',
+        '      }',
+        '      window.opener?.postMessage(successPayload, targetOrigin);',
+      ].join('\n');
+      expect(
+        scanFileMultiLine(FAKE, V_CLEAN).length,
+        'V-clean (no vaultPassword assignment): expected 0 findings',
+      ).toBe(0);
     },
   );
 });
