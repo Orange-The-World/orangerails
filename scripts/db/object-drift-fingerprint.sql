@@ -10,19 +10,23 @@
 --   psql "$PROD_URL" -v ON_ERROR_STOP=1 -f scripts/db/object-drift-fingerprint.sql \
 --        > /tmp/prod.out 2> /tmp/prod.err ; echo "prod exit=$?"
 --
---   Before you diff, check all three of these. Any one of them failing means the
+--   Before you diff, check all four of these. Any one of them failing means the
 --   run proved nothing, and a diff of two useless artifacts looks exactly like
 --   agreement:
 --     1. both exit codes are 0
 --     2. both .out files contain a line reading guard=passed
---     3. both .err files are empty
---     4. both .out files report the SAME current_user in the CONNECTION block.
---        Reading only pg_catalog removes the row filtering that a role
---        difference used to cause, but relacl, proacl and the policy
---        expressions are still rendered through the connecting role. Two
---        artifacts made by different roles can differ with no drift present,
---        and that difference is a digest difference, which is exactly what a
---        reader would otherwise call drift.
+--     3. both .err files are empty (the script sets client_min_messages to
+--        warning, so the routine DROP IF EXISTS and guard notices stay out of
+--        stderr; anything that does appear there is a warning or an error)
+--     4. both .out files report the SAME current_user and the SAME search_path
+--        in the CONNECTION block. Reading only pg_catalog removes the row
+--        filtering that a role difference used to cause. What still depends on
+--        the caller is how pg_get_expr, pg_get_constraintdef, pg_get_indexdef
+--        and format_type render names: they qualify a name or leave it bare
+--        according to the search_path in force. Two artifacts made under
+--        different search paths can differ with no drift present, and that
+--        difference is a digest difference, which is exactly what a reader
+--        would otherwise call drift.
 --   Only then:
 --   diff -u /tmp/dev.out /tmp/prod.out
 --
@@ -43,8 +47,8 @@
 -- WHY OBJECTS AND NOT LEDGER ROWS
 --   A check that compares migration ledger rows to version prefixes in the
 --   migration tree can only see a version with no row. It cannot see an object
---   that is present with no row behind it, which is the drift we actually have,
---   and it cannot see two clusters that have diverged.
+--   that is present with no row behind it, and it cannot see two clusters that
+--   have diverged.
 --
 -- ONE SOURCE, AND IT IS pg_catalog
 --   Every kind reads pg_catalog. Nothing here reads information_schema, for two
@@ -80,10 +84,10 @@
 --               who it names; only the expressions say what it actually admits,
 --               and a policy quietly widened is an access change with no schema
 --               shape change at all.
---   acl_rls     relacl plus relrowsecurity and relforcerowsecurity. Grants have
---               been observed differing between clusters with no migration
---               explaining it, and RLS that is enabled but not forced exempts
---               the table owner, which is not visible from the policy list.
+--   acl_rls     relacl plus relrowsecurity and relforcerowsecurity. Grants must
+--               match between clusters whatever the migrations say, and RLS
+--               that is enabled but not forced exempts the table owner, which
+--               is not visible from the policy list.
 --   constraint  contype, convalidated and the definition. A constraint added
 --               NOT VALID looks exactly like a validated one until you read
 --               convalidated, and a NOT VALID constraint never checked the rows
@@ -108,10 +112,23 @@
 --   file behind it. Two clusters carrying the same unbacked object read as
 --   identical here. Comparing a cluster against a schema replayed from the
 --   migration tree is the other half, and it is tracked separately.
+--   It also does not read these classes, so a difference in any of them is
+--   invisible here: function bodies (only config, security definer and the
+--   execute grant are read), trigger definitions (only the enable state is
+--   read), view and materialized view query text (only their columns are
+--   read), sequences, types and enums, extensions, object ownership, grants
+--   and RLS on anything but ordinary and partitioned tables, and every schema
+--   other than public.
 
 \set ON_ERROR_STOP on
 \pset pager off
 \pset format aligned
+
+-- Routine notices (DROP TABLE IF EXISTS on a table that is not there, and the
+-- guard notice) go to stderr. Left on, every good run writes two lines there
+-- and check 3 in the usage text can never pass. Warnings and errors still get
+-- through, and an error also stops the run and sets the exit status.
+SET client_min_messages = warning;
 
 CREATE OR REPLACE FUNCTION pg_temp.drift_sigs()
 RETURNS TABLE (kind text, sig text)
@@ -251,9 +268,10 @@ BEGIN
 END
 $guard$;
 
--- The guard result, on STDOUT. RAISE NOTICE above goes to stderr, which is easy
--- to lose. This line is the one that ends up in the diffed artifact, so its
--- ABSENCE is itself the failure signal.
+-- The guard result, on STDOUT. The RAISE NOTICE above would go to stderr, which
+-- is easy to lose, and client_min_messages is set to warning at the top of this
+-- file, so that notice is not sent at all. This line is the one that ends up in
+-- the diffed artifact, so its ABSENCE is itself the failure signal.
 \echo '=== GUARD (this line must be present: no guard row means the run failed) ==='
 SELECT 'guard=passed'       AS guard,
        count(*)             AS objects_compared,
@@ -263,19 +281,23 @@ SELECT 'guard=passed'       AS guard,
 -- Who produced this artifact. Not decoration: an artifact that does not say
 -- who made it cannot be compared honestly with one made by someone else.
 -- Reading only pg_catalog removes the privilege FILTERING on rows, so the
--- object counts no longer depend on the role. What still depends on the role
--- is what those rows RENDER as: relacl, proacl and the policy expressions are
--- all produced through the connecting identity. So two runs by different roles
--- can agree on every count and disagree on the digests, and a reader with no
--- way to see the roles would report that as drift and go looking for a
--- migration that does not exist.
+-- object counts no longer depend on the role. What still depends on the caller
+-- is how the catalog functions render names: pg_get_expr, pg_get_constraintdef,
+-- pg_get_indexdef and format_type qualify a name or leave it bare according to
+-- the search_path in force. (aclitem text does not depend on the caller.) So
+-- two runs under different search paths can agree on every count and disagree
+-- on the digests, and a reader with no way to see the search path would report
+-- that as drift and go looking for a migration that does not exist. A role can
+-- carry its own search_path setting, which is why the role and the search_path
+-- are both printed.
 --
 -- It is its own section, above the object detail and outside the diffed
 -- object lines, so it informs the comparison without ever joining it.
-\echo '=== CONNECTION (both runs must report the same current_user) ==='
+\echo '=== CONNECTION (both runs must report the same current_user and search_path) ==='
 SELECT current_user     AS current_user,
        session_user     AS session_user,
-       current_database() AS database;
+       current_database() AS database,
+       current_setting('search_path') AS search_path;
 
 -- Summary. Read this first: it says what was compared. Two clusters whose
 -- summaries are identical line for line have identical public schemas as far
