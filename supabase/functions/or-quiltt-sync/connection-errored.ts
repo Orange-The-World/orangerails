@@ -44,6 +44,7 @@ import {
 /** One connection gets at most one connection.errored in any window this long. */
 export const CONNECTION_ERRORED_WINDOW_MS = 24 * 60 * 60 * 1000;
 
+/** What the helper decided. Only 'enqueued' means a webhook_delivery row was written. */
 export type ConnectionErroredOutcome =
   | 'enqueued'
   | 'no-record-id'
