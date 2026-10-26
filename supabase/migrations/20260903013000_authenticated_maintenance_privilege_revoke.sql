@@ -337,7 +337,7 @@ alter default privileges for role postgres in schema public
 
 do $$
 declare
-  v_keep constant text[] := array['customers', 'connections', 'subaccounts', 'encrypted_transactions'];
+  v_keep constant text[] := array['connections', 'encrypted_transactions'];
   v_bad text;
   v_missing text;
   v_tap record;
@@ -446,9 +446,13 @@ begin
   -- client capability. B1 and B2, which must catch a grant that exists at all,
   -- deliberately stay on the catalogue.
   --
-  -- The sample was NOT narrowed to make this pass. Dropping connections would
-  -- have removed the one member that exercises the column grant path, which is
-  -- the case most likely to break next.
+  -- NARROWING, recorded so the earlier wording of this comment is not trusted:
+  -- the sample once also named customers and subaccounts. 20260902154500 sorts
+  -- earlier in the tree and revokes INSERT, UPDATE and DELETE from the logged-in
+  -- role on both tables on purpose, so in tree order this check could never pass
+  -- for them. They were removed from the sample for that reason, not to hide a
+  -- loss. connections stays because it is the one member that exercises the
+  -- column grant path, which is the case most likely to break next.
   select string_agg(format('%s:%s', s.t, s.p), ', ' order by s.t, s.p)
     into v_missing
     from (select t, p from unnest(v_keep) t cross join unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) p) s
