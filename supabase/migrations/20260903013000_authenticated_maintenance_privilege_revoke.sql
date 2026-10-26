@@ -448,10 +448,10 @@ begin
   --
   -- NARROWING, recorded so the earlier wording of this comment is not trusted:
   -- the sample once also named customers and subaccounts. 20260902154500 sorts
-  -- earlier in the tree and revokes INSERT, UPDATE and DELETE from the logged-in
-  -- role on both tables on purpose, so in tree order this check could never pass
-  -- for them. They were removed from the sample for that reason, not to hide a
-  -- loss. connections stays because it is the one member that exercises the
+  -- earlier in the tree and removes data privileges that this check requires from
+  -- the logged-in role on both tables, so in tree order this check could never
+  -- pass for them. They were removed from the sample for that reason, not to
+  -- hide a loss. connections stays because it is the one member that exercises the
   -- column grant path, which is the case most likely to break next.
   select string_agg(format('%s:%s', s.t, s.p), ', ' order by s.t, s.p)
     into v_missing
