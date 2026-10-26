@@ -60,6 +60,12 @@ COMMENT ON COLUMN public.stealth_utxos.scanned_to IS
 
 ALTER TABLE public.stealth_utxos ENABLE ROW LEVEL SECURITY;
 
+-- Table privilege for the read path. A table created by the postgres role does
+-- not always receive a default grant to authenticated, so the grant is stated
+-- here. SELECT only; the policy below is the row filter. No DML privilege for
+-- authenticated.
+GRANT SELECT ON TABLE public.stealth_utxos TO authenticated;
+
 -- Authenticated users may SELECT their own row via connection ownership.
 -- The predicate joins stealth_connections and checks app_user_id against
 -- auth.uid()::text (the same ownership model used by stealth_connections).
@@ -70,6 +76,7 @@ ALTER TABLE public.stealth_utxos ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS "owner read via connection" ON public.stealth_utxos;
 CREATE POLICY "owner read via connection" ON public.stealth_utxos
   FOR SELECT
+  TO authenticated
   USING (
     EXISTS (
       SELECT 1 FROM public.stealth_connections sc
