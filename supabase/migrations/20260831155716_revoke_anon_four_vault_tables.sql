@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: revokes anon and PUBLIC grants on four vault tables, absolute not relative, so apply order does not change the end state; no data is touched.
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb revokes anon and PUBLIC grants on four vault tables, absolute not relative, so apply order does not change the end state; no data is touched.
 -- 20260831155716_revoke_anon_four_vault_tables.sql
 --
 -- WHAT THIS CHANGES
