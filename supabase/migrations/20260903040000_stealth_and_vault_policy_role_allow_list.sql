@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: assertion only on policy roles of six tables; it changes nothing, and stealth_utxos gets its policy in 20260825000000, which name order runs first.
 -- Assert the GRANTEE AXIS on the six stealth and vault tables: which ROLES may
 -- appear in a policy on them at all. This file changes no policy, no grant and
 -- no data. It reads pg_policy and raises if the axis is not what the migration
