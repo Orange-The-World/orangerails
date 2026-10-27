@@ -16,14 +16,26 @@
 -- against a vault another client has already upgraded.
 --
 -- WHAT THIS CHANGES
--- One clause in the UPDATE branch of public.enforce_keyring_epoch:
+-- Two clauses in the UPDATE branch of public.enforce_keyring_epoch, both raise check_violation.
+--
+-- Clause A, keyring erasure:
+--   if the OLD row has a non-null keyring_ciphertext
+--   and NEW.keyring_ciphertext is null
+--   then raise, whatever keyring_epoch does.
+-- Existing clause 3 only fires when the ciphertext is unchanged, so before this a write
+-- that cleared the keyring and raised the epoch in the same statement was accepted. Nothing
+-- legitimate does that: recovery and password change both re-seal a non-null keyring. A
+-- vault born without a keyring (OLD null) may still carry NULL through unchanged.
+--
+-- Clause B, verifier:
 --   if the OLD row has a non-null keyring_ciphertext
 --   and NEW.vault_verifier_ciphertext differs from OLD
 --   and NEW.keyring_epoch has not risen above OLD.keyring_epoch
---   then raise check_violation.
+--   then raise.
 -- Because an epoch rise is already required to come with a re-sealed keyring_ciphertext
--- (existing clause 3), a verifier change that raises the epoch is accepted only when the
--- keyring is re-sealed in the same statement. That is the requirement.
+-- (existing clause 3), and clause A forbids that re-seal being a NULL, a verifier change
+-- that raises the epoch is accepted only when a non-null keyring is re-sealed in the same
+-- statement. That is the requirement.
 --
 -- WHAT STAYS ALLOWED
 --   * A password change: it re-wraps the same vault key under a new password key and a new
@@ -34,11 +46,18 @@
 --   * The first keyring write on a vault that had none.
 -- Everything else in the function is byte for byte the 20260831120000 body.
 --
--- LIMIT, stated rather than overclaimed: the clause infers "the vault key changed" from
--- "the verifier was rewritten". That is true of the current client and is enforced nowhere
--- else; the server cannot see the vault key. A client that replaced the key and left the
--- verifier alone would pass. Closing that needs a plaintext generation counter bumped on
--- rotation, which is a new column and a client change, and is not added here.
+-- LIMIT, stated rather than overclaimed: clause B infers "the vault key changed" from "the
+-- verifier was rewritten", because the server cannot see the vault key and the verifier
+-- is the strongest signal it has.
+--   * REQUIREMENT ON CLIENTS: a write that replaces the vault key must rewrite the
+--     verifier in the same statement. The server relies on this and cannot check it.
+--   * A write that replaces the key without touching the verifier is outside what this
+--     guard can see; it is a violation of the requirement above, not something the
+--     trigger detects.
+--   * Harmless false positive: re-encrypting the verifier under the same key changes the
+--     ciphertext, so the guard demands an epoch rise for what was a no-op rotation.
+-- A plaintext generation counter was considered and not added: it is a new column and a
+-- client change, and it still depends on the client bumping it.
 -- Like the rest of this guard it constrains writes made through the application roles and
 -- does not constrain table ownership or superuser.
 --
@@ -52,8 +71,9 @@
 -- the mode rather than assuming it.
 --
 -- REVERSIBLE. Re-run the CREATE OR REPLACE FUNCTION public.enforce_keyring_epoch() from
--- 20260831120000, which is the same function without the fourth IF block of the UPDATE
--- branch. No data is touched either way.
+-- 20260831120000, which is the same function without the two IF blocks added here (the
+-- keyring erasure block and the verifier block, the fourth and fifth of the UPDATE
+-- branch). No data is touched either way.
 --
 -- Refs: OR-T0676, OR-T0967, OR-T1168
 
@@ -87,6 +107,12 @@ BEGIN
     IF NEW.keyring_epoch > OLD.keyring_epoch
        AND NEW.keyring_ciphertext IS NOT DISTINCT FROM OLD.keyring_ciphertext THEN
       RAISE EXCEPTION 'keyring_epoch raised (% to %) without re-sealing keyring_ciphertext', OLD.keyring_epoch, NEW.keyring_epoch
+        USING ERRCODE = 'check_violation';
+    END IF;
+
+    IF OLD.keyring_ciphertext IS NOT NULL
+       AND NEW.keyring_ciphertext IS NULL THEN
+      RAISE EXCEPTION 'keyring_ciphertext must not be cleared on a vault that holds a keyring (epoch % to %)', OLD.keyring_epoch, NEW.keyring_epoch
         USING ERRCODE = 'check_violation';
     END IF;
 
@@ -164,7 +190,13 @@ BEGIN
     RAISE EXCEPTION 'FAIL: public.enforce_keyring_epoch must pin a search_path containing public and ending in pg_temp, got %', v_sp;
   END IF;
 
-  -- The new clause: it must read the verifier and must refuse with check_violation.
+  -- The erasure clause: a non-null OLD keyring must not become NULL.
+  IF position('NEW.keyring_ciphertext IS NULL' IN v_src) = 0
+     OR position('must not be cleared on a vault that holds a keyring' IN v_src) = 0 THEN
+    RAISE EXCEPTION 'FAIL: public.enforce_keyring_epoch does not carry the keyring erasure clause';
+  END IF;
+
+  -- The verifier clause: it must read the verifier and must refuse with check_violation.
   IF position('NEW.vault_verifier_ciphertext IS DISTINCT FROM OLD.vault_verifier_ciphertext' IN v_src) = 0 THEN
     RAISE EXCEPTION 'FAIL: public.enforce_keyring_epoch does not carry the verifier clause';
   END IF;
@@ -190,7 +222,7 @@ BEGIN
     RAISE EXCEPTION 'FAIL: application roles must not hold EXECUTE on public.enforce_keyring_epoch()';
   END IF;
 
-  RAISE NOTICE 'OR-T0676 ok: enforce_keyring_epoch carries the verifier clause, SECURITY DEFINER, search_path pinned ending in pg_temp, trigger ENABLE ALWAYS, no application role holds EXECUTE';
+  RAISE NOTICE 'OR-T0676 ok: enforce_keyring_epoch carries the erasure and verifier clauses, SECURITY DEFINER, search_path pinned ending in pg_temp, trigger ENABLE ALWAYS, no application role holds EXECUTE';
 END $assert$;
 
 COMMIT;
