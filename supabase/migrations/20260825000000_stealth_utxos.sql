@@ -72,7 +72,7 @@ GRANT SELECT ON TABLE public.stealth_utxos TO authenticated;
 -- auth.uid()::text (the same ownership model used by stealth_connections).
 -- No INSERT/UPDATE/DELETE policies: direct DML by authenticated users is
 -- not permitted. All writes go through upsert_stealth_utxos (SECURITY
--- DEFINER, EXECUTE granted to service_role only).
+-- DEFINER, callable by service_role only).
 -- service_role bypasses RLS entirely and needs no policy here.
 DROP POLICY IF EXISTS "owner read via connection" ON public.stealth_utxos;
 CREATE POLICY "owner read via connection" ON public.stealth_utxos
