@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: grants and revokes only, on four org vault tables, written as an absolute allow list so the end state does not depend on apply order; no data is touched.
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb grants and revokes only, on four org vault tables, written as an absolute allow list so the end state does not depend on apply order; no data is touched.
 -- 20260828120000_revoke_table_grants_org_vault.sql
 --
 -- Give the four org vault tables an explicit table privilege allow list.

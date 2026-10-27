@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: adds a check on platforms.sink_format after clearing unregistered values; every stored value is already a registered slug so nothing is cleared; its probe row is rolled back.
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb adds a check on platforms.sink_format after clearing unregistered values; every stored value is already a registered slug so nothing is cleared; its probe row is rolled back.
 -- Constrain public.platforms.sink_format to the slugs a sink adapter implements.
 --
 -- THE RULE THIS ENFORCES

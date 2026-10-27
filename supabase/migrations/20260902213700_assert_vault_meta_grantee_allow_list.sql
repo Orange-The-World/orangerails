@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: assertion only on the two vault meta tables; it changes no privilege and no data, so it is safe at any position.
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb assertion only on the two vault meta tables; it changes no privilege and no data, so it is safe at any position.
 -- 20260902213700_assert_vault_meta_grantee_allow_list.sql
 --
 -- Assert that only an expected set of roles holds ANY privilege on

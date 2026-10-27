@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: creates the new table stealth_utxos with its own SELECT grant and read policy for authenticated, plus a service_role only function; needs only stealth_connections, which already exists.
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb creates the new table stealth_utxos with its own SELECT grant and read policy for authenticated, plus a service_role only function; needs only stealth_connections, which already exists.
 -- DL-0420 PR 1: stealth_utxos table + upsert_stealth_utxos RPC
 --
 -- Problem: src/stealth/lib/sync.ts builds utxoMap in-memory per runSync()

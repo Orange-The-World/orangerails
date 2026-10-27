@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: assertion only on public.connections; it changes no privilege and no data, so it is safe at any position.
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb assertion only on public.connections; it changes no privilege and no data, so it is safe at any position.
 -- Re-run the public.connections anon self check, made column aware.
 --
 -- THE DEFECT THIS CORRECTS

@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb replaces allocate_workspace_key() to also write the public.data_keys ownership row; prod holds 0 rows in data_keys and user_vault_meta, so the backfill is a no-op; undo is in the REVERSIBLE paragraph of this header
 -- 20260831170000_allocate_workspace_key_writes_data_keys_ownership.sql
 --
 -- Make public.allocate_workspace_key() record the public.data_keys ownership row
