@@ -2467,12 +2467,33 @@ jobs:
           # is a different problem (this job's .result read requires needs:)
           # and is not what this derivation fixes.
           REASONS=""
+          # OR-T2109/fix: jq runs outside the process substitution so its exit
+          # status is caught by set -uo pipefail. Inside < <(...) it is NOT
+          # caught: a jq failure leaves the loop with zero entries, REASONS
+          # stays empty, and "Every job succeeded" fires against a broken run.
+          # Count entries and verify deploy appeared before trusting the result.
+          JQ_OUT=$(printf '%s' "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key)\t\(.value.result)"') || {
+            echo "::error::jq failed parsing NEEDS_JSON; cannot classify job results. This run did NOT succeed."
+            exit 1
+          }
+          ENTRY_COUNT=0
+          DEPLOY_SEEN=0
           while IFS=$'\t' read -r JOB RES; do
             [ -n "$JOB" ] || continue
+            ENTRY_COUNT=$((ENTRY_COUNT + 1))
+            [ "$JOB" = "deploy" ] && DEPLOY_SEEN=1
             case "$RES" in
               failure|cancelled) REASONS="${REASONS}- \`${JOB}\` ended **${RES}**"$'\n' ;;
             esac
-          done < <(printf '%s' "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key)\t\(.value.result)"')
+          done <<< "$JQ_OUT"
+          if [ "$ENTRY_COUNT" -eq 0 ]; then
+            echo "::error::jq returned zero entries from NEEDS_JSON; cannot classify any job result. This run did NOT succeed."
+            exit 1
+          fi
+          if [ "$DEPLOY_SEEN" -eq 0 ]; then
+            echo "::error::the 'deploy' job did not appear in the job result entries; cannot determine whether it shipped. This run did NOT succeed."
+            exit 1
+          fi
           if [ "${R_DEPLOY}" = "skipped" ]; then
             REASONS="${REASONS}- \`deploy\` was **skipped**, so no edge function shipped to this branch's Supabase project."$'\n'
           fi
