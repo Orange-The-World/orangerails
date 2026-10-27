@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: revokes EXECUTE on two guard functions that 20260828221500 creates earlier in this batch; guarded by existence checks; revoke only.
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb revokes EXECUTE on two guard functions that 20260828221500 creates earlier in this batch; guarded by existence checks; revoke only.
 -- Revoke anon/authenticated EXECUTE on the two vault-meta delete-guard trigger
 -- functions created by 20260828170000 and 20260828221500.
 --
