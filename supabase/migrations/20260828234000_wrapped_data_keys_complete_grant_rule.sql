@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: swaps one check constraint on wrapped_data_keys, which holds no rows, for a tighter one; it needs 20260828183000 first and name order guarantees that; the file documents the undo.
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb swaps one check constraint on wrapped_data_keys, which holds no rows, for a tighter one; it needs 20260828183000 first and name order guarantees that; the file documents the undo.
 -- 20260828234000_wrapped_data_keys_complete_grant_rule.sql
 --
 -- Refuse an envelope v3 grant that carries no keyring for the recipient to
