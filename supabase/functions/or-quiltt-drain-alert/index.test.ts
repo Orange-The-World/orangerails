@@ -93,3 +93,68 @@ Deno.test('signal C still excludes retirements, so D is the only one that sees t
     'signal C must keep excluding retired rows',
   );
 });
+
+Deno.test('signal E filters on processed_at and opk_deferred_at, same as fetchPendingBatch', () => {
+  const src = readSource('./index.ts');
+  assertEquals(
+    /\.is\('processed_at',\s*null\)\s*\n\s*\.is\('opk_deferred_at',\s*null\)/.test(src),
+    true,
+    'signal E must filter processed_at IS NULL AND opk_deferred_at IS NULL',
+  );
+});
+
+Deno.test('signal E threshold is >= 20 rows AND > 25 minutes, both required', () => {
+  const src = readSource('./index.ts');
+  assertEquals(
+    /STARVATION_UNPROCESSED_MIN\s*=\s*20/.test(src),
+    true,
+    'signal E unprocessed threshold must be 20 (BATCH_SIZE in or-quiltt-sync)',
+  );
+  assertEquals(
+    /STARVATION_AGE_MINUTES\s*=\s*25/.test(src),
+    true,
+    'signal E age threshold must be 25 minutes (proven worst-case bound, OR-T2581)',
+  );
+  assertEquals(
+    /const\s+starvationFiring\s*=[\s\S]*unprocessedNonDeferred\s*>=\s*STARVATION_UNPROCESSED_MIN[\s\S]*oldestUnprocessedAgeMinutes\s*>\s*STARVATION_AGE_MINUTES/.test(src),
+    true,
+    'signal E must require BOTH the row count and the age bound, not either alone',
+  );
+});
+
+Deno.test('signal E actually raises the alert', () => {
+  const src = readSource('./index.ts');
+  assertEquals(
+    /const\s+alertFiring\s*=[^;]*starvationFiring/.test(src),
+    true,
+    'starvationFiring must be part of alertFiring or the signal never pages',
+  );
+});
+
+Deno.test('signal F actually raises the alert', () => {
+  const src = readSource('./index.ts');
+  assertEquals(
+    /const\s+alertFiring\s*=[^;]*deferredFiring/.test(src),
+    true,
+    'deferredFiring must be part of alertFiring or the signal never pages',
+  );
+});
+
+Deno.test('signal F selects deferred unprocessed rows and uses the agreed thresholds', () => {
+  const src = readSource('./index.ts');
+  assertEquals(
+    /\.not\('opk_deferred_at',\s*'is',\s*null\)\s*\n\s*\.is\('processed_at',\s*null\)/.test(src),
+    true,
+    'signal F must filter opk_deferred_at IS NOT NULL AND processed_at IS NULL',
+  );
+  assertEquals(
+    /DEFERRED_COUNT_THRESHOLD\s*=\s*25/.test(src),
+    true,
+    'signal F count threshold must be 25 rows',
+  );
+  assertEquals(
+    /DEFERRED_AGE_HOURS\s*=\s*24/.test(src),
+    true,
+    'signal F age threshold must be 24 hours',
+  );
+});

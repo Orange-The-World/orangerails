@@ -67,15 +67,24 @@ jobs:
           # OR-T1685 adds three more classes, each a SHAPE rather than a value,
           # so this file still publishes nothing:
           #   - a knowledge-base document link (any host, /doc/<slug>), which is
-          #     how an internal write-up gets cited in a message
+          #     how an internal write-up gets cited in a message. The slug shape
+          #     is tightened to look like a real internal doc ID (alphanumeric
+          #     only, with at least one uppercase letter) rather than any 6+
+          #     char slug, because an ordinary public documentation URL such as
+          #     https://go.dev/doc/effective_go has the same shape and was
+          #     false-positiving (OR-T1846).
           #   - a chat permalink (/#narrow/...), which is a message-id citation
           #     nobody outside can resolve
           #   - a home directory path (/home/<user>/...), which names an
-          #     operator and a machine layout
+          #     operator and a machine layout. DOC_STRIP_URL_HOME below clears
+          #     the case where /home/ is a URL PATH SEGMENT on a public site
+          #     (for example https://example.com/home/pricing/): a real
+          #     internal home-directory path is never cited with a scheme and
+          #     host in front of it (OR-T1846).
           # A match on one of these three fires the non-structural branch of the
           # cleared-list check below, so a commit that legitimately has to name
           # one is cleared with class 'reserved'.
-          GENERIC_PATTERN: 'tail[a-z0-9]+\.ts\.net|\.tailnet\b|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+|https?://[A-Za-z0-9.-]+/doc/[A-Za-z0-9_-]{6,}|/#narrow/|/home/[a-z][a-z0-9_-]*/'
+          GENERIC_PATTERN: 'tail[a-z0-9]+\.ts\.net|\.tailnet\b|100\.(6[4-9]|[7-9][0-9]|1[0-1][0-9]|12[0-7])\.[0-9]+\.[0-9]+|https?://[A-Za-z0-9.-]+/doc/[A-Za-z0-9]*[A-Z][A-Za-z0-9]{7,}\b|/#narrow/|/home/[a-z][a-z0-9_-]*/'
           # Reserved-term pattern: sourced from a secret so this file never
           # stores them; empty when the secret is unset (generic half runs).
           RESERVED_PATTERN: ${{ secrets.OR_RESERVED_TERMS }}
@@ -85,6 +94,13 @@ jobs:
           # describing the regex, not a stray reference.
           DOC_STRIP_CGNAT: '100\.64\.0\.0/10'
           DOC_STRIP_REGEX_ALT: '\([0-9]+(\|[0-9]+)+\)'
+          # A /home/ occurrence that is a URL PATH SEGMENT on a public site
+          # (scheme + host immediately in front of it, e.g.
+          # https://example.com/home/pricing/) is stripped before the final
+          # check. A real internal home-directory path is a bare filesystem
+          # path and is never preceded by a scheme and host, so this cannot
+          # hide a genuine reference (OR-T1846).
+          DOC_STRIP_URL_HOME: 'https?://[A-Za-z0-9.-]+/home/'
           # PR range: all commits that will land on prod if this PR merges.
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -278,8 +294,10 @@ jobs:
 
           # Self-test 6: a knowledge-base document link must match, and must
           # survive doc-strip. This is the class a tree scan cannot see: the
-          # link is in the message, not in any file.
-          _ST6="body: write-up at https://kb.example-internal.test/doc/some-note-AbC123"
+          # link is in the message, not in any file. The slug is shaped like a
+          # real internal doc ID: alphanumeric only, mixed case, no separators
+          # (OR-T1846 tightened this from any 6+ char slug).
+          _ST6="body: write-up at https://kb.example-internal.test/doc/AbC123XyZ9"
           if ! echo "$_ST6" | grep -qEi "$PATTERN"; then
             echo "::error::Self-test 6 FAIL: PATTERN does not match a knowledge-base document link. Scanner is broken."
             exit 1
@@ -313,6 +331,31 @@ jobs:
             exit 1
           fi
           echo "Self-test 9 passed: an ordinary commit message does not match."
+
+          # Self-test 11 is NEGATIVE (OR-T1846): a real public documentation
+          # URL that happens to use a singular "/doc/" path segment, such as
+          # Go's own official docs, must NOT match. This is the exact false
+          # positive the doc-link class produced before its slug shape was
+          # tightened to look like a real internal doc ID.
+          _ST11="See https://go.dev/doc/effective_go for the style this follows"
+          if echo "$_ST11" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 11 FAIL: PATTERN matches a real public /doc/ URL (go.dev/doc/effective_go). Doc-link class is too broad."
+            exit 1
+          fi
+          echo "Self-test 11 passed: a real public /doc/ URL does not match."
+
+          # Self-test 12 is NEGATIVE (OR-T1846): an ordinary marketing/site URL
+          # path that happens to use a "/home/" path segment must NOT match
+          # after doc-strip. This is the exact false positive the home-path
+          # class produced before DOC_STRIP_URL_HOME cleared URL-embedded
+          # /home/ segments.
+          _ST12="Pricing lives at https://example.com/home/pricing/ now"
+          _ST12_CLEAN=$(echo "$_ST12" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g; s|${DOC_STRIP_URL_HOME}|[URL-HOME-BLOCK]|g")
+          if echo "$_ST12_CLEAN" | grep -qEi "$PATTERN"; then
+            echo "::error::Self-test 12 FAIL: PATTERN matches a public site's /home/ URL path after doc-strip. Home-path class is too broad."
+            exit 1
+          fi
+          echo "Self-test 12 passed: a public site's /home/ URL path does not match after doc-strip."
 
           # Self-test 10: the commit counter must read an EMPTY log as zero.
           # Zero is the value the refusal below fires on, so this is the proof
@@ -355,9 +398,9 @@ jobs:
               CURRENT_SHA="${BASH_REMATCH[1]}"
             fi
             if echo "$line" | grep -qEi "$PATTERN"; then
-              cleaned=$(echo "$line" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g")
+              cleaned=$(echo "$line" | sed -E "s|${DOC_STRIP_CGNAT}|[CGNAT-BLOCK]|g; s|${DOC_STRIP_REGEX_ALT}|[REGEX-ALT]|g; s|${DOC_STRIP_URL_HOME}|[URL-HOME-BLOCK]|g")
               if ! echo "$cleaned" | grep -qEi "$PATTERN"; then
-                echo "::notice::Allowlisted documentation line (CGNAT block or regex syntax)."
+                echo "::notice::Allowlisted documentation line (CGNAT block, regex syntax, or public /home/ URL path)."
                 continue
               fi
               # Cleared-list check: exempts structural match classes on known SHAs,

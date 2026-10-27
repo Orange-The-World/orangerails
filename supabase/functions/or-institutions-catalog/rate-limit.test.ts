@@ -49,6 +49,33 @@ Deno.test('a caller-controlled x-forwarded-for can never collide with a cf: buck
   assertNotEquals(cf, xff);
 });
 
+// --- x-gateway-verified-ip precedence (OR-T1116) ----------------------------
+
+Deno.test('a gateway-routed request (x-gateway-verified-ip set, no cf-connecting-ip) is throttled via a gw: bucket', () => {
+  const id = clientIdOrNull(req({ 'x-gateway-verified-ip': '198.51.100.9' }));
+  assertEquals(id, 'gw:198.51.100.9');
+});
+
+Deno.test('a request carrying both cf-connecting-ip and x-gateway-verified-ip is keyed on cf-connecting-ip', () => {
+  const id = clientIdOrNull(
+    req({ 'cf-connecting-ip': '203.0.113.9', 'x-gateway-verified-ip': '198.51.100.9' }),
+  );
+  assertEquals(id, 'cf:203.0.113.9');
+});
+
+Deno.test('x-gateway-verified-ip is namespaced gw:, so it can never collide with a cf: or xff: bucket for the same literal address', () => {
+  const gw = clientIdOrNull(req({ 'x-gateway-verified-ip': '203.0.113.9' }));
+  const cf = clientIdOrNull(req({ 'cf-connecting-ip': '203.0.113.9' }));
+  const xff = clientIdOrNull(req({ 'x-forwarded-for': '203.0.113.9' }));
+  assertNotEquals(gw, cf);
+  assertNotEquals(gw, xff);
+});
+
+Deno.test('x-gateway-verified-ip still falls through to x-forwarded-for when empty', () => {
+  const id = clientIdOrNull(req({ 'x-gateway-verified-ip': '  ', 'x-forwarded-for': '198.51.100.1' }));
+  assertEquals(id, 'xff:198.51.100.1');
+});
+
 // --- the unidentified-caller log line (OR-T1452) ----------------------------
 
 Deno.test('a request with no identifying header reports every candidate absent', () => {

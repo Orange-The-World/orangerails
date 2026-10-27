@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb adds two nullable columns with no default to stealth_transactions, a catalog only change with no backfill; nothing applied after it depends on it.
 -- 20260831060000_stealth_transactions_reorg_columns.sql
 --
 -- Reorg detection, step one of two: give stealth_transactions somewhere to record

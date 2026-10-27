@@ -9,9 +9,24 @@
 -- "you must be signed in". The check lives inside the function instead, where it
 -- holds no matter who ends up holding EXECUTE.
 --
--- This replaces the earlier grant revoke approach. A live read of both
--- environments showed no anon entry and no PUBLIC entry in the function ACL, so
--- the revoke was a no op in both.
+-- CORRECTED 2026-09-15, see 20260915120000_or_create_platform_revoke_public_execute.sql
+-- (OR-T0851 step 7, raised by the Auditor on DEV-0418). Both sentences below
+-- were wrong and the first is dangerous: the in-body guard admits any signed
+-- in end user (auth.uid() IS NOT NULL), so with authenticated holding EXECUTE,
+-- any account that can sign up could mint a live platform key through the
+-- guard alone. The guard is defense in depth, not a replacement. The revoke in
+-- 20260721120000 is the control, and both migrations must run. The "no op in
+-- both environments" claim held only for cloud prod: a live read of the
+-- self-hosted cluster on 2026-08-28 (supabase-db/postgres) found or_create_platform's
+-- proacl carrying an explicit anon entry. The corrected migration adds the
+-- REVOKE directly to this function's own migration chain and asserts proacl,
+-- so the file is correct standalone regardless of what ran before it.
+--
+-- Original (wrong) text, kept for the historical record rather than deleted,
+-- per correct-the-row-not-just-your-report:
+--   "This replaces the earlier grant revoke approach. A live read of both
+--    environments showed no anon entry and no PUBLIC entry in the function
+--    ACL, so the revoke was a no op in both."
 --
 -- Why the check is not a bare "auth.uid() IS NULL" raise, which is the pattern
 -- the other helper functions use:

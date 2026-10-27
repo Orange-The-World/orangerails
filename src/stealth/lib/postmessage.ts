@@ -53,9 +53,12 @@ export const STEALTH_PROTOCOL_VERSION = 1 as const;
 /**
  * The full set of protocol versions this widget build accepts at INIT and
  * advertises in READY. Membership, not equality, is the compatibility rule:
- * an INIT whose protocol_version is anywhere in this set is accepted, and an
- * app can read this set off READY to pick a version both sides speak with no
- * app deploy. STEALTH_PROTOCOL_VERSION stays the current preferred version.
+ * an INIT whose protocol_version is anywhere in this set is accepted.
+ * STEALTH_PROTOCOL_VERSION stays the current preferred version. Only version
+ * 1 exists today, so callers send 1. The openStealthWidget helper posts the
+ * caller's init unchanged and does not read this set off READY. A helper that
+ * selects from the advertised set arrives with the second version, with no
+ * date promised.
  *
  * This PR ships the mechanism only. The set stays [1] here; a version is
  * added to it only in the release that actually bumps the protocol, per the
@@ -284,14 +287,14 @@ export type StealthInitMessage = StealthInitWidgetMessage | StealthInitAppMessag
 
 export interface StealthReadyMessage {
   type: 'OR_STEALTH_READY';
-  /** Current preferred version. Prefer supported_protocol_versions when picking a version to speak. */
+  /** Current preferred version. Only version 1 exists today, so this is always 1. */
   protocol_version: StealthProtocolVersion;
   /**
    * Every protocol version this widget build accepts at INIT, in ascending
-   * order. Added additively (DEC-0304): an app that reads only
-   * protocol_version is unaffected. Read this set to pick a version both
-   * sides speak with no app deploy, including after a widget rollback or a
-   * stale cached copy is served.
+   * order. Added additively: an app that reads only
+   * protocol_version is unaffected. Only version 1 exists today, so callers
+   * send 1; a helper that selects from this set arrives with the second
+   * version, with no date promised.
    */
   supported_protocol_versions: readonly number[];
 }
@@ -343,6 +346,16 @@ export interface SealedTransaction {
   occurred_at: string;
   /** Plaintext block height for resume on the next sync. */
   block_height: number;
+  /**
+   * Lowercase hex, RPC display order, the hash of the block at block_height,
+   * as computed from the block's own bytes and checked against the hash it
+   * was requested by (see assertBlockContentMatchesHash in sync.ts). Sealed
+   * alongside occurred_at and block_height, all plaintext, ZKA Level 2, so a
+   * later server-side reorg detector can compare it to the canonical chain
+   * without ever seeing the transaction's contents. Optional: absent on
+   * records sealed before this field existed.
+   */
+  block_hash_hex?: string;
   /**
    * Lowercase hex HMAC-SHA-256 of txid under the per-app blind-index subkey.
    * Server cannot reverse: the subkey is derived from the per-app stealth key

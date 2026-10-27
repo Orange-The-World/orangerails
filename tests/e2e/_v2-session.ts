@@ -77,9 +77,11 @@ export async function gotoConnectorsTab(page: Page): Promise<void> {
  *
  * When V2 opens the OR widget with defer_cred_key=1, the popup renders
  * an extra "Vault password" input alongside the provider credential form
- * (connect.tsx line 1609). The user types their vault password there; when
- * they click Save the popup forwards it to V2 via postMessage so V2 can
- * derive the cred_key without showing a separate modal.
+ * (connect.tsx line 1609). The user types their vault password there.
+ *
+ * Note: OR-T2704 removed vault_password from the outgoing postMessage
+ * payload. This helper fills the input field; it does not exercise any
+ * postMessage credential passing.
  *
  * This helper locates that field by its placeholder and fills it from the
  * supplied string, automating the otherwise-interactive vault unlock step.

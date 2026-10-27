@@ -1,0 +1,105 @@
+name: CI check-run count watchdog
+
+# dev HEAD is where every schedule, check_run, and workflow_run triggered
+# workflow's own check-run lands (GitHub always anchors those to the
+# default branch head commit, never to whatever actually triggered them;
+# see stale-ci-label.yml's header comment for the full explanation, this
+# is a platform behavior with no workflow-config fix). That means dev
+# HEAD's check-run count only grows, and a tool reading it via a single
+# unpaginated API page stops seeing anything past the first 100 entries.
+# When that happens, real deploy-gate failures can silently disappear
+# from view.
+#
+# This job watches the live count and raises a flag at 80 (20-row
+# margin) instead of waiting for someone to discover the problem by
+# hand. It is visibility only: it does not touch stale-ci-label.yml or
+# comment-findings-scan.yml.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      simulate_count:
+        description: >-
+          Test only: pretend the live count is this value when deciding
+          whether to fire the alert. The real live count is still read
+          from the API and printed either way.
+        required: false
+        type: string
+
+concurrency:
+  group: checkrun-count-watchdog
+  cancel-in-progress: true
+
+permissions:
+  checks: read
+  contents: read
+  issues: write
+
+jobs:
+  watch-checkrun-count:
+    name: Watch dev HEAD check-run count
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read live count and alert if near the limit
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIMULATE_COUNT: ${{ github.event.inputs.simulate_count }}
+        run: |
+          set -uo pipefail
+
+          REPO="${{ github.repository }}"
+          THRESHOLD=80
+          TITLE="CI check-run count watchdog: dev HEAD nearing the 100-row API limit"
+
+          # total_count is accurate on the first page of this endpoint
+          # regardless of per_page, so one call is enough for the real
+          # number.
+          REAL_COUNT=$(gh api \
+            "repos/${REPO}/commits/dev/check-runs" \
+            -H "Accept: application/vnd.github+json" \
+            --jq '.total_count' || echo "")
+
+          if [ -z "$REAL_COUNT" ]; then
+            echo "::warning::Could not read the live check-run count on dev HEAD this run"
+            exit 0
+          fi
+
+          echo "Live check-run count on dev HEAD: ${REAL_COUNT}"
+
+          if [ -n "${SIMULATE_COUNT}" ]; then
+            echo "Manual test override supplied: deciding on ${SIMULATE_COUNT} instead of the real count for this run only"
+            EFFECTIVE_COUNT="${SIMULATE_COUNT}"
+          else
+            EFFECTIVE_COUNT="${REAL_COUNT}"
+          fi
+
+          if [ "${EFFECTIVE_COUNT}" -ge "${THRESHOLD}" ]; then
+            echo "ALERT: effective count ${EFFECTIVE_COUNT} is at or above the threshold of ${THRESHOLD}"
+
+            BODY=$(cat <<EOF
+          Live check-run count on dev HEAD is **${REAL_COUNT}** (this run's alert was evaluated against ${EFFECTIVE_COUNT}, threshold ${THRESHOLD}).
+
+          Once this crosses 100, any tool that reads dev HEAD's check-runs from a single unpaginated page stops seeing entries past that point, which can hide real deploy-gate failures. Please review before the next dev-to-prod promotion.
+
+          This issue is updated in place on each alert, not reopened. It is safe to close once the count is back under control; the next alert will reopen it if the count returns to or above ${THRESHOLD}.
+          EOF
+          )
+
+            EXISTING=$(gh issue list --repo "$REPO" --search "\"${TITLE}\" in:title" --state all --json number,state --jq '[.[] | select(.state=="OPEN")][0].number' || echo "")
+
+            if [ -n "$EXISTING" ]; then
+              gh issue comment "$EXISTING" --repo "$REPO" --body "$BODY" || echo "::warning::Failed to comment on existing tracking issue #${EXISTING}"
+              echo "Updated existing tracking issue #${EXISTING}"
+            else
+              gh label create "ci-watchdog" --repo "$REPO" --description "Automated CI infrastructure watchdog alert" --color "d93f0b" 2>/dev/null || true
+              gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" --label "ci-watchdog" || \
+                gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY" || \
+                echo "::warning::Failed to create tracking issue"
+              echo "Created new tracking issue"
+            fi
+          else
+            echo "Effective count ${EFFECTIVE_COUNT} is below the threshold of ${THRESHOLD} -- no alert this run"
+          fi

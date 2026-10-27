@@ -214,7 +214,24 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       old_opk_alg:     prior.opk_alg,
       new_opk_alg:     body.opk_alg,
       rotation_reason: body.rotation_reason ?? null,
-      request_ip:      req.headers.get('cf-connecting-ip') ?? req.headers.get('x-forwarded-for') ?? null,
+      // Client IP for the audit trail, most trustworthy source first.
+      //   1. cf-connecting-ip: written at Cloudflare's own edge on a DIRECT
+      //      call, and a caller cannot forge it there.
+      //   2. x-gateway-verified-ip: set only by workers/api-gateway, which
+      //      captures the edge-verified IP and overwrites any caller-supplied
+      //      value under that name before proxying. That same gateway strips
+      //      cf-connecting-ip and x-forwarded-for, so without this line the
+      //      column is null for every gateway-routed caller (OR-T1103, #1025).
+      //      It is SECOND on purpose: nothing sets it on a direct call, so a
+      //      direct caller can send whatever it likes under that name, and
+      //      reading it first would let a caller replace a trustworthy value
+      //      with one it chose.
+      //   3. x-forwarded-for: caller-supplied, kept only as the pre-existing
+      //      last resort. A hint, not proof of origin.
+      request_ip:      req.headers.get('cf-connecting-ip')
+        ?? req.headers.get('x-gateway-verified-ip')
+        ?? req.headers.get('x-forwarded-for')
+        ?? null,
     });
     if (auditInsert.error) {
       console.error(
