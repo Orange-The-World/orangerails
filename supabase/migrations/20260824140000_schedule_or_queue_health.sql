@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: adds only new objects (one function, the or_queue_health cron job, one table, one partial index) and reads only tables that already exist; nothing applied after it depends on it.
 -- ============================================================
 -- Wire or-queue-health to pg_cron (DL-1568).
 --

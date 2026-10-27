@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: revokes anon write grants, each guarded by table existence, and narrows one default grant; absolute not relative, so apply order does not change the end state.
 -- Revoke write grants from the anonymous role across schema public, keep the
 -- two public forms working, and close the default privilege that keeps
 -- recreating the problem.

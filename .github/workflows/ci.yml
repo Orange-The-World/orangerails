@@ -1303,6 +1303,20 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: lint-and-build
+    # Not run on release-based heads (OR-T2751). This job starts the head's own
+    # widget and points it at the dev-deployed backend. A release branch is a
+    # snapshot of dev, so once dev adds a backend requirement (scan_generation
+    # on the stealth envelope calls) every release-based head gets HTTP 400 at
+    # the cursor write. That is contract skew between the snapshot and live dev,
+    # not a defect in the snapshot, and it was accepted as known skew on
+    # OR-T2751. Left as a failing job it holds the GitHub mergeable state at
+    # unstable, and the merge tool refuses anything that is not clean.
+    # A skipped job reports as skipped, not as passed: the cursor-write path is
+    # UNVERIFIED on a release snapshot until a dev-based head proves it.
+    # It still runs on every dev PR and on every push to dev and prod.
+    # Payback: make this proof contract-aware, or run it against a backend
+    # deployed from the same ref, then delete this condition.
+    if: ${{ !(startsWith(github.base_ref, 'release/') || (github.base_ref == 'prod' && startsWith(github.head_ref, 'release/'))) }}
     # Explicit, because the reporting step below is the ONLY way the assertion
     # output leaves this runner. Without this block the job inherits the
     # repository default token scope, and if that default is read-only then

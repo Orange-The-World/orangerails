@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: adds two nullable columns and one presence check to wrapped_data_keys, which holds no rows; 20260828234000 builds on it and name order runs this one first.
 -- 20260828183000_coadmin_envelope_v3_grant_columns.sql
 --
 -- Envelope v3, co-admin half: somewhere to put the per grant sealed keyring

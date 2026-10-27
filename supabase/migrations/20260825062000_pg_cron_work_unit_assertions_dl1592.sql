@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: adds or replaces five assertion functions and limits EXECUTE to service_role; reads only tables and cron jobs that already exist; nothing applied after it depends on it.
 -- ============================================================
 -- pg_cron work-unit assertions (DL-1592)
 --

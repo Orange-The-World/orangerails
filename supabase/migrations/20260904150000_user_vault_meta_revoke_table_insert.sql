@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: replaces table level INSERT with INSERT on 17 named columns of user_vault_meta, which holds no rows; its prerequisites 20260831071500, 20260831120000 and 20260828163000 run or are applied before it.
 -- 20260904150000_user_vault_meta_revoke_table_insert.sql
 -- Requires: 20260831071500, 20260831120000, 20260828163000
 --
