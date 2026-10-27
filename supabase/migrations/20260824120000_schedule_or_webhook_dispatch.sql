@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: replaces one function and one same-named cron job with the same behaviour; its prerequisite 20260824105000 is already applied; safe at any position.
 -- DL-1562: give the webhook_delivery queue a drain.
 --
 -- or-webhook-dispatch has been deployed and ACTIVE since at least 20 August and
