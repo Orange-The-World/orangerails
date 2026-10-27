@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: adds keyring_epoch, a watermark table and guards on user_vault_meta, which holds no rows; its prerequisites 20260831071500 and 20260828163000 are already applied.
 -- 20260831120000_user_vault_meta_keyring_epoch.sql
 -- Requires: 20260831071500
 --
