@@ -311,6 +311,9 @@ jobs:
               echo "The matched text is intentionally not shown here. A maintainer should open each linked comment and remove the reference if confirmed."
               echo
               echo "$hit_urls" | sed '/^$/d' | sed 's/^/- /'
+            elif [ "$fetch_warnings" -gt 0 ]; then
+              echo
+              echo "Sweep incomplete: ${fetch_warnings} fetch error(s). Results cannot be treated as a clean pass."
             else
               echo
               echo "No new internal-infrastructure reference found."
@@ -335,6 +338,25 @@ jobs:
               --title "[findings-scan] Comment scan found internal-infrastructure references" \
               --body-file "$issue_body_file"; then
               echo "::warning::Failed to open a findings-scan issue. URLs are in the job summary. Not failing this sweep: a red check on default branch is a red check on every open promotion PR."
+            fi
+          fi
+
+          if [ "$fetch_warnings" -gt 0 ] && [ "$hits" -eq 0 ]; then
+            echo "::warning::Sweep incomplete: ${fetch_warnings} fetch error(s). Opening maintainer issue."
+            incomplete_issue_body_file="${RUNNER_TEMP:?RUNNER_TEMP is not set}/findings-scan-incomplete.md"
+            {
+              echo "The comment findings-boundary scan completed with fetch errors and may be incomplete."
+              echo
+              echo "Fetch warnings: ${fetch_warnings}"
+              echo "Comments scanned: ${scanned}"
+              echo
+              echo "One or more API fetches failed. The sweep is not a clean pass -- a reference may have been missed. A maintainer should re-run once the API is healthy. Close this issue once a clean sweep confirms no references."
+            } > "$incomplete_issue_body_file"
+            if ! gh issue create \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "[findings-scan] Sweep incomplete: ${fetch_warnings} fetch error(s)" \
+              --body-file "$incomplete_issue_body_file"; then
+              echo "::warning::Failed to open incomplete-sweep issue."
             fi
           fi
 
