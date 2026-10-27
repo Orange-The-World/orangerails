@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: states an exact table privilege list for authenticated on three key tables, absolute not relative; its role specific checks skip with a notice if that role is absent.
 -- Table privilege allow list for the three co-admin key tables (OR-T0788).
 --
 -- WHAT THIS FILE DOES
