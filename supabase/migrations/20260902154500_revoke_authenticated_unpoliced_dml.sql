@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: revokes authenticated privileges that no policy admits on 30 tables, absolute not relative; it runs after 20260825000000 creates stealth_utxos, and name order guarantees that.
 -- 20260902154500_revoke_authenticated_unpoliced_dml.sql
 --
 -- OR-T1421, out of the enumeration on OR-T1409.
