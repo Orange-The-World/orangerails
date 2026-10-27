@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: revokes TRUNCATE, TRIGGER, REFERENCES and MAINTAIN from authenticated and narrows one default grant, absolute not relative; no data is touched.
 -- Remove TRUNCATE, TRIGGER, REFERENCES and MAINTAIN from the logged-in role
 -- (authenticated) across schema public, and close the default privilege that
 -- hands them to every new table.
