@@ -51,6 +51,12 @@
 -- public.wrapped_data_keys; restores the previous behaviour exactly.
 --
 -- IDEMPOTENT. Guarded on pg_policy, so a re-run is a no-op.
+--
+-- ROLE. The policy is addressed to authenticated, not to PUBLIC. Migration
+-- 20260903040000 raises if any permissive SELECT policy on this table is addressed to
+-- PUBLIC, so a PUBLIC owner read policy here would stop a run that applies this file
+-- before it (OR-T2750). A cluster that already has this policy is unaffected: the
+-- pg_policy guard below skips it.
 
 DO $$
 BEGIN
@@ -62,6 +68,7 @@ BEGIN
     CREATE POLICY "wrapped_data_keys: owner can read their own wrapped keys"
       ON public.wrapped_data_keys
       FOR SELECT
+      TO authenticated
       USING (EXISTS (SELECT 1
                        FROM public.user_vault_meta uvm
                       WHERE uvm.user_id = auth.uid()
