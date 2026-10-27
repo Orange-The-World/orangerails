@@ -1,4 +1,4 @@
--- OUT-OF-ORDER-OK: replaces one INSERT policy on user_vault_meta, which holds no rows; no later migration changes that policy, so replaying it now matches applying it in order.
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb replaces one INSERT policy on user_vault_meta, which holds no rows; no later migration changes that policy, so replaying it now matches applying it in order.
 -- Harden the INSERT policy on public.user_vault_meta so the write-once
 -- guarantee on workspace_key_id is enforced the same way on INSERT as it is
 -- on UPDATE, instead of relying only on the UNIQUE constraint added for
