@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb already applied on prod (ledger row and objects present); this line only lets the file enter the prod branch
 -- 20260831140000_user_vault_meta_workspace_key_server_allocated.sql
 --
 -- Mint public.user_vault_meta.workspace_key_id server side, and withdraw the
