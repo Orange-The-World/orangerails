@@ -12,7 +12,7 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { SINK_REASON_INSERT_FAILED, SINK_REASON_NO_WEBHOOK_URL, SINK_REASON_PLATFORM_NOT_FOUND, claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, shouldFlipOnMappingMissFirstAttempt, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
+import { SINK_REASON_INSERT_FAILED, SINK_REASON_NO_WEBHOOK_URL, SINK_REASON_PLATFORM_NOT_FOUND, claimRetiredEventForReplay, connectionIdForErroredMappingMiss, fetchPendingBatch, flipConnectionToErrorByConnectionId, handleEvent, handleEventSinkDelivery, markDeferred, reDriveReadyDeferrals, reconcileConnectionError, reconcileConnectionSuccess, retireConnRace, retireIfReconnectSuperseded, shouldFlipOnMappingMissFirstAttempt, shouldRetireConnRace, upstreamCodeForErroredEvent } from './index.ts';
 
 // ── explicit retired-event replay (OR-T0128) ────────────────────────
 
@@ -2189,6 +2189,118 @@ Deno.test('flipConnectionToErrorByConnectionId: skips when a newer processed suc
   await flipConnectionToErrorByConnectionId(client, erroredPendingEvent() as any, 'qconn-flipflop');
 
   assertEquals(updateCalled, false, 'update must not be called when a newer success event was already processed');
+});
+
+// ── retireIfReconnectSuperseded (OR-E0022 step 6) ─────────────────────────────
+// These tests fail on old code (function absent) and verify that the errored
+// event is retired immediately on retries when a customer reconnect has already
+// processed a newer success event, rather than burning through MAX_ATTEMPTS.
+
+Deno.test('retireIfReconnectSuperseded: retires event and returns true when a newer success was processed (reconnect during retry window)', async () => {
+  let retiredEventId: string | null = null;
+  let retiredReason: string | null = null;
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      let inboxUpdateCalled = false;
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(col: string, val: unknown) {
+          if (inboxUpdateCalled && col === 'event_id') retiredEventId = val as string;
+          return chain;
+        },
+        like(_col: string, _pat: unknown) { return chain; },
+        not(_col: string, _op: string, _val: unknown) { return chain; },
+        is(_col: string, _val: unknown) { return chain; },
+        gt(_col: string, _val: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        update(patch: Record<string, unknown>) {
+          inboxUpdateCalled = true;
+          retiredReason = patch.retirement_reason as string;
+          return chain;
+        },
+        then(resolve: (v: unknown) => unknown) {
+          if (table === 'connections') {
+            return resolve({ data: [{ subaccount_id: 'sub-reconnect' }], error: null });
+          }
+          if (table === 'quiltt_webhook_inbox') {
+            if (inboxUpdateCalled) return resolve({ error: null });
+            // findNewerProcessedSuccess: return a newer success event
+            return resolve({ data: [{ event_id: 'newer-success-evt-42' }], error: null });
+          }
+          return resolve({ data: [], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+  const ev = erroredPendingEvent({ attempts: 1 });
+  // deno-lint-ignore no-explicit-any
+  const result = await retireIfReconnectSuperseded(client, ev as any, 'qconn-xyz');
+  assertEquals(result, true, 'must return true when a reconnect already processed a newer success');
+  assertEquals(retiredEventId, 'evt_errored_no_map', 'must update the correct inbox row');
+  assertEquals(retiredReason, 'superseded-by-reconnect', 'retirement_reason must be superseded-by-reconnect');
+});
+
+Deno.test('retireIfReconnectSuperseded: returns false when no newer success exists (bumpAttempts should run)', async () => {
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        like(_col: string, _pat: unknown) { return chain; },
+        not(_col: string, _op: string, _val: unknown) { return chain; },
+        is(_col: string, _val: unknown) { return chain; },
+        gt(_col: string, _val: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        then(resolve: (v: unknown) => unknown) {
+          if (table === 'connections') {
+            return resolve({ data: [{ subaccount_id: 'sub-no-reconnect' }], error: null });
+          }
+          // quiltt_webhook_inbox: findNewerProcessedSuccess returns empty (no newer success)
+          return resolve({ data: [], error: null });
+        },
+      };
+      return chain;
+    },
+  };
+  const ev = erroredPendingEvent({ attempts: 2 });
+  // deno-lint-ignore no-explicit-any
+  const result = await retireIfReconnectSuperseded(client, ev as any, 'qconn-xyz');
+  assertEquals(result, false, 'must return false when no newer success event exists so bumpAttempts runs');
+});
+
+Deno.test('retireIfReconnectSuperseded: returns false when connection lookup returns no rows', async () => {
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(_table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select(_cols: string) { return chain; },
+        eq(_col: string, _val: unknown) { return chain; },
+        then(resolve: (v: unknown) => unknown) {
+          return resolve({ data: [], error: null }); // no connection rows
+        },
+      };
+      return chain;
+    },
+  };
+  const ev = erroredPendingEvent({ attempts: 3 });
+  // deno-lint-ignore no-explicit-any
+  const result = await retireIfReconnectSuperseded(client, ev as any, 'qconn-xyz');
+  assertEquals(result, false, 'must return false when connection lookup returns no rows');
+});
+
+Deno.test('retireIfReconnectSuperseded: returns false when ev.received_at is absent', async () => {
+  // deno-lint-ignore no-explicit-any
+  const client: any = { from(_: string) { throw new Error('should not reach db'); } };
+  const ev = erroredPendingEvent({ attempts: 1, received_at: undefined });
+  // deno-lint-ignore no-explicit-any
+  const result = await retireIfReconnectSuperseded(client, ev as any, 'qconn-xyz');
+  assertEquals(result, false, 'must return false without querying db when received_at is absent');
 });
 
 // ── handleEventSinkDelivery: step 3 webhook hold (OR-T0212 step 1) ───────────
