@@ -547,7 +547,8 @@ function SignupPage() {
             />
             <label htmlFor="ack" className="text-xs text-muted-foreground">
               I have saved my vault password in a password manager or secure location. I understand
-              that OrangeRails stores only encrypted data and can never recover this password.
+              that my encryption password is never shared with OrangeRails and cannot be recovered
+              if lost.
             </label>
           </div>
 
