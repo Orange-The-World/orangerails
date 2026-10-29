@@ -24,6 +24,16 @@ Deno.test('listProviderManifests: sparrow manifest has no connectUrl (DL-1007)',
   );
 });
 
+Deno.test('listProviderManifests: viabtc is a mining adapter with api_key + secret_key', () => {
+  const manifests = listProviderManifests();
+  const viabtc = manifests.find(m => m.slug === 'viabtc');
+  assertEquals(viabtc?.status, 'beta');
+  assertEquals(viabtc?.category, 'mining');
+  assertEquals(viabtc?.multiWallet, false);
+  const names = (viabtc?.credentialFields ?? []).map(f => f.name).sort();
+  assertEquals(names, ['api_key', 'secret_key']);
+});
+
 Deno.test('listProviderManifests: xpub manifest has no connectUrl (DL-1007)', () => {
   // xpub's connectUrl was removed in DL-1007 because /connect/bitcoin now
   // redirects to /providers, which would create a loop if the manifest pointed
