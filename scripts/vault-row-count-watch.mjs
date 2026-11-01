@@ -12,7 +12,7 @@
  *
  * WHAT IT PRINTS. This repository is public, so its Actions logs are public. The report is
  * a tier name plus NONE or PRESENT for vault owners, and it carries no digit. Exact numbers
- * are read on demand by a seat that holds a production read.
+ * are read on demand by someone who holds a production read.
  *
  * TIERS, decided on the larger of the two per-owner counts:
  *   OK          below 400
@@ -174,7 +174,7 @@ function render(result) {
     lines.push('SIMULATED: this tier was decided on a number supplied for a test, not on the real count.')
   }
   lines.push(
-    'Exact numbers are read on demand by a seat that holds a production read. This log is public and carries tier names only.',
+    'Exact numbers are read on demand by someone who holds a production read. This log is public and carries tier names only.',
   )
   return lines.join('\n')
 }
