@@ -1,0 +1,28 @@
+name: Test vault row-count watcher
+
+# The watcher itself (vault-row-count-watch.yml) holds a production-capable token and
+# is therefore never triggered by a pull request. Its self-test needs no secret and
+# no network beyond loopback, so it runs here instead, on any pull request that
+# touches the watcher, and proves every outcome, the red ones included, before the
+# change can land.
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/vault-row-count-watch.mjs'
+      - '.github/workflows/vault-row-count-watch.yml'
+      - '.github/workflows/test-vault-row-count-watch.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    name: Vault row-count watcher self-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Prove every outcome, including the red ones and the could-not-look ones
+        run: node scripts/vault-row-count-watch.mjs --selftest
