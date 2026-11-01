@@ -20,7 +20,7 @@ name: Vault row-count watch
 #
 # WHO WATCHES THE WATCHER. A run that never happens cannot report itself, so the
 # check that this workflow has not gone quiet is not in this file. It belongs to
-# the reliability seat: once a schedule exists, the last successful scheduled run
+# the reliability owner: once a schedule exists, the last successful scheduled run
 # must be less than ten days old.
 #
 # SCHEDULE. None yet, deliberately. The first run is manual and is read before any
