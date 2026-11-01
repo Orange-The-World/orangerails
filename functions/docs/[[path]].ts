@@ -8,6 +8,8 @@
 //
 // KEEP DOCS_PATHS IN STEP WITH THE ROUTER. Every page defined in src/routes/docs.tsx and in the
 // src/routes/docs directory must be listed below, otherwise that page answers 404 in production.
+// Matching is exact: a path that only starts with a listed page (for example /docs/strike-csv/x)
+// is not that page and answers 404 as well.
 //
 // Headers: Pages applies public/_headers to static assets, not to a response a Function builds. The
 // 404 below is built here, so it sets the same four hardening headers as the catch-all block in
