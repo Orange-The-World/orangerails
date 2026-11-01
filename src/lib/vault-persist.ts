@@ -816,7 +816,7 @@ export async function migrateAndPersistRotatedVault(args: RotateVaultArgs): Prom
   // silently replacing the key that was meant to survive; that is more code
   // and more to get right on a self-custody path, not less.
   //
-  // UNDOCUMENTED UNTIL NOW, FLAGGED BY THE AUDITOR ON PR #1336: THIS COUPLES
+  // UNDOCUMENTED UNTIL NOW (OR-T1977, auditor finding): THIS COUPLES
   // TWO PREVIOUSLY-INDEPENDENT FAILURE DOMAINS. sig_public_key is what
   // co-admin.ts's loadAdminSubkeys verifies a stored grant's signature
   // against (see grantCoAdmin / VaultContext.loadAdminSubkeys). If a recovery
