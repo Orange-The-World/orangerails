@@ -82,8 +82,8 @@ async function cleanupStrikeSubscription(
       throw new Error('stored credentials are not valid JSON');
     }
     // JSON.parse can return a string, a number or an array. Those used to
-    // reach parseStrikeCredentials as `any`. Reject them with a fixed string
-    // rather than let the shape error be phrased by something downstream.
+    // reach parseStrikeCredentials as `any`. Reject them with a fixed shape
+    // rather than let the error be phrased by something downstream.
     if (!decoded || typeof decoded !== 'object' || Array.isArray(decoded)) {
       throw new Error('stored credentials are not a JSON object');
     }
@@ -161,6 +161,77 @@ export async function tryDeleteStealthConnection(
   return { deleted: true };
 }
 
+// --- Steps 2.5 and 3: source_wallets cleanup + connection row delete ---
+
+/**
+ * Runs Step 2.5 (source_wallets cleanup) and Step 3 (connection row delete)
+ * after the connection row has been fetched and any Strike cleanup attempted.
+ *
+ * Extracted and exported so Deno unit tests can inject a stub serviceClient
+ * and a spy reportFn, verifying that a source_wallets failure is reported
+ * without blocking the connection delete. Mirrors the tryDeleteStealthConnection
+ * export convention.
+ *
+ * @param reportFn - Injected for tests; defaults to the real reportError so
+ *                   the production path is unchanged.
+ */
+// deno-lint-ignore no-explicit-any
+export async function deleteConnectionRow(
+  serviceClient: any,
+  connectionId: string,
+  subaccountId: string,
+  req: Request,
+  cors: Headers,
+  strikeSubscriptionDeleted: boolean | undefined,
+  reportFn: (err: unknown, fn: string, req: Request) => Promise<void> = reportError,
+): Promise<Response> {
+  // Step 2.5: remove source_wallets rows for this connection. source_wallets
+  // has no FK cascade from connections, so clean up explicitly to prevent
+  // stale fingerprint rows from hijacking a future re-add of the same
+  // provider account.
+  const { error: swDelErr } = await serviceClient
+    .from('source_wallets')
+    .delete()
+    .eq('connection_id', connectionId);
+  if (swDelErr) {
+    // Best effort, and REPORTED. The connection delete still proceeds:
+    // blocking a customer's delete because a cleanup query failed is its
+    // own bad outcome, and or-link-complete's liveness guard is the
+    // backstop that catches the orphaned rows on the next link.
+    //
+    // What is not acceptable is the failure being invisible. A failed
+    // cleanup leaves source_wallets rows pointing at a connection id that
+    // is about to stop existing. That orphan state is what lets a later
+    // re-add fingerprint-match a dead row, take the reconnect path, update
+    // a connection that no longer exists, and return success with nothing
+    // written and no error raised anywhere. DL-0389, OR-T0477.
+    console.error(await safeErrorLine('or-connection-delete', 'source-wallets-cleanup', swDelErr));
+    await reportFn(swDelErr, 'or-connection-delete', req);
+  }
+
+  // Step 3: delete the OR connection row (cascades to transactions and the
+  // strike_webhook_events queue via FK).
+  const { error: delErr, count } = await serviceClient
+    .from('connections')
+    .delete({ count: 'exact' })
+    .eq('id', connectionId)
+    .eq('subaccount_id', subaccountId);
+
+  if (delErr) {
+    console.error(await safeErrorLine('or-connection-delete', 'connection-delete', delErr));
+    return jsonResponse({ error: 'Failed to delete connection' }, 500, cors);
+  }
+  if ((count ?? 0) === 0) {
+    return jsonResponse({ error: 'Connection not found in this subaccount' }, 404, cors);
+  }
+
+  const response: Record<string, unknown> = { ok: true };
+  if (strikeSubscriptionDeleted !== undefined) {
+    response.strike_subscription_deleted = strikeSubscriptionDeleted;
+  }
+  return jsonResponse(response, 200, cors);
+}
+
 // --- Handler ---
 
 Deno.serve(wrapSentryHandler(async (req: Request) => {
@@ -225,51 +296,14 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       strikeSubscriptionDeleted = result.ok;
     }
 
-    // Step 2.5: remove source_wallets rows for this connection. source_wallets
-    // has no FK cascade from connections, so clean up explicitly to prevent
-    // stale fingerprint rows from hijacking a future re-add of the same
-    // provider account.
-    const { error: swDelErr } = await ctx.serviceClient
-      .from('source_wallets')
-      .delete()
-      .eq('connection_id', body.connection_id);
-    if (swDelErr) {
-      // Best effort, and REPORTED. The connection delete still proceeds:
-      // blocking a customer's delete because a cleanup query failed is its
-      // own bad outcome, and or-link-complete's liveness guard is the
-      // backstop that catches the orphaned rows on the next link.
-      //
-      // What is not acceptable is the failure being invisible. A failed
-      // cleanup leaves source_wallets rows pointing at a connection id that
-      // is about to stop existing. That orphan state is what lets a later
-      // re-add fingerprint-match a dead row, take the reconnect path, update
-      // a connection that no longer exists, and return success with nothing
-      // written and no error raised anywhere. DL-0389, OR-T0477.
-      console.error(await safeErrorLine('or-connection-delete', 'source-wallets-cleanup', swDelErr));
-      await reportError(swDelErr, 'or-connection-delete', req);
-    }
-
-    // Step 3: delete the OR connection row (cascades to transactions and the
-    // strike_webhook_events queue via FK).
-    const { error: delErr, count } = await ctx.serviceClient
-      .from('connections')
-      .delete({ count: 'exact' })
-      .eq('id', body.connection_id)
-      .eq('subaccount_id', subaccountId);
-
-    if (delErr) {
-      console.error(await safeErrorLine('or-connection-delete', 'connection-delete', delErr));
-      return jsonResponse({ error: 'Failed to delete connection' }, 500, cors);
-    }
-    if ((count ?? 0) === 0) {
-      return jsonResponse({ error: 'Connection not found in this subaccount' }, 404, cors);
-    }
-
-    const response: Record<string, unknown> = { ok: true };
-    if (strikeSubscriptionDeleted !== undefined) {
-      response.strike_subscription_deleted = strikeSubscriptionDeleted;
-    }
-    return jsonResponse(response, 200, cors);
+    return await deleteConnectionRow(
+      ctx.serviceClient,
+      body.connection_id,
+      subaccountId,
+      req,
+      cors,
+      strikeSubscriptionDeleted,
+    );
   } catch (err) {
     console.error(await safeErrorLine('or-connection-delete', 'fatal', err));
     return jsonResponse({ error: 'Internal error' }, 500, cors);
