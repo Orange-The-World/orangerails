@@ -20,7 +20,7 @@ function args(overrides: Partial<StealthInlineInitArgs> = {}): StealthInlineInit
   return {
     appSlug: "ow",
     appUserId: "user-1",
-    credKeyB64: "a".repeat(44),
+    stealthKeyB64: "a".repeat(44),
     widgetToken: "11111111-1111-1111-1111-111111111111",
     selfOrigin: SELF,
     ...overrides,
