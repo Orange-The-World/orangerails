@@ -61,8 +61,13 @@ export interface StealthInlineInitArgs {
   appSlug: string;
   /** The consuming app's own id for this user, from ?app_user_id=. */
   appUserId: string;
-  /** Per-app HKDF subkey, base64. Required in widget mode. */
-  credKeyB64: string;
+  /**
+   * Stealth key, base64-encoded raw 32-byte AES-256-GCM key.
+   * Received from the parent via the stealth_key_handoff postMessage exchange
+   * (deferred mode) or read from the #cred_key URL fragment (fragment mode).
+   * Must NOT be set from the credentials key by default or by type cast.
+   */
+  stealthKeyB64: string;
   /**
    * Session credential minted server-to-server by the host app's backend.
    * Optional here on purpose: when it is absent the widget still renders and
@@ -94,7 +99,7 @@ export function buildStealthInlineInit(args: StealthInlineInitArgs) {
     app_slug: args.appSlug,
     app_user_id: args.appUserId,
     mode: "add",
-    or_stealth_key_b64: args.credKeyB64,
+    or_stealth_key_b64: args.stealthKeyB64,
     return_callback_origin: args.selfOrigin,
   };
   // Only present the field when we actually have one. Sending
