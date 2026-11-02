@@ -40,6 +40,7 @@ as a CI gate. Run it locally first to skip the CI round-trip:
 -->
 
 - [ ] `bash scripts/pre-publish-scan.sh` exits clean on this branch
+- [ ] `bash scripts/install-git-hooks.sh` has activated the repository's `commit-msg` hook
 - [ ] No personal names in comments or strings
 - [ ] No internal infrastructure references (private hostnames, internal wikis)
 - [ ] No internal milestone tags (D-numbers, SEC-N, CQ-N, DB-N, PERF-N) outside the documented load-bearing exemptions

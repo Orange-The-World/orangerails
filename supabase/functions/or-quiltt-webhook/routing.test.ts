@@ -10,7 +10,12 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { applyRouting, buildRows, type QuilttEventLike } from './routing.ts';
+import {
+  applyRouting,
+  buildRows,
+  type QuilttEventLike,
+  warnOnDroppedEvents,
+} from './routing.ts';
 
 const SUB_A = '11111111-1111-4111-8111-111111111111';
 const SUB_B = '22222222-2222-4222-8222-222222222222';
@@ -36,19 +41,54 @@ function ev(
 }
 
 Deno.test('buildRows drops malformed events and keeps hints aligned', () => {
-  const { rows, hints } = buildRows([
+  const events = [
     ev(null, 'account.created', 'p_first'), // malformed: no id
     ev('evt_2', 'account.created', 'p_second'),
     ev('evt_3', null, 'p_third'), // malformed: no type
     ev('evt_4', 'balance.created', 'p_fourth'),
-  ]);
+  ];
+  const { rows, hints, droppedCount } = buildRows(events);
 
   assertEquals(rows.length, 2);
   assertEquals(hints.length, 2);
   assertEquals(rows[0].event_id, 'evt_2');
+  assertEquals(rows[0].payload, events[1]);
   assertEquals(hints[0].profileId, 'p_second');
   assertEquals(rows[1].event_id, 'evt_4');
+  assertEquals(rows[1].payload, events[3]);
   assertEquals(hints[1].profileId, 'p_fourth');
+  assertEquals(droppedCount, 2);
+});
+
+Deno.test('the malformed-event warning carries batch counts only and is silent at zero', () => {
+  const warnings: string[] = [];
+  const events = [
+    {
+      // Missing id makes this event malformed. Every other value must stay out
+      // of the counts-only warning even though it was present in the batch.
+      type: 'profile.secret-event-type',
+      profile: { id: 'p_SECRETPROFILE456' },
+      provider_text: 'provider payload text',
+    },
+    ev('evt_SECRETEVENT123', 'profile.created', 'p_valid'),
+  ];
+  const { droppedCount } = buildRows(events);
+
+  warnOnDroppedEvents(droppedCount, events.length, (line) => warnings.push(line));
+
+  assertEquals(warnings, [
+    '[or-quiltt-webhook] malformed-events: dropped=1 batch_size=2',
+  ]);
+  for (const value of [
+    'evt_SECRETEVENT123',
+    'p_SECRETPROFILE456',
+    'profile.secret-event-type',
+    'provider payload text',
+  ]) {
+    assertEquals(warnings[0].includes(value), false);
+  }
+  warnOnDroppedEvents(0, events.length, (line) => warnings.push(line));
+  assertEquals(warnings.length, 1);
 });
 
 Deno.test('a malformed event does not shift routing onto the wrong subaccount', () => {
@@ -159,7 +199,7 @@ Deno.test('an event with no profile at all is unrouted, not crashed on', () => {
 });
 
 Deno.test('an all-malformed batch produces no rows', () => {
-  const { rows, hints, profileIds, metaSubaccountIds } = buildRows([
+  const { rows, hints, profileIds, metaSubaccountIds, droppedCount } = buildRows([
     ev(null, null),
     { profile: { id: 'p_a' } },
   ]);
@@ -168,6 +208,7 @@ Deno.test('an all-malformed batch produces no rows', () => {
   assertEquals(hints.length, 0);
   assertEquals(profileIds, []);
   assertEquals(metaSubaccountIds, []);
+  assertEquals(droppedCount, 2);
 });
 
 Deno.test('counts partition the batch exactly', () => {

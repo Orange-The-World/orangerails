@@ -75,6 +75,39 @@ interface SealedTransactionInput {
   block_height: number;
   /** Lowercase hex, 64 chars. HMAC-SHA-256 output, not base64. */
   txid_blind_index_hex: string;
+  /**
+   * Canonical block hash at block_height, lowercase hex 64 chars.
+   * Captured client-side from the .json sidecar before sealing (OR-T0999).
+   * Absent on records sealed before this field was added -- those are stored
+   * with block_hash=NULL and the reorg detector skips them as unverifiable
+   * (OR-T0407 ruling: NULL means pre-hash, not an error).
+   */
+  block_hash_hex?: string;
+}
+
+/**
+ * The sealed UTXO set built by sync.ts's in-run tracker (OR-T0049 PR 2).
+ * Opaque end to end: this function stores and returns the bytes without
+ * ever parsing or decrypting them, exactly like SealedTransactionInput
+ * above. Optional so every existing caller (which does not send this yet)
+ * is unaffected.
+ */
+interface SealedUtxosInput {
+  version: 1;
+  algorithm: 'AES-256-GCM';
+  iv_b64: string;
+  ciphertext_b64: string;
+}
+
+function isSealedUtxosInput(x: unknown): x is SealedUtxosInput {
+  if (!x || typeof x !== 'object') return false;
+  const o = x as Record<string, unknown>;
+  return (
+    o.version === 1 &&
+    o.algorithm === 'AES-256-GCM' &&
+    typeof o.iv_b64 === 'string' &&
+    typeof o.ciphertext_b64 === 'string'
+  );
 }
 
 interface TransactionsStoreRequestBody {
@@ -88,6 +121,25 @@ interface TransactionsStoreRequestBody {
    * OrangeRails JWT. Ignored when X-Platform-API-Key is present.
    */
   widget_token?: string;
+  /**
+   * OR-T2457: the connection's scan_generation as read at the START of this
+   * sync (from or-stealth-envelope-fetch). Required, uuid-shaped.
+   *
+   * Refused with 400 if absent or malformed, and with 409 if it no longer
+   * matches the connection's current value: that means the connection was
+   * reset (envelope replaced) while this sync was running, and
+   * last_block_scanned / the cursor this call would otherwise write both
+   * predate that reset. Identical rule to or-stealth-envelope-update.
+   */
+  scan_generation?: string;
+  /**
+   * The sealed UTXO set as of this sync run (OR-T0049 PR 2), optional.
+   * When present and well-formed, persisted via upsert_stealth_utxos keyed
+   * to the same bounded cursor height this call would otherwise return, so
+   * a future sync can fetch it (or-stealth-utxos-fetch) and seed its
+   * in-run matcher instead of starting from an empty UTXO map.
+   */
+  sealed_utxos?: SealedUtxosInput;
 }
 
 interface TransactionsStoreResponseBody {
@@ -96,15 +148,32 @@ interface TransactionsStoreResponseBody {
   total: number;
   skipped_duplicates: number;
   last_block_scanned: number | null;
+  /**
+   * Present ONLY when the caller sent sealed_utxos and the persist RPC
+   * failed. Absence means either no sealed_utxos was sent, or it was
+   * persisted successfully -- both healthy outcomes. The sealed
+   * transactions above are the primary record and are not rolled back on
+   * this failure.
+   */
+  utxo_persist_failed?: boolean;
 }
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 // The blind index is the hex of an HMAC-SHA-256, so it is exactly 64 lowercase
 // hex chars. Checking the shape here keeps a malformed client from writing a
 // value the dedup constraint would treat as a distinct transaction forever.
 const BLIND_INDEX_HEX_RE = /^[0-9a-f]{64}$/;
+
+// block_hash_hex, when present, must be exactly 64 lowercase hex chars, the
+// same shape a real block hash always has and the shape fetchCanonicalBlockHash
+// always lowercases to on the read side. Rejecting anything else here (not
+// just on the client) closes OR-C2078: an uppercase or malformed hash stored
+// verbatim would permanently fail a case-sensitive compare against the
+// always-lowercase canonical hash and orphan a real transaction with no
+// self-heal path, since the reorg check filters out already-orphaned rows.
+const BLOCK_HASH_HEX_RE = /^[0-9a-f]{64}$/;
 
 // Cap at 10k transactions per request and 16 KB per sealed record. A whole
 // 5-year wallet history with ~500 txs comes in well under that.
@@ -130,7 +199,13 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
     Number.isInteger(o.block_height) &&
     (o.block_height as number) >= 0 &&
     typeof o.txid_blind_index_hex === 'string' &&
-    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string)
+    BLIND_INDEX_HEX_RE.test(o.txid_blind_index_hex as string) &&
+    // block_hash_hex is optional (pre-hash records, OR-T0407), but when the
+    // caller sends one it must be well-formed lowercase hex. Any other shape
+    // fails the whole record rather than being stored verbatim (OR-C2078).
+    (o.block_hash_hex === undefined ||
+      (typeof o.block_hash_hex === 'string' &&
+        BLOCK_HASH_HEX_RE.test(o.block_hash_hex as string)))
   );
 }
 
@@ -146,6 +221,63 @@ export function isSealedTx(x: unknown): x is SealedTransactionInput {
  * on or-stealth-envelope-update it is the height the caller posted.
  */
 export { boundCursorAdvance, isContiguousScannedHeight };
+
+/**
+ * OR-T2457: atomic generation check + INSERT + cursor patch in one DB transaction.
+ *
+ * Exported so tests can reproduce the reset race without a real database by
+ * supplying a fake service client that mirrors the RPC contract (see index.test.ts).
+ * Removing this export or replacing the rpc() call inside it with direct
+ * .from().upsert() turns those tests red immediately.
+ */
+// deno-lint-ignore no-explicit-any
+export async function storeTransactionsAtomic(
+  serviceClient: any,
+  params: {
+    connection_id: string;
+    platform_id: string;
+    scan_generation: string;
+    rows: unknown[];
+    cursor_advance: number;
+    sync_at: string;
+  },
+): Promise<{ http_status: 200 | 404 | 409; inserted: number } | { rpc_error: string }> {
+  const { data, error } = await serviceClient.rpc('store_stealth_transactions_atomic', {
+    p_connection_id:  params.connection_id,
+    p_platform_id:    params.platform_id,
+    p_generation:     params.scan_generation,
+    p_rows:           params.rows,
+    p_cursor_advance: params.cursor_advance,
+    p_sync_at:        params.sync_at,
+  });
+  if (error) return { rpc_error: (error as { message: string }).message ?? String(error) };
+  const d = data as { http_status: number; inserted: number };
+  return { http_status: d.http_status as 200 | 404 | 409, inserted: d.inserted };
+}
+
+/**
+ * OR-T2457: The handler's exact write call site, exported for handler-level
+ * test coverage. The handler calls this instead of storeTransactionsAtomic
+ * directly; tests import it and call it with a fake service client that
+ * implements ONLY rpc() (not .from() for writes). Changing the body to use
+ * .from().upsert() causes that fake client to throw, turning both
+ * handler-level tests in index.test.ts red. Removing this export causes an
+ * import failure that turns every test in that file red.
+ */
+// deno-lint-ignore no-explicit-any
+export async function invokeBatchWrite(
+  serviceClient: any,
+  params: {
+    connection_id: string;
+    platform_id: string;
+    scan_generation: string;
+    rows: unknown[];
+    cursor_advance: number;
+    sync_at: string;
+  },
+): Promise<{ http_status: 200 | 404 | 409; inserted: number } | { rpc_error: string }> {
+  return storeTransactionsAtomic(serviceClient, params);
+}
 
 /**
  * Response cursor derivation (DL-0419). Returns the effective stored cursor
@@ -247,6 +379,15 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         400, cors,
       );
     }
+    if (body.sealed_utxos !== undefined && !isSealedUtxosInput(body.sealed_utxos)) {
+      return jsonResponse({ error: 'sealed_utxos is malformed' }, 400, cors);
+    }
+    // OR-T2457: refused rather than defaulted. A caller with no fresh generation
+    // is indistinguishable from one carrying a stale one, so there is no safe
+    // permissive fallback -- same rule as or-stealth-envelope-update.
+    if (!body.scan_generation || !UUID_RE.test(body.scan_generation)) {
+      return jsonResponse({ error: 'scan_generation (uuid) required' }, 400, cors);
+    }
 
     if (ctx.mode === 'direct' && body.app_user_id !== ctx.userId) {
       return jsonResponse(
@@ -278,7 +419,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // below knows the stored cursor without a second round trip.
     const { data: ownerRow, error: ownerErr } = await ctx.serviceClient
       .from('stealth_connections')
-      .select('id, app_user_id, last_block_scanned')
+      .select('id, app_user_id, last_block_scanned, scan_generation')
       .eq('platform_id', callerPlatformId)
       .eq('id', body.connection_id)
       .maybeSingle();
@@ -291,6 +432,17 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     }
     if ((ownerRow.app_user_id as string) !== body.app_user_id) {
       return jsonResponse({ error: 'Connection does not belong to caller' }, 403, cors);
+    }
+    // OR-T2457: refuse if the connection was reset (envelope replaced) since
+    // this sync began. last_block_scanned is cleared to NULL on every reset,
+    // so the forward-only guard alone treats a just-reset connection like a
+    // brand new one: "anything may write". A stale height from a pre-reset
+    // sync would then land and defeat the rescan the reset opened.
+    if ((ownerRow.scan_generation as string) !== body.scan_generation) {
+      return jsonResponse(
+        { error: 'Connection was reset since this sync began; stale write refused' },
+        409, cors,
+      );
     }
 
     // Stamp last_sync_attempt_at on entry so every sync attempt is recorded,
@@ -314,10 +466,11 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
     // the txid_blind_index_hex set after.
     let inserted = 0;
     let skipped_duplicates = 0;
-    // trackMax: highest block_height among rows that were actually inserted.
-    // Stays -1 when no rows land (all dupes or empty batch), which keeps the
-    // forward-only guard below from advancing the cursor.
+    // trackMax: highest block_height among fresh rows. Stays -1 when the
+    // batch is empty or all dupes, which keeps store_stealth_transactions_atomic
+    // from advancing the cursor (forward-only invariant).
     let maxBlockInserted = -1;
+    let fresh: unknown[] = [];
 
     if (total > 0) {
       const rows = body.sealed_transactions.map((tx) => ({
@@ -331,11 +484,16 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         occurred_at: tx.occurred_at,
         block_height: tx.block_height,
         txid_blind_index_hex: tx.txid_blind_index_hex,
+        // Persist the canonical block hash so the server-side reorg detector
+        // can compare it against the chain later.  NULL means this record was
+        // uploaded before hash capture was added and is permanently unverifiable;
+        // the detector skips NULL rows in silence, never logs them as failures.
+        block_hash: tx.block_hash_hex ?? null,
       }));
 
-      // Count duplicates BEFORE insert by checking which txid blind indexes
-      // already exist for this connection. Cheaper than counting after when
-      // total is bounded.
+      // Count duplicates BEFORE the atomic write by checking which txid blind
+      // indexes already exist for this connection. Cheaper than counting after
+      // when total is bounded.
       const blinds = body.sealed_transactions.map((t) => t.txid_blind_index_hex);
       const { data: pre, error: preErr } = await ctx.serviceClient
         .from('stealth_transactions')
@@ -347,60 +505,74 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
         return jsonResponse({ error: 'Failed to dedup-check transactions' }, 500, cors);
       }
       const existing = new Set(((pre ?? []) as Array<{ txid_blind_index_hex: string }>).map((r) => r.txid_blind_index_hex));
-      const fresh = rows.filter((r) => !existing.has(r.txid_blind_index_hex as string));
+      fresh = rows.filter((r) => !existing.has((r as Record<string, unknown>).txid_blind_index_hex as string));
       skipped_duplicates = total - fresh.length;
 
       if (fresh.length > 0) {
-        const { error: insErr } = await ctx.serviceClient
-          .from('stealth_transactions')
-          .upsert(fresh, {
-            onConflict: 'connection_id,txid_blind_index_hex',
-            ignoreDuplicates: true,
-          });
-        if (insErr) {
-          console.error('[or-stealth-transactions-store] insert failed:', insErr);
-          return jsonResponse({ error: 'Failed to insert transactions' }, 500, cors);
-        }
-        inserted = fresh.length;
-        // trackMax-inside-guard: compute max block_height only for the rows that
-        // actually landed. This endpoint never raises the cursor to
-        // body.last_block_scanned, because on the store path that would move the
-        // watermark past blocks this call never committed, silently losing
-        // events that settle later.
-        // This is a CANDIDATE height, not the final cursor: boundCursorAdvance
-        // below caps it at the last height the client scanned contiguously.
-        // or-stealth-envelope-update writes this same column in step 4 of the
-        // widget sync flow. That one does advance to the height the caller
-        // reports, because it has no committed rows to derive a height from, and
-        // it is held to the same contiguity contract as this function:
-        // ../_shared/scan-cursor.ts, imported by both. Do not read the sentence
-        // above as "the sibling is the safe place to send a chain tip" -- it is
-        // not, and reading it that way is the defect OR-T1914 fixed.
-        maxBlockInserted = Math.max(...fresh.map((r) => r.block_height as number));
+        // trackMax-inside-guard: derive the cursor candidate only from the fresh
+        // rows about to land.  The Postgres function uses the same bounded value
+        // for the forward-only guard; deriveResponseCursor uses it so the cursor
+        // returned to the caller always mirrors what was persisted.
+        maxBlockInserted = Math.max(...(fresh as Array<{ block_height: number }>).map((r) => r.block_height));
       }
     }
 
-    // Forward-only cursor guard (trackMax-inside-guard). Advance last_block_scanned
-    // only when new rows were inserted AND the advance height exceeds the stored
-    // cursor. Always update last_sync_at so the connection shows activity.
-    // OR-T1120: the advance height is max(block_height) of the inserted rows
-    // CAPPED at the last height the client scanned contiguously, so the cursor
-    // can never step over a gap the client never read.
+    // storedCursor: the cursor value BEFORE this call, retained for the UTXO
+    // scannedTo calculation and deriveResponseCursor below.
     const storedCursor = (ownerRow.last_block_scanned as number | null) ?? -1;
+    // OR-T1120: bound the cursor advance at the last height the client scanned
+    // contiguously so the cursor never steps over a gap the client never read.
     const cursorAdvanceTo = boundCursorAdvance(maxBlockInserted, body.last_block_scanned);
-    const cursorPatch: Record<string, unknown> = { last_sync_at: new Date().toISOString() };
-    if (inserted > 0 && cursorAdvanceTo > storedCursor) {
-      cursorPatch.last_block_scanned = cursorAdvanceTo;
-    }
 
-    const { error: updErr } = await ctx.serviceClient
-      .from('stealth_connections')
-      .update(cursorPatch)
-      .eq('platform_id', callerPlatformId)
-      .eq('id', body.connection_id);
-    if (updErr) {
-      console.error('[or-stealth-transactions-store] connection update failed:', updErr);
-      return jsonResponse({ error: 'Failed to update connection sync metadata' }, 500, cors);
+    // OR-T2457 atomic fence: generation check + INSERT + cursor patch in ONE
+    // database transaction via store_stealth_transactions_atomic(). A concurrent
+    // envelope reset between the ownership SELECT above and this call cannot
+    // commit stale rows: the Postgres function locks the connection row (FOR
+    // UPDATE), re-checks scan_generation, and returns 409 without inserting
+    // anything if they differ -- closing the TOCTOU race the two-step JS
+    // sequence (separate upsert + cursor UPDATE) could not close.
+    const atomicResult = await invokeBatchWrite(ctx.serviceClient, {
+      connection_id:   body.connection_id!,
+      platform_id:     callerPlatformId,
+      scan_generation: body.scan_generation!,
+      rows:            fresh,
+      cursor_advance:  cursorAdvanceTo,
+      sync_at:         new Date().toISOString(),
+    });
+
+    if ('rpc_error' in atomicResult) {
+      console.error('[or-stealth-transactions-store] atomic store rpc failed:', atomicResult.rpc_error);
+      return jsonResponse({ error: 'Failed to store transactions' }, 500, cors);
+    }
+    if (atomicResult.http_status === 409) {
+      return jsonResponse(
+        { error: 'Connection was reset since this sync began; stale write refused' },
+        409, cors,
+      );
+    }
+    if (atomicResult.http_status === 404) {
+      return jsonResponse({ error: 'Connection not found' }, 404, cors);
+    }
+    inserted = atomicResult.inserted;
+
+    // Optional UTXO-set persist (OR-T0049 PR 2a). Non-fatal: the sealed
+    // transactions above are already committed, and failing the whole
+    // request over this secondary write would discard them for no reason.
+    // scanned_to uses the same bounded height boundCursorAdvance already
+    // computed above, so the persisted UTXO set and the persisted cursor
+    // never disagree about what height they describe.
+    let utxo_persist_failed = false;
+    if (body.sealed_utxos !== undefined) {
+      const scannedTo = Math.max(cursorAdvanceTo, storedCursor, 0);
+      const { error: utxoErr } = await ctx.serviceClient.rpc('upsert_stealth_utxos', {
+        p_connection_id: body.connection_id,
+        p_sealed_utxos: body.sealed_utxos,
+        p_scanned_to: scannedTo,
+      });
+      if (utxoErr) {
+        console.error('[or-stealth-transactions-store] upsert_stealth_utxos failed:', utxoErr);
+        utxo_persist_failed = true;
+      }
     }
 
     // Return the effective stored cursor so callers can distinguish "cursor
@@ -419,6 +591,7 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
       total,
       skipped_duplicates,
       last_block_scanned: effectiveCursor,
+      ...(utxo_persist_failed ? { utxo_persist_failed: true } : {}),
     };
     return jsonResponse(resp, 200, cors);
   } catch (err) {

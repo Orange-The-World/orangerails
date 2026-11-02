@@ -1,4 +1,9 @@
 // Shared HTTP helpers for Supabase Edge Functions
+//
+// Deploy note: on a push, the deploy workflow ships only the function
+// directories changed in that push, EXCEPT when a _-prefixed shared directory
+// (this one, for example) or supabase/config.toml changed, in which case it
+// redeploys every function. A comment-only edit here counts as a change.
 
 // Custom headers for OR's auth modes:
 //   x-platform-api-key , Plaid-style platform API key for SaaS integrators

@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb revokes PUBLIC and anon EXECUTE on five existing trigger functions, absolute not relative, so apply order does not change the end state; nothing is dropped and no data is touched.
 -- 20260828160000_revoke_public_execute_vault_trigger_functions.sql
 --
 -- Take PUBLIC (and therefore anon) off EXECUTE for the five vault trigger

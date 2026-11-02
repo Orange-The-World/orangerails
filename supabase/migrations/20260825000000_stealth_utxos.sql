@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb creates the new table stealth_utxos with its own SELECT grant and read policy for authenticated, plus a service_role only function; needs only stealth_connections, which already exists.
 -- DL-0420 PR 1: stealth_utxos table + upsert_stealth_utxos RPC
 --
 -- Problem: src/stealth/lib/sync.ts builds utxoMap in-memory per runSync()
@@ -60,16 +61,23 @@ COMMENT ON COLUMN public.stealth_utxos.scanned_to IS
 
 ALTER TABLE public.stealth_utxos ENABLE ROW LEVEL SECURITY;
 
+-- Table privilege for the read path. A table created by the postgres role does
+-- not always receive a default grant to authenticated, so the grant is stated
+-- here. SELECT only; the policy below is the row filter. No DML privilege for
+-- authenticated.
+GRANT SELECT ON TABLE public.stealth_utxos TO authenticated;
+
 -- Authenticated users may SELECT their own row via connection ownership.
 -- The predicate joins stealth_connections and checks app_user_id against
 -- auth.uid()::text (the same ownership model used by stealth_connections).
 -- No INSERT/UPDATE/DELETE policies: direct DML by authenticated users is
 -- not permitted. All writes go through upsert_stealth_utxos (SECURITY
--- DEFINER, EXECUTE granted to service_role only).
+-- DEFINER, callable by service_role only).
 -- service_role bypasses RLS entirely and needs no policy here.
 DROP POLICY IF EXISTS "owner read via connection" ON public.stealth_utxos;
 CREATE POLICY "owner read via connection" ON public.stealth_utxos
   FOR SELECT
+  TO authenticated
   USING (
     EXISTS (
       SELECT 1 FROM public.stealth_connections sc

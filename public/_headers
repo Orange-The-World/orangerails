@@ -13,3 +13,52 @@
   Content-Security-Policy: frame-ancestors 'none'
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
+
+# --- connect.orangerails.com: the Stealth Sync widget host ---
+# This host runs the client-side Bitcoin math (BIP157/158 filter matching via
+# WebAssembly) and holds a customer's per-app vault key in memory (see
+# docs/Stealth-Sync.md). It is the single most sensitive page in the product,
+# so it gets a page-sized CSP instead of the template default-src 'self'.
+#
+# Scoped to this host only, via the same absolute-URL source-pattern
+# mechanism the docs.orangerails.com rule above already uses, so this cannot
+# silently break orangerails.com or docs.orangerails.com, which load things
+# this page does not (e.g. Quiltt for bank-linking on the main app).
+#
+# Every origin below was found by reading the source on dev HEAD
+# 2026-09-04, not assumed:
+#   script-src 'wasm-unsafe-eval' -- src/stealth/lib/wasm/index.ts loads a
+#     Vite-bundled same-origin .wasm chunk and calls WebAssembly.instantiate.
+#     This is the narrow CSP3 keyword for that; it does not enable eval().
+#   script-src sha256 hashes x4 -- the four fixed inline <script> blocks
+#     index.html loads on every page: the docs.* redirect shim, the splash
+#     theme picker, and the two JSON-LD blocks. Hashed so inline script
+#     stays allowed without 'unsafe-inline'. A hash mismatch fails CLOSED
+#     (the script silently stops running, not an XSS hole) -- recompute
+#     these from index.html's exact bytes if those blocks ever change.
+#   style-src 'unsafe-inline' -- React's style={{...}} renders as a style=""
+#     attribute (style-src-attr, which falls back to style-src when unset);
+#     those values are computed at runtime and cannot be hashed. Style
+#     injection is a far smaller attack surface than script injection,
+#     which is why this widens style-src but leaves script-src hash-only.
+#   style-src/font-src fonts.google* -- index.html's <head> loads Inter and
+#     JetBrains Mono from Google Fonts on every page, this one included.
+#   connect-src blocks.orangerails.com, stealth.orangerails.com -- the
+#     BIP158 block source and filter CDN this widget fetches directly.
+#   connect-src the two Supabase project hosts by exact hostname --
+#     fzwmnzmtqidumdqjdddz (dev) and lcdicqalreskibdfxkzb (prod), per
+#     docs/Stealth-Sync.md and resolveFunctionUrl.test.ts. Listed
+#     explicitly rather than a *.supabase.co wildcard: a wildcard would let
+#     this page talk to ANY Supabase project, including an attacker's.
+#
+# KNOWN GAP, not fixed here. OR_STEALTH_INIT accepts
+# an optional proxy_base_url (src/stealth/lib/postmessage.ts,
+# src/stealth/widget/lib/resolveFunctionUrl.ts) letting a CONSUMING APP
+# route the widget's calls through its own server-side proxy at a URL of
+# ITS choosing. A static connect-src allowlist cannot cover an arbitrary
+# integrator-supplied origin. Whether any current integrator sets this is
+# UNVERIFIED here -- no access to search BitBooks/Orange Way/third-party
+# codebases from this seat. If one does, that integration breaks under this
+# policy until the list is extended or the feature is reworked.
+https://connect.orangerails.com/*
+  Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-9y7fpfrDHCEVYnuFs4LDwMgRPq1W+lKxfyETacdW6uE=' 'sha256-+B3aBgsnvAmS1jEiF/k2Mvc7KHGky9bM4fTmXfNcFWQ=' 'sha256-nGkMeps9emAV22tf8GtAdZcyUis0NrshytYegFxL/bQ=' 'sha256-gaToKRhLWsWHaTNg2cRkV4ug8HgAL//kpKoOYxUy9yc='; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://blocks.orangerails.com https://stealth.orangerails.com https://fzwmnzmtqidumdqjdddz.supabase.co https://lcdicqalreskibdfxkzb.supabase.co; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'

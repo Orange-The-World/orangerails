@@ -41,6 +41,7 @@ interface FakeOptions {
 
 function makeFakeClient(options: FakeOptions = {}) {
   const inserts: RecordedInsert[] = [];
+  const deletes: string[] = [];
 
   const client = {
     from(table: string) {
@@ -54,6 +55,10 @@ function makeFakeClient(options: FakeOptions = {}) {
           throw new Error("a grant does not read; this client only records inserts");
         },
         delete() {
+          // Recorded rather than only thrown, so a compensating delete shows
+          // up as a failed assertion on `deletes` instead of being swallowed
+          // by rejection() capturing the thrown error as the rejection reason.
+          deletes.push(table);
           throw new Error("a grant does not delete; see the note about compensating deletes");
         },
       };
@@ -66,6 +71,7 @@ function makeFakeClient(options: FakeOptions = {}) {
   return {
     client: client as unknown as Parameters<typeof persistCoAdminGrant>[0]["supabase"],
     inserts,
+    deletes,
   };
 }
 
@@ -100,6 +106,13 @@ const UNIQUE_VIOLATION = {
   code: "23505",
   message:
     'duplicate key value violates unique constraint "workspace_admins_owner_user_id_admin_user_id_key"',
+};
+
+/** The same shape, for the OTHER unique constraint: (data_key_id, recipient_user_id). */
+const WRAPPED_KEY_UNIQUE_VIOLATION = {
+  code: "23505",
+  message:
+    'duplicate key value violates unique constraint "wrapped_data_keys_key_recipient_uniq"',
 };
 
 describe("a co-admin grant writes the evidence before the access", () => {
@@ -173,17 +186,23 @@ describe("a grant that stops half way leaves the evidence, never the access", ()
   });
 
   it("does not delete the list row back out after the key write fails", async () => {
-    // The fake throws on delete(), so reaching one fails this test loudly. An
-    // error from a write is not proof the write did not land, only that its
-    // answer did not come back, so compensating here is one of the ways the
-    // dangerous state gets created rather than avoided.
-    const { client, inserts } = makeFakeClient({
+    // An error from a write is not proof the write did not land, only that
+    // its answer did not come back, so compensating here is one of the ways
+    // the dangerous state gets created rather than avoided. The fake's
+    // delete() does throw, but that throw was previously only visible as the
+    // rejection reason, which rejection() captures without inspecting, so a
+    // delete added later would pass this test while asserting the same two
+    // inserts. Recording delete calls and asserting none were made tests the
+    // thing the title names instead of a side effect of it.
+    const { client, inserts, deletes } = makeFakeClient({
       errors: { wrapped_data_keys: { message: "network error" } },
     });
 
-    await rejection(persist(client));
+    const err = await rejection(persist(client));
 
+    expect(err).toBeInstanceOf(CoAdminGrantIncompleteError);
     expect(insertedTables(inserts)).toEqual(["workspace_admins", "wrapped_data_keys"]);
+    expect(deletes).toEqual([]);
   });
 });
 
@@ -212,5 +231,90 @@ describe("granting again after a stop is the remedy, not a second dead end", () 
     // something entirely different from a row that is already there.
     expect((err as Error).message).toContain("permission denied");
     expect(insertedTables(inserts)).toEqual(["workspace_admins"]);
+  });
+});
+
+describe("a duplicate key row is reported, never silently replaced (OR-E0015)", () => {
+  it("tells the owner a key is already stored, without deleting anything", async () => {
+    const { client, inserts } = makeFakeClient({
+      errors: { wrapped_data_keys: WRAPPED_KEY_UNIQUE_VIOLATION },
+    });
+
+    const err = await rejection(persist(client));
+
+    expect(err).toBeInstanceOf(CoAdminGrantIncompleteError);
+    const message = (err as Error).message;
+    expect(message).toContain("already has a stored key");
+    expect(message).toContain("remove them and grant again");
+    // The fake throws on delete(), so reaching it fails this test loudly:
+    // this path must never delete a row on the strength of an unconfirmed
+    // failure. See the "does not delete the list row back out" case above
+    // for the same rule applied to the other row.
+    expect(insertedTables(inserts)).toEqual(["workspace_admins", "wrapped_data_keys"]);
+  });
+
+  it("still uses the generic incomplete-grant message for a non-duplicate key failure", async () => {
+    const { client } = makeFakeClient({
+      errors: {
+        wrapped_data_keys: {
+          code: "42501",
+          message: "new row violates row-level security policy for table wrapped_data_keys",
+        },
+      },
+    });
+
+    const err = await rejection(persist(client));
+
+    expect(err).toBeInstanceOf(CoAdminGrantIncompleteError);
+    // A blanket "duplicate" message on every key-row failure would tell an
+    // owner blocked by an RLS refusal that someone already has a key, which
+    // is simply false and points them at the wrong remedy.
+    expect((err as Error).message).not.toContain("already has a stored key");
+    expect((err as Error).message).toContain("row-level security");
+  });
+});
+
+describe("alreadyGranted is the contract the caller branches on (OR-T1942 / OR-C2088)", () => {
+  // app.tsx's onSubmit handler cannot afford to parse error prose to decide
+  // whether there is a real, working grant underneath. It reads
+  // err.alreadyGranted and, only when it is false, offers the "Remove this
+  // incomplete co-admin?" dialog. Get this flag wrong in either direction and
+  // that dialog either reappears for an already-granted recipient (letting
+  // "Remove from list" orphan their real access, OR-C2088's finding) or stops
+  // appearing for a genuinely incomplete grant (leaving the owner with no way
+  // to clear a dead list entry).
+  it("is true only for the duplicate wrapped_data_keys row", async () => {
+    const { client } = makeFakeClient({
+      errors: { wrapped_data_keys: WRAPPED_KEY_UNIQUE_VIOLATION },
+    });
+
+    const err = (await rejection(persist(client))) as CoAdminGrantIncompleteError;
+
+    expect(err.alreadyGranted).toBe(true);
+  });
+
+  it("is false for a non-duplicate key failure", async () => {
+    const { client } = makeFakeClient({
+      errors: {
+        wrapped_data_keys: {
+          code: "42501",
+          message: "new row violates row-level security policy for table wrapped_data_keys",
+        },
+      },
+    });
+
+    const err = (await rejection(persist(client))) as CoAdminGrantIncompleteError;
+
+    expect(err.alreadyGranted).toBe(false);
+  });
+
+  it("is false for a lost-response / network-error incomplete write", async () => {
+    const { client } = makeFakeClient({
+      errors: { wrapped_data_keys: { message: "network error" } },
+    });
+
+    const err = (await rejection(persist(client))) as CoAdminGrantIncompleteError;
+
+    expect(err.alreadyGranted).toBe(false);
   });
 });

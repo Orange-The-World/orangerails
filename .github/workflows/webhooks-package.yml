@@ -1,0 +1,62 @@
+name: Webhooks package
+
+# Typecheck, test and build packages/webhooks.
+#
+# WHY THIS EXISTS. The root CI never ran this package. The root vitest config includes
+# only src/ and tests/, and packages/webhooks is not a root workspace, so a change to it
+# (the signed webhook contract that integrators build against) reached dev with no package
+# typecheck, no package test run and no package build.
+#
+# NO LOCKFILE YET. packages/webhooks has no lockfile, so the install below resolves within
+# the declared version ranges and cannot be frozen. A new upstream release can turn this
+# job red with no change here. Committing a lockfile needs a shell and is a separate change.
+#
+# SCOPED BY PATH on purpose: it is cheap and specific to one package, and it should not add
+# time to every unrelated pull request. This workflow file is in the filter too, so a change
+# to the job proves itself on its own pull request.
+#
+# A run that tests nothing is not a pass: vitest exits non-zero when it finds no test files.
+
+on:
+  pull_request:
+    paths:
+      - "packages/webhooks/**"
+      - ".github/workflows/webhooks-package.yml"
+  push:
+    branches: [dev, prod]
+    paths:
+      - "packages/webhooks/**"
+      - ".github/workflows/webhooks-package.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  webhooks-package:
+    # One job per script, so a red check names what failed and one failure cannot hide the
+    # others (a single job stops at its first failing step).
+    name: Webhooks package (${{ matrix.script }})
+    strategy:
+      fail-fast: false
+      matrix:
+        script: [typecheck, test, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/webhooks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install dependencies
+        # No lockfile in the package, so this is install and not ci. See the header.
+        run: npm install --no-audit --no-fund
+
+      - name: Run ${{ matrix.script }}
+        run: npm run ${{ matrix.script }}

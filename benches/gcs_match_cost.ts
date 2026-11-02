@@ -1,33 +1,36 @@
 /**
  * benches/gcs_match_cost.ts
  *
- * Measures BIP158 GCS match_any cost at 40 / 400 / 4000 scripts.
- * Answers the open measurement question in issues #353 and #357.
+ * Measures BIP158 GCS match_any cost at 40 / 400 / 4000 scripts and checks
+ * the production concurrent-hit ordering at gap_limit 20 / 250 / 1000.
+ * Answers the open measurement questions in issues #353 and #357.
  *
- *   Gap limit  ->  window (per chain)  ->  total scripts (both chains)
- *      20      ->        40            ->         40      (current default)
- *     200      ->       400            ->        400      (BitBooks workaround)
- *    2000      ->      4000            ->       4000      (extreme upper bound)
+ * The script-count and gap-limit sweeps are intentionally reported
+ * separately: they are the two three-point sweeps named in the brief, not a
+ * claimed one-to-one mapping.
  *
  * Run from the repo root:
  *   deno run --allow-read --allow-net benches/gcs_match_cost.ts
+ *   deno run --allow-read benches/gcs_match_cost.ts --ordering-only
+ *   deno run --allow-read benches/gcs_match_cost.ts --wrong-order
  *
- * Output: microseconds per match_any call and projected single-threaded
- * CPU cost for a full mainnet sweep (~870K blocks) at each script count.
+ * Output: numeric ordering evidence for each gap_limit, microseconds per
+ * match_any call, and projected single-threaded CPU cost for a full mainnet
+ * sweep (~870K blocks) at each script count.
  * Note that actual sync wall time is dominated by network I/O (32 concurrent
  * filter fetches), not match CPU, so the sweep projection is a worst-case
  * for CPU budget, not wall clock.
  */
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-nocheck -- Deno runtime; TypeScript strict mode not enforced here.
 
-import initWasm, {
-  match_any,
-} from "../src/stealth/lib/wasm/or_bip158_wasm.js";
+import initWasm, { match_any } from "../src/stealth/lib/wasm/or_bip158_wasm.js";
+import { sortByAscendingHeight } from "../src/stealth/lib/sync-ordering.ts";
 
-// Initialize the WASM module. The shim resolves the .wasm binary relative
-// to its own import.meta.url, so this works regardless of CWD.
-await initWasm();
+const ARGS = typeof Deno !== "undefined" ? Deno.args : process.argv.slice(2);
+const WRONG_ORDER = ARGS.includes("--wrong-order");
+const ORDERING_ONLY = ARGS.includes("--ordering-only");
 
 // ---------------------------------------------------------------------------
 // Fetch one real BIP158 filter from the production CDN.
@@ -35,6 +38,116 @@ await initWasm();
 // ---------------------------------------------------------------------------
 const BENCHMARK_HEIGHT = 800_000;
 const BASE = "https://stealth.orangerails.com";
+
+// ---------------------------------------------------------------------------
+// Cursor-ordering invariant.
+// Concurrent filter workers append hits in completion order. Both the initial
+// scan and every rolling-window extension pass call sortByAscendingHeight
+// before the order-sensitive UTXO walk. Exercise that production function at
+// each #357 gap_limit. Use the same cardinality as the initial two-chain,
+// two-window script set to make each point a concrete stress workload; this
+// does not claim a one-to-one relationship between scripts and candidate hits.
+// ---------------------------------------------------------------------------
+const GAP_LIMITS = [20, 250, 1000];
+const ORDERING_ITERS = 100;
+
+function makeReverseCompletionOrder(gapLimit) {
+  const candidateCount = gapLimit * 4;
+  return Array.from({ length: candidateCount }, (_, i) => ({
+    height: BENCHMARK_HEIGHT + candidateCount - i - 1,
+    blockHashHex: String(i).padStart(64, "0"),
+  }));
+}
+
+function countDescents(hits) {
+  let descents = 0;
+  for (let i = 1; i < hits.length; i++) {
+    if (hits[i - 1].height > hits[i].height) descents += 1;
+  }
+  return descents;
+}
+
+function firstDescentIndex(hits) {
+  for (let i = 1; i < hits.length; i++) {
+    if (hits[i - 1].height > hits[i].height) return i;
+  }
+  return -1;
+}
+
+function assertAscending(hits, gapLimit) {
+  const violationIndex = firstDescentIndex(hits);
+  if (violationIndex !== -1) {
+    const previous = hits[violationIndex - 1].height;
+    const current = hits[violationIndex].height;
+    throw new Error(
+      `gap_limit=${gapLimit}: cursor invariant violated at index ${violationIndex}` +
+        ` (${previous} before ${current})`,
+    );
+  }
+}
+
+console.log(
+  `${"gap_limit".padEnd(10)} | ${"candidates".padStart(10)} | ${"descents in".padStart(11)}` +
+    ` | ${"descents out".padStart(12)} | ${"first height".padStart(12)}` +
+    ` | ${"cursor height".padStart(13)} | ${"us/order".padStart(10)}`,
+);
+console.log("-".repeat(96));
+
+let caughtWrongOrder = 0;
+for (const gapLimit of GAP_LIMITS) {
+  const completionOrder = makeReverseCompletionOrder(gapLimit);
+  let ordered = [];
+  const t0 = performance.now();
+  for (let i = 0; i < ORDERING_ITERS; i++) {
+    ordered = [...completionOrder];
+    if (WRONG_ORDER) {
+      ordered.sort((a, b) => b.height - a.height);
+    } else {
+      sortByAscendingHeight(ordered);
+    }
+  }
+  const usPerOrder = ((performance.now() - t0) * 1000) / ORDERING_ITERS;
+  const descentsIn = countDescents(completionOrder);
+  const descentsOut = countDescents(ordered);
+  const firstHeight = ordered[0].height;
+  const cursorHeight = ordered[ordered.length - 1].height;
+
+  console.log(
+    `${String(gapLimit).padEnd(10)} | ${String(ordered.length).padStart(10)}` +
+      ` | ${String(descentsIn).padStart(11)} | ${String(descentsOut).padStart(12)}` +
+      ` | ${String(firstHeight).padStart(12)} | ${String(cursorHeight).padStart(13)}` +
+      ` | ${usPerOrder.toFixed(2).padStart(10)}`,
+  );
+
+  try {
+    assertAscending(ordered, gapLimit);
+  } catch (error) {
+    if (!WRONG_ORDER) throw error;
+    caughtWrongOrder += 1;
+  }
+}
+
+if (WRONG_ORDER) {
+  if (caughtWrongOrder !== GAP_LIMITS.length) {
+    throw new Error(
+      `Deliberately wrong ordering was caught at ${caughtWrongOrder}/${GAP_LIMITS.length} points`,
+    );
+  }
+  throw new Error(
+    `Deliberately wrong ordering rejected: ${caughtWrongOrder}/${GAP_LIMITS.length} invariant violations caught`,
+  );
+}
+
+console.log();
+
+if (ORDERING_ONLY) {
+  if (typeof Deno !== "undefined") Deno.exit(0);
+  process.exit(0);
+}
+
+// Initialize the WASM module. The shim resolves the .wasm binary relative
+// to its own import.meta.url, so this works regardless of CWD.
+await initWasm();
 
 console.log(`Fetching filter for block ${BENCHMARK_HEIGHT}...`);
 
@@ -102,7 +215,10 @@ function makeScript(i) {
 const COUNTS = [40, 400, 4000];
 const scriptSets = new Map();
 for (const n of COUNTS) {
-  scriptSets.set(n, Array.from({ length: n }, (_, i) => makeScript(i)));
+  scriptSets.set(
+    n,
+    Array.from({ length: n }, (_, i) => makeScript(i)),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -140,10 +256,6 @@ for (const n of COUNTS) {
   );
 }
 
-console.log(
-  `\nNote: sync uses 32 concurrent filter fetches. Match runs on the fetch`,
-);
-console.log(
-  `thread, so wall-clock sweep time is network-bound, not CPU-bound.`,
-);
+console.log(`\nNote: sync uses 32 concurrent filter fetches. Match runs on the fetch`);
+console.log(`thread, so wall-clock sweep time is network-bound, not CPU-bound.`);
 console.log(`The sweep column is worst-case single-threaded CPU budget.`);

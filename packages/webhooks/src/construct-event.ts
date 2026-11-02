@@ -4,7 +4,7 @@ import {
   TimestampToleranceExceededError,
 } from "./errors";
 import { computeHmacSha256Hex, timingSafeEqualHex } from "./verify";
-import type { Event } from "./types";
+import type { Event, EventType } from "./types";
 
 /**
  * Header bag accepted by `constructEvent`. Keys are lower-cased on read
@@ -40,6 +40,15 @@ export interface ConstructEventOptions {
 }
 
 const DEFAULT_TOLERANCE_SECONDS = 300;
+
+const EVENT_TYPES: ReadonlySet<string> = new Set<EventType>([
+  "sync.completed",
+  "connection.errored",
+]);
+
+function isEventType(value: unknown): value is EventType {
+  return typeof value === "string" && EVENT_TYPES.has(value);
+}
 
 /**
  * Verify the signature on an Orange Rails webhook delivery and return a
@@ -206,7 +215,7 @@ function parseEvent(rawBody: string, eventId: string): Event {
   const type = body["type"];
   const data = body["data"];
 
-  if (type !== "sync.completed") {
+  if (!isEventType(type)) {
     throw new SignatureVerificationError(
       `Unsupported webhook event type: ${String(type)}.`,
     );
@@ -219,9 +228,5 @@ function parseEvent(rawBody: string, eventId: string): Event {
 
   // Surface the X-OR-Event-Id as event.id rather than trusting any id
   // field embedded in the JSON body , the header is what dedupe keys on.
-  return {
-    id: eventId,
-    type: "sync.completed",
-    data: data as Event["data"],
-  };
+  return { id: eventId, type, data } as Event;
 }

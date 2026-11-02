@@ -18,7 +18,13 @@ export {
   MissingSignatureError,
 } from "./errors";
 
-export type { Event, SyncCompletedEvent, EventType } from "./types";
+export type {
+  Event,
+  EventType,
+  SyncCompletedEvent,
+  ConnectionErroredEvent,
+  ConnectionErroredReasonCode,
+} from "./types";
 
 // Low-level primitives , exported for advanced use cases (e.g. signing
 // in fixtures/tests). Most consumers should use `constructEvent`.

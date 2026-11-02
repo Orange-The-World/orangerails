@@ -80,6 +80,38 @@ function todayISO(): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
+// ISO date N months before today, same YYYY-MM-DD shape as the other
+// date helpers above.
+function isoMonthsAgo(months: number): string {
+  const d = new Date();
+  d.setMonth(d.getMonth() - months);
+  const yyyy = d.getFullYear().toString().padStart(4, "0");
+  const mm = (d.getMonth() + 1).toString().padStart(2, "0");
+  const dd = d.getDate().toString().padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+// The bitcoin genesis block, 2009-01-03. "Everything" starts here.
+const GENESIS_ISO = "2009-01-03";
+
+type ScanWindowPresetId = "3m" | "12m" | "all";
+
+// DL-1595: put the download cost on the button before the user commits.
+// Sizes are measured, not estimated: a filter plus its sidecar averages
+// ~22.5 KB over 24 heights sampled across the real chain (ticket
+// DL-1595), which scales roughly linearly with block count.
+const SCAN_WINDOW_PRESETS: Array<{ id: ScanWindowPresetId; label: string; approxSize: string }> = [
+  { id: "3m", label: "Last 3 months", approxSize: "~0.3 GB" },
+  { id: "12m", label: "Last 12 months", approxSize: "~1.18 GB" },
+  { id: "all", label: "Everything since 2009", approxSize: "~21.6 GB" },
+];
+
+function isoForScanWindowPreset(id: ScanWindowPresetId): string {
+  if (id === "all") return GENESIS_ISO;
+  if (id === "3m") return isoMonthsAgo(3);
+  return isoMonthsAgo(12);
+}
+
 /**
  * Decide which payload kind the descriptor maps to, plus the script-type
  * label that the postMessage protocol expects on completion.
@@ -114,6 +146,16 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
   const [input, setInput] = useState("");
   const [label, setLabel] = useState("");
   const [birthday, setBirthday] = useState<string>(defaultBirthdayISO);
+  // DL-1595: how far back to scan, as a preset rather than a raw date.
+  // "custom" reveals the existing birthday date picker below. Choosing a
+  // fixed preset computes the birthday date under the hood and reuses the
+  // existing `birthday` state and submit path unchanged; this is a UI
+  // layer only, sync.ts and the seal/derive code are untouched.
+  const [scanWindow, setScanWindow] = useState<ScanWindowPresetId | "custom">("12m");
+  function applyScanWindowPreset(id: ScanWindowPresetId) {
+    setScanWindow(id);
+    setBirthday(isoForScanWindowPreset(id));
+  }
   // Defense-in-depth for a native <input type="date"> commit-timing gap:
   // on some browser/interaction combinations the last edit to a date
   // picker can visually display a value the change handler has not yet
@@ -528,21 +570,56 @@ export function AddRoute({ init: _init }: { init: StealthInitMessage }) {
           className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
         />
 
-        <label className="mt-3 block text-xs font-medium text-foreground" htmlFor="birthday-input">
-          Wallet birthday
-        </label>
-        <input
-          id="birthday-input"
-          ref={birthdayInputRef}
-          type="date"
-          value={birthday}
-          max={today}
-          onChange={(e) => setBirthday(e.target.value)}
-          className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
-        />
+        <label className="mt-3 block text-xs font-medium text-foreground">How far back to scan</label>
+        <div className="mt-1 grid grid-cols-1 gap-1.5">
+          {SCAN_WINDOW_PRESETS.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => applyScanWindowPreset(p.id)}
+              className={`flex items-center justify-between rounded-md border p-2 text-left text-xs ${
+                scanWindow === p.id
+                  ? "border-primary bg-primary/10 font-medium"
+                  : "border-border bg-background hover:bg-muted"
+              }`}
+            >
+              <span>{p.label}</span>
+              <span className="text-[10px] text-muted-foreground">{p.approxSize}</span>
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setScanWindow("custom")}
+            className={`flex items-center justify-between rounded-md border p-2 text-left text-xs ${
+              scanWindow === "custom"
+                ? "border-primary bg-primary/10 font-medium"
+                : "border-border bg-background hover:bg-muted"
+            }`}
+          >
+            <span>Since I set this wallet up</span>
+            <span className="text-[10px] text-muted-foreground">you enter the date</span>
+          </button>
+        </div>
+        {scanWindow === "custom" ? (
+          <>
+            <label className="mt-2 block text-xs font-medium text-foreground" htmlFor="birthday-input">
+              Wallet birthday
+            </label>
+            <input
+              id="birthday-input"
+              ref={birthdayInputRef}
+              type="date"
+              value={birthday}
+              max={today}
+              onChange={(e) => setBirthday(e.target.value)}
+              className="mt-1 w-full rounded-md border border-border bg-background p-2 text-xs"
+            />
+          </>
+        ) : null}
         <p className="mt-1 text-[10px] text-muted-foreground">
-          We start scanning from this date. The default of one year ago keeps syncs fast. Older
-          wallets can edit this later to scan further back.
+          We scan from this date forward. A wider window finds older transactions but downloads
+          more data. Deleting the downloaded blocks later never deletes a transaction: what you
+          have already synced stays saved and encrypted.
         </p>
 
         <details className="mt-3 group">

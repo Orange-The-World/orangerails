@@ -43,3 +43,26 @@ export function readSyncCompleteness(result: SyncResult): {
     ...(denied !== undefined ? { denied_sources: denied } : {}),
   };
 }
+
+/**
+ * Body for the anonymous GET probe route (DEV-0126).
+ *
+ * connection_result_fields is derived at runtime by calling
+ * readSyncCompleteness with a sample result that is forced partial (a
+ * non-empty denied_sources), so the returned key list only exists if the
+ * deployed bundle really contains the connection-result wiring. A
+ * hardcoded field list would prove nothing about what is actually running.
+ */
+export function buildProbeBody(buildSha: string | null): {
+  function: 'or-sync';
+  build: string | null;
+  connection_result_fields: string[];
+} {
+  return {
+    function: 'or-sync',
+    build: buildSha,
+    connection_result_fields: Object.keys(
+      readSyncCompleteness({ transactions: [], next_cursor: null, denied_sources: ['probe'] }),
+    ),
+  };
+}

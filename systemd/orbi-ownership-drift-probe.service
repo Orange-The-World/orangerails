@@ -1,0 +1,14 @@
+[Unit]
+Description=ORBI public-table ownership drift probe
+After=network.target
+# Backstop for the paths the probe cannot report itself: it never started, it
+# died before reaching its own alarm helper, or its alarm delivery failed.
+# Install orbi-probe-failed@.service and its script BEFORE enabling this unit.
+OnFailure=orbi-probe-failed@%n.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/orbi/orbi-truthtable-probes.env
+ExecStart=/usr/local/bin/orbi-ownership-drift-probe.sh
+StandardOutput=journal
+StandardError=journal

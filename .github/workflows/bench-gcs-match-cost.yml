@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - 'bench/**'
+      - "bench/**"
 
 permissions:
   contents: read
@@ -26,12 +26,26 @@ jobs:
           set -o pipefail
           deno run --allow-read --allow-net benches/gcs_match_cost.ts 2>&1 | tee /tmp/bench_output.txt
 
+      - name: Prove deliberately wrong ordering is rejected
+        run: |
+          set -o pipefail
+          set +e
+          deno run --allow-read benches/gcs_match_cost.ts --wrong-order > /tmp/wrong_order_output.txt 2>&1
+          wrong_order_status=$?
+          set -e
+          tee -a /tmp/bench_output.txt < /tmp/wrong_order_output.txt
+          if [ "$wrong_order_status" -eq 0 ]; then
+            echo 'Deliberately wrong ordering unexpectedly exited zero.'
+            exit 1
+          fi
+          grep -F 'Deliberately wrong ordering rejected: 3/3 invariant violations caught' /tmp/wrong_order_output.txt
+
       - name: Post results to job summary
         if: always()
         run: |
           echo '## GCS Match Cost Bench (DL-0353)' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
-          echo 'Script: `benches/gcs_match_cost.ts` -- fixed-window match cost only.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Script: `benches/gcs_match_cost.ts` -- fixed-window match cost plus rolling-window ordering invariant.' >> "$GITHUB_STEP_SUMMARY"
           echo '' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/bench_output.txt >> "$GITHUB_STEP_SUMMARY"

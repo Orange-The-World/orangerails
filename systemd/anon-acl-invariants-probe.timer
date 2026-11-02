@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the anon ACL invariants probe every hour
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1h
+Unit=anon-acl-invariants-probe.service
+
+[Install]
+WantedBy=timers.target

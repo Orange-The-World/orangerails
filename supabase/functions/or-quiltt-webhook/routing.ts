@@ -47,6 +47,7 @@ export interface BuiltRows {
   hints: RouteHint[];
   profileIds: string[];
   metaSubaccountIds: string[];
+  droppedCount: number;
 }
 
 export interface RoutingCounts {
@@ -58,20 +59,24 @@ export interface RoutingCounts {
 /**
  * Turn a raw Quiltt event batch into inbox rows plus aligned routing hints.
  *
- * Malformed events (missing id or type) are dropped. rows[i] and hints[i]
- * are pushed together, so they describe the same event by construction and
- * there is no index into `events` to get wrong.
+ * Malformed events (missing id or type) are dropped and counted. rows[i] and
+ * hints[i] are pushed together, so they describe the same event by construction
+ * and there is no index into `events` to get wrong.
  */
 export function buildRows(events: QuilttEventLike[]): BuiltRows {
   const rows: InboxRow[] = [];
   const hints: RouteHint[] = [];
   const profileIds = new Set<string>();
   const metaSubaccountIds = new Set<string>();
+  let droppedCount = 0;
 
   for (const e of events) {
     const eventId = typeof e?.id === 'string' ? e.id : null;
     const eventType = typeof e?.type === 'string' ? e.type : null;
-    if (!eventId || !eventType) continue;
+    if (!eventId || !eventType) {
+      droppedCount++;
+      continue;
+    }
 
     const profileId = typeof e.profile?.id === 'string' ? e.profile.id : null;
     const metaSub = typeof e.profile?.metadata?.or_subaccount_id === 'string'
@@ -96,7 +101,19 @@ export function buildRows(events: QuilttEventLike[]): BuiltRows {
     hints,
     profileIds: [...profileIds],
     metaSubaccountIds: [...metaSubaccountIds],
+    droppedCount,
   };
+}
+
+/** Emit one counts-only warning when buildRows dropped malformed events. */
+export function warnOnDroppedEvents(
+  droppedCount: number,
+  batchSize: number,
+  warn: (line: string) => void,
+): void {
+  if (droppedCount === 0) return;
+
+  warn(`[or-quiltt-webhook] malformed-events: dropped=${droppedCount} batch_size=${batchSize}`);
 }
 
 /**

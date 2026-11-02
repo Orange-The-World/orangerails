@@ -1,0 +1,10 @@
+-- UNPARSEABLE fixture: a file with no executable statement in it.
+--
+-- Expected verdict: UNPARSEABLE, rule [NO STATEMENT].
+--
+-- Nothing here executes. There are two ways to arrive at that observation and
+-- they are different facts: the file really is empty, which is a mistake worth
+-- catching, or the scanner could not see its contents, which is worse. Neither
+-- may be reported as REVERSIBLE.
+--
+-- drop table public.or_fixture_widget;

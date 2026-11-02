@@ -44,7 +44,7 @@ const KEY_LEN = 32; // bytes; AES-256
  * in an indexed column. Bump the version suffix if the derivation changes,
  * and never reuse a label across primitives.
  */
-const BLIND_INDEX_INFO = "or-stealth/blind-index/v1" as const;
+export const BLIND_INDEX_INFO = "or-stealth/blind-index/v1" as const;
 
 /**
  * The canonical txid form: lowercase hex, display byte order, 64 chars.

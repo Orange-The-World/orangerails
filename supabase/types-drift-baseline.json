@@ -1,0 +1,8 @@
+{
+  "$schema-note": "Read by scripts/check-types-drift.mjs. Each key under 'waived' is the name of one relation whose difference between src/integrations/supabase/types.ts and the applied schema is already known and already ticketed. A waiver covers that one relation and nothing else. A waiver that no longer covers any finding makes the check FAIL, so this list can only shrink. Do not add a name here to unblock yourself: regenerate the type file instead. Views are not on this list at all: they are out of scope for the check (see check-types-drift.mjs), not waived.",
+  "measured": "2026-09-25 against dev project fzwmnzmtqidumdqjdddz, re-queried live (pg_class/pg_attribute) as part of OR-T0835. 55 live base tables in public (views excluded, out of scope); 54 now declared in the type file, matching live column counts table by table. _or_migration_hashes is the one deliberate exception, see its own waiver below.",
+  "clears_with": "OR-T0835",
+  "waived": {
+    "_or_migration_hashes": { "reason": "OWNED by the deploy workflow, owner DBA, end state decided under OR-T1252: .github/workflows/supabase-deploy.yml creates it (CREATE TABLE IF NOT EXISTS plus ENABLE ROW LEVEL SECURITY, read back before use) ahead of the migration content scan and records one sha256 per migration at first apply. Deliberately NOT a migration file: the scan needs the table before the apply loop runs, and a migration exists only once that loop has applied it. No app code reads it, so it stays out of the generated type file and this waiver stays. Absent on prod until the first prod apply after that workflow change merges; created there with RLS on, no policies.", "ticket": "OR-T1252" }
+  }
+}

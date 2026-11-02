@@ -1,3 +1,4 @@
+-- OUT-OF-ORDER-OK: lcdicqalreskibdfxkzb adds one unique constraint to wrapped_data_keys, which holds no rows; its probe rows are rolled back; no later migration touches that constraint.
 -- Add UNIQUE (data_key_id, recipient_user_id) to public.wrapped_data_keys.
 --
 -- UNDO:

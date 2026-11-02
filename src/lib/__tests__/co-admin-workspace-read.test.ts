@@ -19,6 +19,7 @@ import {
   DUPLICATE_WRAPPED_KEY_MESSAGE,
   type WrappedKeyClient,
 } from "../co-admin-workspace-read";
+import { CO_ADMIN_GRANT_COLUMNS } from "../co-admin-grant-row";
 
 type QueryResult = { data: unknown[] | null; error: unknown };
 
@@ -127,7 +128,10 @@ describe("reading a co-admin's wrapped workspace key", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0].table).toBe("wrapped_data_keys");
-    expect(calls[0].columns).toBe("wrapped_ciphertext, grant_sig");
+    // The select now also asks for the v3 envelope columns (wrapped_cak,
+    // coadmin_keyring_ciphertext), so this pins CO_ADMIN_GRANT_COLUMNS rather
+    // than a column list hand-copied here that would drift from it.
+    expect(calls[0].columns).toBe(CO_ADMIN_GRANT_COLUMNS);
     expect(calls[0].filters).toEqual([["data_key_id", "key-1"]]);
     // One row would make "more than one" unreachable. Anything larger reads
     // rows nothing needs.

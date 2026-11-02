@@ -193,7 +193,11 @@ async function deleteNonUuidFixture(connectionId: string): Promise<void> {
 
 // Requirement 3: check stealth_connections.last_block_scanned via the
 // envelope-fetch edge function, which reads the real DB row.
-async function fetchConnectionCursor(connectionId: string): Promise<number | null> {
+async function fetchConnectionRow(
+  connectionId: string,
+  appUserId: string = APP_USER_ID,
+  appSlug: string = 'e2e-stealth-cursor-test',
+): Promise<{ last_block_scanned: number | null; scan_generation?: string }> {
   const resp = await fetch(`${FN}/or-stealth-envelope-fetch`, {
     method: 'POST',
     headers: {
@@ -202,13 +206,16 @@ async function fetchConnectionCursor(connectionId: string): Promise<number | nul
     },
     body: JSON.stringify({
       connection_id: connectionId,
-      app_user_id: APP_USER_ID,
-      app_slug: 'e2e-stealth-cursor-test',
+      app_user_id: appUserId,
+      app_slug: appSlug,
     }),
   });
   if (!resp.ok) throw new Error(`or-stealth-envelope-fetch failed ${resp.status}`);
-  const row = (await resp.json()) as { last_block_scanned: number | null };
-  return row.last_block_scanned;
+  return (await resp.json()) as { last_block_scanned: number | null; scan_generation?: string };
+}
+
+async function fetchConnectionCursor(connectionId: string): Promise<number | null> {
+  return (await fetchConnectionRow(connectionId)).last_block_scanned;
 }
 
 // ------ suite -------------------------------------------------------------
@@ -253,6 +260,17 @@ test.describe('or-stealth-transactions-store: non-UUID app_user_id (DL-0697)', (
 
   test('accepts non-UUID app_user_id and stores the transaction row', async () => {
     const tx = await sealFixtureTx();
+    // OR-T2457: the store function requires the connection's current
+    // scan_generation (the fencing token a real caller reads at sync start).
+    const row = await fetchConnectionRow(
+      nonUuidConnectionId,
+      NON_UUID_APP_USER_ID,
+      'e2e-dl0697-non-uuid-test',
+    );
+    expect(
+      typeof row.scan_generation,
+      'envelope-fetch must return scan_generation for the non-UUID fixture row',
+    ).toBe('string');
     const resp = await fetch(`${FN}/or-stealth-transactions-store`, {
       method: 'POST',
       headers: {
@@ -264,6 +282,7 @@ test.describe('or-stealth-transactions-store: non-UUID app_user_id (DL-0697)', (
         app_user_id: NON_UUID_APP_USER_ID,
         sealed_transactions: [tx],
         last_block_scanned: 800_000,
+        scan_generation: row.scan_generation,
       }),
     });
     const bodyText = await resp.text();
@@ -340,6 +359,15 @@ _testDescribe('stealth cursor write (DL-0649 Part 2)', () => {
     //   (!useMock || isForceCursor()) && 800010 > (null ?? -1)
     // = (false || true) && true = true
     // fires the cursor write.
+    // The cursor-write endpoint requires the connection's current
+    // scan_generation (the widget echoes the value from this response), and
+    // answers 409 on mismatch, so read the real one from the fixture row.
+    const realRow = await fetchConnectionRow(capturedId);
+    expect(
+      typeof realRow.scan_generation,
+      'envelope-fetch must return scan_generation for the fixture row',
+    ).toBe('string');
+
     await widgetPage.route('**/or-stealth-envelope-fetch', (route) => {
       void route.fulfill({
         status: 200,
@@ -351,6 +379,7 @@ _testDescribe('stealth cursor write (DL-0649 Part 2)', () => {
           wallet_birthday_plaintext: '2020-01-01',
           last_block_scanned: null,
           last_sync_at: null,
+          scan_generation: realRow.scan_generation,
           status: 'active',
         }),
       });

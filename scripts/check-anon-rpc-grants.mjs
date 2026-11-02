@@ -51,6 +51,56 @@
  * same repo tried detection before declaration and produced six false negatives, because the
  * real logic lived in a shared helper the pattern did not know about.
  *
+ * THE IMPLICIT GRANT, and why folding statements alone was not enough.
+ *
+ * Nothing in a migration grants EXECUTE to anon on most of these functions. The grant is
+ * issued by the schema's default privileges at CREATE FUNCTION time, so there is no statement
+ * to fold and a clean source scan proved nothing about the surface. This gate therefore treats
+ * a CREATE [OR REPLACE] FUNCTION in the guarded schema as a grant of EXECUTE to whichever risky
+ * grantees the schema default still hands out. Creating the function IS the grant.
+ *
+ * From there the existing logic does the rest, unchanged: anon and PUBLIC are tracked as
+ * separate access entries, so a lockdown line reading only REVOKE ... FROM PUBLIC clears PUBLIC
+ * and leaves anon exactly where it was, and the function is reported. Naming every grantee
+ * clears it.
+ *
+ * Three statements move the model:
+ *   CREATE [OR REPLACE] FUNCTION      adds the implicit grant, keyed by BARE NAME (see below).
+ *   DROP FUNCTION                     removes the entry entirely.
+ *   ALTER DEFAULT PRIVILEGES ...      turns the implicit grant off for the grantees it names,
+ *     REVOKE EXECUTE ON FUNCTIONS     from that migration onward. Functions created BEFORE it
+ *                                     keep what they were given: revoking a default does not
+ *                                     take back privileges already handed out. REVOKE GRANT
+ *                                     OPTION FOR does NOT count, because it takes away the
+ *                                     right to re-grant, not EXECUTE.
+ *
+ * WHY IMPLICIT ENTRIES ARE KEYED BY BARE NAME. A CREATE statement writes parameter names and
+ * modes (`p_id uuid`), a GRANT or REVOKE writes types only (`uuid`). Keying the implicit entry
+ * by signature would produce two keys that never match, so the revoke would not cancel the
+ * grant. The bare name is also the honest granularity: the schema default applies to every
+ * overload as each one is created.
+ *
+ * THE CUTOFF, which is this gate's scope boundary and its ratchet.
+ *
+ * Applied to the whole history, this model flags every function ever created without a named
+ * anon revoke, and the gate would go red on day one and block every open pull request. So it
+ * applies only to migrations at or after IMPLICIT_GRANT_CUTOFF. Everything earlier is
+ * GRANDFATHERED: reported by name on every run, and not failed.
+ *
+ * The cutoff is the ratchet, not a concession. A new migration always sorts after it, so the
+ * grandfathered set can only shrink; lowering the constant is how ground is taken, one batch at
+ * a time, once those files name their grantees. A file with no version prefix is treated as
+ * COVERED, because an unknown must fail loud rather than quiet.
+ *
+ * Every run prints the counts and the full grandfathered list. Silent truncation reads as full
+ * coverage, which is the same failure as a gate that cannot fail.
+ *
+ * KNOWN OVER-APPROXIMATION, stated here rather than discovered later. Postgres preserves the
+ * ACL on CREATE OR REPLACE, so replacing an already locked down function does not really
+ * re-open it, and this model will still ask for the revoke line. That is deliberate: the parser
+ * cannot know whether the function already existed, the remedy is one idempotent line, and
+ * being quiet when unsure is exactly what let this through twice.
+ *
  * Run `node scripts/check-anon-rpc-grants.mjs --selftest` to exercise the parser itself.
  */
 
@@ -63,6 +113,33 @@ const GUARDED_SCHEMA = "public";
 
 /** The grantees this gate cares about. PUBLIC is wider than anon, never narrower. */
 const RISKY_GRANTEES = ["anon", "public"];
+
+/**
+ * Migrations at or after this version are covered by the implicit CREATE FUNCTION grant model.
+ * Earlier ones are grandfathered: named in the output of every run, and not failed.
+ *
+ * This is the ratchet. Lower it, never raise it. Every new migration sorts after it, so the
+ * grandfathered set can only shrink. Raising it would hide functions that are covered today.
+ */
+const IMPLICIT_GRANT_CUTOFF = "20260827000000";
+
+/** The leading version of a migration filename, or null when it has none. */
+function migrationVersion(name) {
+  const m = /^(\d+)/.exec(name);
+  return m ? m[1] : null;
+}
+
+/**
+ * Is this file covered by the implicit-grant model?
+ *
+ * A file with no version prefix is COVERED. The only files without one are hand-written
+ * fixtures, and an unknown must fail loud rather than slip quietly into the grandfathered set.
+ */
+function isCovered(name, cutoff) {
+  const v = migrationVersion(name);
+  if (v === null) return true;
+  return v.padEnd(cutoff.length, "0") >= cutoff;
+}
 
 /**
  * Split SQL into statements, discarding line comments, block comments, single-quoted string
@@ -167,15 +244,69 @@ function removeGrantees(granted, key, grantees) {
  * `files` is an ordered array of { name, sql }.
  * Returns { granted, hard } where granted maps a function key to a Map of grantee -> file.
  */
-export function scan(files) {
+export function scan(files, cutoff = IMPLICIT_GRANT_CUTOFF) {
   const granted = new Map();
   const hard = [];
 
+  /** Keys in `granted` that came from a CREATE rather than from a GRANT statement. */
+  const implicit = new Set();
+
+  /** Functions created before the cutoff: key -> the file that created them. */
+  const grandfathered = new Map();
+
+  const stats = { created: 0, covered: 0, grandfathered: 0 };
+
+  /**
+   * Which risky grantees the schema default still hands to every newly created function.
+   * PUBLIC is Postgres's own built-in default for functions; anon is added by this project's
+   * default privileges. Either can be taken away by an ALTER DEFAULT PRIVILEGES ... REVOKE,
+   * and from that migration on new functions are no longer born with it.
+   */
+  const defaultGrantees = new Set(RISKY_GRANTEES);
+
   const blanketRe = /\bON\s+ALL\s+(?:FUNCTIONS|ROUTINES|PROCEDURES)\s+IN\s+SCHEMA\s+([a-z_][a-z0-9_]*)/i;
   const namedRe = /\bON\s+(?:FUNCTION|ROUTINE|PROCEDURE)\s+((?:"[^"]+"|[a-z0-9_]+)(?:\.(?:"[^"]+"|[a-z0-9_]+))?)\s*(\([^)]*\))?/i;
+  const createRe = /^CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\s+((?:"[^"]+"|[a-z0-9_]+)(?:\.(?:"[^"]+"|[a-z0-9_]+))?)/i;
+  const dropRe = /^DROP\s+(?:FUNCTION|PROCEDURE)\s+(?:IF\s+EXISTS\s+)?((?:"[^"]+"|[a-z0-9_]+)(?:\.(?:"[^"]+"|[a-z0-9_]+))?)/i;
 
   for (const file of files) {
     for (const stmt of statements(file.sql)) {
+      // CREATE and DROP are handled before the EXECUTE test below, because neither statement
+      // contains the word EXECUTE and both move the end state.
+      const created = createRe.exec(stmt);
+      if (created) {
+        const key = functionKey(created[1], null);
+        if (!key.startsWith(`${GUARDED_SCHEMA}.`)) continue;
+        stats.created += 1;
+        if (!isCovered(file.name, cutoff)) {
+          stats.grandfathered += 1;
+          if (!grandfathered.has(key)) grandfathered.set(key, file.name);
+          continue;
+        }
+        stats.covered += 1;
+        if (defaultGrantees.size === 0) continue;
+        const entry = granted.get(key) ?? new Map();
+        for (const role of defaultGrantees) entry.set(role, file.name);
+        granted.set(key, entry);
+        implicit.add(key);
+        continue;
+      }
+
+      const dropped = dropRe.exec(stmt);
+      if (dropped) {
+        const key = functionKey(dropped[1], null);
+        // Match broadly on the bare name: dropping is the shrinking direction, and an
+        // unsignatured DROP takes every overload with it.
+        for (const existing of [...granted.keys()]) {
+          if (bareName(existing) === bareName(key)) {
+            granted.delete(existing);
+            implicit.delete(existing);
+          }
+        }
+        grandfathered.delete(key);
+        continue;
+      }
+
       const isDefaultPrivs = /^ALTER\s+DEFAULT\s+PRIVILEGES\b/i.test(stmt);
       // ALL and ALL PRIVILEGES include EXECUTE. REVOKE ALL ON FUNCTION x FROM PUBLIC is the
       // ordinary spelling of this revoke, and reading only the literal word EXECUTE missed it.
@@ -190,7 +321,18 @@ export function scan(files) {
         if (!schema || schema[1].toLowerCase() !== GUARDED_SCHEMA) continue;
         // A REVOKE of the schema default is the durable fix, so it passes. Only the widening
         // direction is refused, and REVOKE GRANT OPTION FOR is read as the revoke it is.
-        if (!/^ALTER\s+DEFAULT\s+PRIVILEGES\b(?:(?!\bREVOKE\b).)*\bGRANT\b/i.test(stmt)) continue;
+        if (!/^ALTER\s+DEFAULT\s+PRIVILEGES\b(?:(?!\bREVOKE\b).)*\bGRANT\b/i.test(stmt)) {
+          // It is a REVOKE of the schema default, i.e. the durable fix. From here on, functions
+          // created in this schema are no longer born executable by the grantees it names, so
+          // the implicit grant above stops applying to them. Functions created BEFORE it keep
+          // what they were given: revoking a default does not take back privileges already
+          // handed out. REVOKE GRANT OPTION FOR is excluded because it takes away the right to
+          // re-grant, not EXECUTE, so the function is still born executable.
+          if (!/\bGRANT\s+OPTION\s+FOR\b/i.test(stmt)) {
+            for (const role of riskyGrantees(tailAfter(stmt, "FROM"))) defaultGrantees.delete(role);
+          }
+          continue;
+        }
         const grantees = riskyGrantees(tailAfter(stmt, "TO"));
         if (grantees.length) {
           hard.push(
@@ -245,11 +387,11 @@ export function scan(files) {
     }
   }
 
-  return { granted, hard };
+  return { granted, hard, implicit, stats, grandfathered };
 }
 
 /** Compare the declared end state against the allowlist. Returns an array of failures. */
-export function compare(granted, hard, allowlist) {
+export function compare(granted, hard, allowlist, implicit = new Set()) {
   const fail = [...hard];
   const listed = new Set(Object.keys(allowlist ?? {}));
 
@@ -257,6 +399,20 @@ export function compare(granted, hard, allowlist) {
     if (!listed.has(key)) {
       const who = [...entry.keys()].join(" and ");
       const where = [...new Set(entry.values())].join(", ");
+      if (implicit.has(key)) {
+        // Different remedy, so a different message. There is no GRANT statement to delete
+        // here: the function inherited EXECUTE from the schema default when it was created,
+        // and only a revoke that names every grantee takes it back.
+        fail.push(
+          `${key}: created in ${where} and still executable by ${who}. No migration granted ` +
+          `that: a function created in ${GUARDED_SCHEMA} inherits EXECUTE from the schema ` +
+          `default, so creating it IS the grant. A lockdown line naming only PUBLIC does not ` +
+          `take it away, because Postgres stores PUBLIC and anon as separate access entries. ` +
+          `Add REVOKE ALL ON FUNCTION ${key}(...) FROM PUBLIC, ` +
+          `anon, authenticated; naming every grantee, or declare the key "${key}" in ` +
+          `${ALLOWLIST} with a one line reason.`);
+        continue;
+      }
       fail.push(
         `${key}: granted EXECUTE to ${who} in ${where} but not declared in ${ALLOWLIST}. An ` +
         `RPC callable without a signed-in user is a public endpoint. If that is intended, add ` +
@@ -442,24 +598,164 @@ const CASES = [
     expect: 0,
   },
   {
+    // Pre-cutoff filename on purpose: this case is about body stripping, not about the
+    // implicit CREATE grant. Explicit GRANT folding is NOT gated by the cutoff, so if body
+    // stripping broke, the GRANT inside the body would still be folded and this case would
+    // still fail. A case that fails for the wrong reason teaches nothing.
     name: "a function body mentioning anon is not a grant",
     files: [{
-      name: "a.sql",
+      name: "20200101000000_a.sql",
       sql: "CREATE FUNCTION public.f() RETURNS void LANGUAGE plpgsql AS $$\nBEGIN\n  RAISE EXCEPTION 'GRANT EXECUTE ON FUNCTION public.f() TO anon;';\nEND;\n$$;",
     }],
     allowlist: {},
     expect: 0,
+  },
+
+  /* --- the implicit CREATE FUNCTION grant (DL-1776) ------------------------------------ */
+
+  {
+    // The shape that shipped twice without this gate noticing. REVOKE FROM PUBLIC clears the
+    // PUBLIC access entry and leaves the one made to anon exactly where it was.
+    name: "CREATE in public whose only lockdown is REVOKE FROM PUBLIC is a finding",
+    files: [{
+      name: "20260901000000_a.sql",
+      sql: "CREATE FUNCTION public.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1'; REVOKE ALL ON FUNCTION public.foo(uuid) FROM PUBLIC;",
+    }],
+    allowlist: {},
+    expect: 1,
+  },
+  {
+    // The paired clean case. Same CREATE, a revoke that names every grantee.
+    name: "the same CREATE with a revoke naming PUBLIC, anon and authenticated is clean",
+    files: [{
+      name: "20260901000000_a.sql",
+      sql: "CREATE FUNCTION public.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1'; REVOKE ALL ON FUNCTION public.foo(uuid) FROM PUBLIC, anon, authenticated;",
+    }],
+    allowlist: {},
+    expect: 0,
+  },
+  {
+    name: "CREATE OR REPLACE with no lockdown at all is a finding",
+    files: [{
+      name: "20260901000000_a.sql",
+      sql: "CREATE OR REPLACE FUNCTION public.foo() RETURNS void LANGUAGE sql AS 'select 1';",
+    }],
+    allowlist: {},
+    expect: 1,
+  },
+  {
+    name: "DROP FUNCTION clears the implicit grant",
+    files: [
+      { name: "20260901000000_a.sql", sql: "CREATE FUNCTION public.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1';" },
+      { name: "20260901000001_b.sql", sql: "DROP FUNCTION IF EXISTS public.foo(uuid);" },
+    ],
+    allowlist: {},
+    expect: 0,
+  },
+  {
+    name: "a CREATE before the cutoff is grandfathered, not failed",
+    files: [{
+      name: "20200101000000_a.sql",
+      sql: "CREATE FUNCTION public.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1';",
+    }],
+    allowlist: {},
+    expect: 0,
+    expectGrandfathered: 1,
+  },
+  {
+    // The boundary is inclusive. A file named with exactly the cutoff version is covered, so
+    // the ratchet cannot be stepped around by landing on the line.
+    name: "a CREATE exactly AT the cutoff is covered, not grandfathered",
+    files: [{
+      name: `${IMPLICIT_GRANT_CUTOFF}_a.sql`,
+      sql: "CREATE FUNCTION public.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1';",
+    }],
+    allowlist: {},
+    expect: 1,
+    expectGrandfathered: 0,
+  },
+  {
+    // Revoking the schema default from anon does NOT remove PUBLIC, which is Postgres's own
+    // built-in default for functions. The per-function revoke is still what closes it.
+    name: "after the default is revoked from anon, a later CREATE still needs its PUBLIC revoke",
+    files: [
+      { name: "20260901000000_a.sql", sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM anon;" },
+      { name: "20260901000001_b.sql", sql: "CREATE FUNCTION public.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1'; REVOKE ALL ON FUNCTION public.foo(uuid) FROM PUBLIC;" },
+    ],
+    allowlist: {},
+    expect: 0,
+  },
+  {
+    // The durable fix. With both grantees off the default, a new function is not born
+    // executable at all and needs no per-function revoke.
+    name: "revoking the default from BOTH grantees means a later CREATE needs no revoke",
+    files: [
+      { name: "20260901000000_a.sql", sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM anon, PUBLIC;" },
+      { name: "20260901000001_b.sql", sql: "CREATE FUNCTION public.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1';" },
+    ],
+    allowlist: {},
+    expect: 0,
+  },
+  {
+    // REVOKE GRANT OPTION FOR takes away the right to re-grant, not EXECUTE. The function is
+    // still born executable, so this must not turn the model off.
+    name: "REVOKE GRANT OPTION FOR does not turn the schema default off",
+    files: [
+      { name: "20260901000000_a.sql", sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE GRANT OPTION FOR EXECUTE ON FUNCTIONS FROM anon, PUBLIC;" },
+      { name: "20260901000001_b.sql", sql: "CREATE FUNCTION public.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1';" },
+    ],
+    allowlist: {},
+    expect: 1,
+  },
+  {
+    name: "a function created in another schema is out of this gate's scope",
+    files: [{
+      name: "20260901000000_a.sql",
+      sql: "CREATE FUNCTION client_platform.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1';",
+    }],
+    allowlist: {},
+    expect: 0,
+  },
+  {
+    // Implicit entries are keyed by bare name, so that is how they are declared.
+    name: "an implicit grant can be declared on the allowlist by bare name",
+    files: [{
+      name: "20260901000000_a.sql",
+      sql: "CREATE FUNCTION public.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1';",
+    }],
+    allowlist: { "public.foo": "reason" },
+    expect: 0,
+  },
+  {
+    // A CREATE and a later DROP of the same function inside a pre-cutoff file must not leave
+    // a phantom entry on the grandfathered list either.
+    name: "DROP also clears a grandfathered entry",
+    files: [
+      { name: "20200101000000_a.sql", sql: "CREATE FUNCTION public.foo(p_id uuid) RETURNS void LANGUAGE sql AS 'select 1';" },
+      { name: "20200101000001_b.sql", sql: "DROP FUNCTION public.foo(uuid);" },
+    ],
+    allowlist: {},
+    expect: 0,
+    expectGrandfathered: 0,
   },
 ];
 
 function selftest() {
   let failed = 0;
   for (const c of CASES) {
-    const { granted, hard } = scan(c.files);
-    const got = compare(granted, hard, c.allowlist).length;
+    const { granted, hard, implicit, grandfathered } = scan(c.files, c.cutoff ?? IMPLICIT_GRANT_CUTOFF);
+    const got = compare(granted, hard, c.allowlist, implicit).length;
     if (got !== c.expect) {
       failed += 1;
       console.error(`  FAIL ${c.name}: expected ${c.expect} finding(s), got ${got}`);
+    }
+    // Only asserted where the case declares it, so "grandfathered" cannot quietly become
+    // "invisible": a case that cares about the boundary has to say what it expects.
+    if (c.expectGrandfathered !== undefined && grandfathered.size !== c.expectGrandfathered) {
+      failed += 1;
+      console.error(
+        `  FAIL ${c.name}: expected ${c.expectGrandfathered} grandfathered entr(ies), ` +
+        `got ${grandfathered.size}`);
     }
   }
   if (failed) {
@@ -490,8 +786,27 @@ if (process.argv.includes("--selftest")) {
     .sort()
     .map((f) => ({ name: f, sql: readFileSync(join(MIGRATIONS_DIR, f), "utf8") }));
 
-  const { granted, hard } = scan(files);
-  const fail = compare(granted, hard, allowlist);
+  const { granted, hard, implicit, stats, grandfathered } = scan(files);
+  const fail = compare(granted, hard, allowlist, implicit);
+
+  // Say what was covered and what was not, on every run, before the verdict. A gate that
+  // cannot say N of N is not evidence, and a scope that prints nothing reads as full coverage.
+  console.log(
+    `anon RPC grant scope: ${files.length} migration(s), ${stats.created} CREATE FUNCTION ` +
+    `statement(s) in ${GUARDED_SCHEMA}. The implicit-grant model applies from version ` +
+    `${IMPLICIT_GRANT_CUTOFF} onward: ${stats.covered} covered, ${stats.grandfathered} ` +
+    `grandfathered (${grandfathered.size} distinct function(s)).`);
+  if (grandfathered.size) {
+    console.log(
+      `  GRANDFATHERED, outside this gate's coverage. Each needs a revoke naming every ` +
+      `grantee before the cutoff can be lowered past it:`);
+    for (const [key, where] of [...grandfathered.entries()].sort()) {
+      console.log(`    - ${key} (${where})`);
+    }
+    console.log(
+      `  This set can only shrink: every new migration sorts after the cutoff and is covered. ` +
+      `Lower IMPLICIT_GRANT_CUTOFF to take ground.`);
+  }
 
   if (fail.length) {
     console.error("anon RPC grant check FAILED:\n" + fail.map((f) => `  - ${f}`).join("\n"));
@@ -501,6 +816,6 @@ if (process.argv.includes("--selftest")) {
     `anon RPC grant OK: ${files.length} migration(s) scanned, ` +
     `${granted.size} declared anon-executable or PUBLIC-executable ${GUARDED_SCHEMA} ` +
     `function(s), allowlist agrees. Source scan only: a grant made outside a migration is ` +
-    `not visible here. This proves no migration widens the surface, not that the surface is ` +
-    `narrow.`);
+    `not visible here, and ${stats.grandfathered} CREATE statement(s) predate the cutoff and ` +
+    `were not modelled. Within that scope, this proves no migration widens the surface.`);
 }
