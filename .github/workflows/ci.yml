@@ -996,7 +996,10 @@ jobs:
 
   playwright:
     name: Playwright smoke
-    runs-on: ubuntu-latest
+    # Pinned off ubuntu-latest (OR-T2765): ubuntu-latest now resolves to Ubuntu 26.04 and
+    # Playwright 1.60.0 cannot install chromium there. Unpin when the Playwright version in
+    # the lockfile supports it. The other Playwright jobs below carry the same pin.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Runs against the already-deployed dev site. Two separate things deploy
     # that site, and neither of them is this workflow:
@@ -1232,7 +1235,8 @@ jobs:
 
   playwright-prod-smoke:
     name: Playwright prod smoke -- Sparrow host routing (DL-0439)
-    runs-on: ubuntu-latest
+    # Pinned off ubuntu-latest, see the playwright job above (OR-T2765).
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: lint-and-build
     # Only meaningful where the live hosts are the target. PR preview URLs are
@@ -1300,7 +1304,8 @@ jobs:
 
   playwright-stealth-cursor:
     name: Playwright stealth cursor-write proof (DL-0649)
-    runs-on: ubuntu-latest
+    # Pinned off ubuntu-latest, see the playwright job above (OR-T2765).
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     needs: lint-and-build
     # Not run on release-based heads (OR-T2751). This job starts the head's own
@@ -1440,7 +1445,8 @@ jobs:
 
   connect-protocol-compat:
     name: Connect previous-version handshake gate (DL-1809)
-    runs-on: ubuntu-latest
+    # Pinned off ubuntu-latest, see the playwright job above (OR-T2765).
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     # Why this job exists: connect.orangerails.com is a hosted surface with no
     # version pin. On 2026-06-19 an integrator's connect flow hung on the
