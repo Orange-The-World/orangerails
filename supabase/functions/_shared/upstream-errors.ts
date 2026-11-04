@@ -217,35 +217,40 @@ export function classifyUpstreamError(raw: string, errorClass?: string): Upstrea
 export const _CCXT_ERROR_CODES_FOR_TEST = CCXT_ERROR_CODES;
 
 /**
- * Codes a customer-facing handler may report from an adapter error that the
- * adapter itself did not tag (OR-T2777). Only the three the customer can act
- * on: fix the key, wait, or try later. Everything else stays an internal
- * error, because a message-shape guess at those is not worth a wrong sentence.
+ * Mark an error thrown by a provider adapter with the HTTP status the provider
+ * answered (OR-T2777). tagAdapterError reads this number, never the message,
+ * because a provider body can say "401" inside a 429 and a parser offset can
+ * read as "503".
  */
-const UNTAGGED_CUSTOMER_CODES: ReadonlySet<UpstreamErrorCode> = new Set([
-  'UPSTREAM_AUTH_FAILED',
-  'UPSTREAM_RATE_LIMITED',
-  'UPSTREAM_UNAVAILABLE',
-]);
+export function withHttpStatus(err: Error, status: number): Error {
+  (err as Error & { httpStatus?: number }).httpStatus = status;
+  return err;
+}
 
 /**
  * Tag an error thrown by a provider adapter call with `upstreamCode` when the
  * adapter did not (OR-T2777). Only the _ccxt adapter sets upstreamCode; the
- * strike, blink, btcpay, ocean, surge and xpub adapters throw a plain Error
- * such as "Strike 401 GET /v1/balances: ...", which the caller then reported
- * as a 500 "Internal error" instead of the catalogued copy.
+ * strike, blink, btcpay, surge and xpub adapters throw a plain Error, so
+ * or-discover-wallets answered a rejected key with HTTP 500 "Internal error"
+ * instead of the catalogued copy.
  *
- * Call it only on errors from the adapter itself, never on database or
- * request-parsing errors, so a "500" inside an unrelated message cannot be
- * read as a provider outage. An existing upstreamCode is never overwritten.
- * The message is only classified, never copied anywhere.
+ * Decided only by the provider's HTTP status carried by withHttpStatus:
+ * 401 and 403 are a rejected key, 429 is a rate limit, 5xx is an outage.
+ * Anything else, including a parse failure or an error with no status, is left
+ * untagged so the caller keeps its 500. An existing upstreamCode is never
+ * overwritten, and the message is never read or copied.
  */
 export function tagAdapterError(err: unknown): unknown {
   if (!(err instanceof Error)) return err;
-  if ((err as { upstreamCode?: unknown }).upstreamCode) return err;
-  const code = classifyUpstreamError(err.message ?? '', errorClassName(err));
-  if (UNTAGGED_CUSTOMER_CODES.has(code)) {
-    (err as Error & { upstreamCode?: string }).upstreamCode = code;
-  }
+  const e = err as Error & { upstreamCode?: unknown; httpStatus?: unknown };
+  if (e.upstreamCode) return err;
+  const s = e.httpStatus;
+  if (typeof s !== 'number') return err;
+  const code: UpstreamErrorCode | undefined =
+    s === 401 || s === 403 ? 'UPSTREAM_AUTH_FAILED'
+    : s === 429 ? 'UPSTREAM_RATE_LIMITED'
+    : s >= 500 && s <= 599 ? 'UPSTREAM_UNAVAILABLE'
+    : undefined;
+  if (code) e.upstreamCode = code;
   return err;
 }
