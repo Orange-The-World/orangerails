@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# or-encrypted-transactions-silence-alert
+# Alerts when encrypted_transactions on prod (lcdicqalreskibdfxkzb) has had no
+# new data for more than THRESHOLD_DAYS days.
+#
+# Exit 0: data is fresh.
+# Exit 1: data is stale, DB unreachable, or any error (never silent on failure).
+#
+# Part of OR-E0022. Modeled after existing OR alert units on bb-us.
+# Credentials must be injected via EnvironmentFile in the systemd unit.
+# See or-encrypted-transactions-silence-alert.service for the full unit spec.
+#
+# Acceptance: row > 3 days old -> ALERT exit 1 + Zulip post.
+#             row < 3 days old -> OK exit 0.
+
+set -euo pipefail
+
+THRESHOLD_DAYS=3
+PROD_REF="lcdicqalreskibdfxkzb"
+SUPABASE_URL="https://${PROD_REF}.supabase.co"
+SCRIPT_NAME="or-encrypted-transactions-silence-alert"
+
+# Credentials must be in environment (set via EnvironmentFile in systemd unit).
+: "${ORANGERAILS_PROD_ACCESS_TOKEN:?ORANGERAILS_PROD_ACCESS_TOKEN must be set}"
+: "${ZULIP_EMAIL:?ZULIP_EMAIL must be set}"
+: "${ZULIP_KEY:?ZULIP_KEY must be set}"
+: "${ZULIP_SITE:?ZULIP_SITE must be set}"
+
+# Query latest fetched_at via Supabase REST API.
+# Equivalent to: SELECT fetched_at FROM encrypted_transactions ORDER BY fetched_at DESC LIMIT 1
+if ! RESPONSE=$(curl -sf --max-time 15 \
+    -H "apikey: ${ORANGERAILS_PROD_ACCESS_TOKEN}" \
+    -H "Authorization: Bearer ${ORANGERAILS_PROD_ACCESS_TOKEN}" \
+    "${SUPABASE_URL}/rest/v1/encrypted_transactions?select=fetched_at&order=fetched_at.desc&limit=1" 2>&1); then
+  echo >&2 "ERROR [${SCRIPT_NAME}]: DB unreachable -- curl failed: ${RESPONSE}"
+  exit 1
+fi
+
+# Parse the timestamp from the JSON array response.
+if ! LAST_FETCHED=$(echo "${RESPONSE}" | python3 -c "
+import sys, json
+try:
+    rows = json.load(sys.stdin)
+except Exception as e:
+    sys.stderr.write('JSON parse failed: ' + str(e) + '\n')
+    sys.exit(1)
+if not rows:
+    sys.stderr.write('no rows returned from encrypted_transactions\n')
+    sys.exit(1)
+ts = rows[0].get('fetched_at')
+if not ts:
+    sys.stderr.write('fetched_at field missing from row\n')
+    sys.exit(1)
+print(ts)
+"); then
+  echo >&2 "ERROR [${SCRIPT_NAME}]: parse failed -- raw response: ${RESPONSE}"
+  exit 1
+fi
+
+# Compute age in days (GNU date, available on bb-us).
+if ! LAST_TS=$(date -d "${LAST_FETCHED}" +%s 2>/dev/null); then
+  echo >&2 "ERROR [${SCRIPT_NAME}]: could not parse timestamp '${LAST_FETCHED}'"
+  exit 1
+fi
+NOW_TS=$(date +%s)
+AGE_SECONDS=$(( NOW_TS - LAST_TS ))
+AGE_DAYS=$(( AGE_SECONDS / 86400 ))
+
+# Log what we checked (silent-success-shape: always say what was processed).
+echo "[${SCRIPT_NAME}]: checked 1 row -- last fetched_at=${LAST_FETCHED}, age=${AGE_DAYS} day(s)"
+
+if (( AGE_DAYS > THRESHOLD_DAYS )); then
+  echo "ALERT [${SCRIPT_NAME}]: ${AGE_DAYS} day(s) old exceeds threshold of ${THRESHOLD_DAYS}"
+  curl -sf -X POST "${ZULIP_SITE}/api/v1/messages" \
+    -u "${ZULIP_EMAIL}:${ZULIP_KEY}" \
+    --data-urlencode "type=stream" \
+    --data-urlencode "to=or-connectors" \
+    --data-urlencode "topic=encrypted_transactions silence alert" \
+    --data-urlencode "content=:warning: **encrypted_transactions silence alert** -- last row is **${AGE_DAYS} day(s)** old (threshold: ${THRESHOLD_DAYS} days). @**OR - CTO** @**OR - SRE** Last data: ${LAST_FETCHED} (prod ${PROD_REF})." \
+    || echo >&2 "WARNING [${SCRIPT_NAME}]: Zulip post failed -- alert condition remains real"
+  exit 1
+fi
+
+echo "OK [${SCRIPT_NAME}]: last encrypted_transaction ${AGE_DAYS} day(s) ago (${LAST_FETCHED})"
+exit 0
