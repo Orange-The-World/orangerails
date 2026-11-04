@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily encrypted_transactions silence check (OR-E0022)
+Requires=or-encrypted-transactions-silence-alert.service
+
+[Timer]
+# Runs once a day, at a random offset within the first 10 minutes to avoid
+# thundering-herd with other daily timers.
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=600
+
+[Install]
+WantedBy=timers.target
