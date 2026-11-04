@@ -1,0 +1,14 @@
+[Unit]
+Description=OR encrypted_transactions silence alert (OR-E0022)
+Documentation=https://github.com/Orange-The-World/orangerails/blob/dev/scripts/monitoring/DEPLOY-or-encrypted-transactions-silence-alert.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Credentials file: populated by deployer (see DEPLOY instructions).
+# Required keys: ORANGERAILS_PROD_ACCESS_TOKEN, ZULIP_EMAIL, ZULIP_KEY, ZULIP_SITE
+EnvironmentFile=/home/ubuntu/.config/or-alerts/encrypted-transactions.env
+ExecStart=/home/ubuntu/.local/bin/or-encrypted-transactions-silence-alert
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=or-encrypted-transactions-silence-alert
