@@ -215,3 +215,37 @@ export function classifyUpstreamError(raw: string, errorClass?: string): Upstrea
 
 /** Exposed for tests so the map cannot silently drift from its assertions. */
 export const _CCXT_ERROR_CODES_FOR_TEST = CCXT_ERROR_CODES;
+
+/**
+ * Codes a customer-facing handler may report from an adapter error that the
+ * adapter itself did not tag (OR-T2777). Only the three the customer can act
+ * on: fix the key, wait, or try later. Everything else stays an internal
+ * error, because a message-shape guess at those is not worth a wrong sentence.
+ */
+const UNTAGGED_CUSTOMER_CODES: ReadonlySet<UpstreamErrorCode> = new Set([
+  'UPSTREAM_AUTH_FAILED',
+  'UPSTREAM_RATE_LIMITED',
+  'UPSTREAM_UNAVAILABLE',
+]);
+
+/**
+ * Tag an error thrown by a provider adapter call with `upstreamCode` when the
+ * adapter did not (OR-T2777). Only the _ccxt adapter sets upstreamCode; the
+ * strike, blink, btcpay, ocean, surge and xpub adapters throw a plain Error
+ * such as "Strike 401 GET /v1/balances: ...", which the caller then reported
+ * as a 500 "Internal error" instead of the catalogued copy.
+ *
+ * Call it only on errors from the adapter itself, never on database or
+ * request-parsing errors, so a "500" inside an unrelated message cannot be
+ * read as a provider outage. An existing upstreamCode is never overwritten.
+ * The message is only classified, never copied anywhere.
+ */
+export function tagAdapterError(err: unknown): unknown {
+  if (!(err instanceof Error)) return err;
+  if ((err as { upstreamCode?: unknown }).upstreamCode) return err;
+  const code = classifyUpstreamError(err.message ?? '', errorClassName(err));
+  if (UNTAGGED_CUSTOMER_CODES.has(code)) {
+    (err as Error & { upstreamCode?: string }).upstreamCode = code;
+  }
+  return err;
+}
