@@ -417,7 +417,7 @@ export async function handleEvent(
   // errored taxonomy is not guaranteed to be bounded, and a subtype not listed here
   // would fall through to 'skipped' without reconciling, which is the gap this fix closes.
   if (ev.event_type.startsWith('connection.synced.errored')) {
-    const reconcileErr = await reconcileConnectionError(client, ev, subaccountId);
+    const reconcileErr = await reconcileConnectionError(client, ev, subaccountId, platformId);
     if (reconcileErr) return reconcileErr;
     // Tell the integrator the connection is broken (connection.errored). Best-effort:
     // a failure here must not retry this event, which would run the reconcile again.
@@ -1069,6 +1069,9 @@ export async function reconcileConnectionError(
   client: SupabaseClient,
   ev: PendingEvent,
   subaccountId: string,
+  // OR-T2752: the platform the drain resolved. ev.platform_id is NULL when routing
+  // was resolved at drain time (link race, replay), so it must not be read here.
+  platformId: string,
 ): Promise<string | null> {
   const connectionId = typeof ev.payload?.record?.id === 'string'
     ? ev.payload.record.id
@@ -1171,7 +1174,7 @@ export async function reconcileConnectionError(
   const { data: platRow, error: platErr } = await client
     .from('platforms')
     .select('sink_format')
-    .eq('id', ev.platform_id)
+    .eq('id', platformId)
     .maybeSingle();
   // Review follow-up on PR 808. A failed read leaves platRow undefined, which
   // makes sinkMode false, which silently reproduces the exact NULL-cause state
@@ -1184,7 +1187,7 @@ export async function reconcileConnectionError(
   if (platErr) {
     console.error(
       `[or-quiltt-sync] event ${ev.event_id}: platforms lookup failed for ` +
-        `platform ${ev.platform_id}, treating as non-sink so no cause will be ` +
+        `platform ${platformId}, treating as non-sink so no cause will be ` +
         `recorded: ${platErr.message}`,
     );
   }
