@@ -1,6 +1,11 @@
 import { useState } from "react";
 import { supabase } from "@/lib/auth";
 
+const ENV_CONFIGURED = Boolean(
+  import.meta.env.VITE_ORANGERAILS_SUPABASE_URL &&
+  import.meta.env.VITE_ORANGERAILS_SUPABASE_ANON_KEY
+);
+
 export default function Login() {
 const [email, setEmail] = useState("");
   const [sent, setSent] = useState(false);
@@ -26,6 +31,17 @@ const [email, setEmail] = useState("");
         <div className="text-center">
           <h2 className="text-2xl font-bold">Check your email</h2>
           <p className="mt-2 text-slate-600">We sent a sign-in link to {email}.</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!ENV_CONFIGURED) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-6">
+        <div className="text-center">
+          <h1 className="text-3xl font-bold text-orange">Orange Rails</h1>
+          <p className="mt-4 text-slate-600">Sign-in is temporarily unavailable, please try again later.</p>
         </div>
       </div>
     );
