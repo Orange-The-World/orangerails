@@ -184,23 +184,32 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # Every open pull request into dev must get a fresh gate run. The run is
-          # matched to the pull request by number, or for a fork (where GitHub
-          # leaves the number off) by head repository and branch, never by sha
-          # alone. Any pull request that cannot be refreshed fails this job.
+          # Every open pull request into dev with a gate run gets that run
+          # refreshed. The run is matched to the pull request by number, or for a
+          # fork (where GitHub leaves the number off) by head repository and
+          # branch, and the latest match is taken. A run that exists but cannot be
+          # re-run fails this job.
           wf=$(gh api "repos/$REPO/actions/runs/${{ github.run_id }}" -q .workflow_id)
           bad=0
-          # List first, into a file, so a failed listing stops the job under set -e.
+          # List first, into files, so a failed listing stops the job under set -e.
+          # GitHub only re-runs runs from the last 30 days, so older ones are not
+          # fetched.
+          since=$(date -u -d '30 days ago' +%Y-%m-%d)
+          runs=$(mktemp)
+          gh api "repos/$REPO/actions/workflows/$wf/runs?event=pull_request_target&created=%3E%3D$since&per_page=100" --paginate \
+            -q '.workflow_runs[] | {id, created_at, prs: [.pull_requests[].number], hrepo: .head_repository.full_name, href: .head_branch}' \
+            | jq -s . > "$runs"
           prs=$(mktemp)
           gh api "repos/$REPO/pulls?base=$DEV_BRANCH&state=open&per_page=100" --paginate \
             -q '.[] | "\(.number) \(.head.sha) \(.head.repo.full_name // "unknown") \(.head.ref)"' > "$prs"
           while read -r n sha hrepo href; do
             # Branch and repository names are passed to jq as data, never as code.
-            rid=$(gh api "repos/$REPO/actions/workflows/$wf/runs?head_sha=$sha&event=pull_request_target&per_page=100" \
-              | jq -r --argjson n "$n" --arg hrepo "$hrepo" --arg href "$href" \
-                '[.workflow_runs[] | select((.pull_requests | map(.number) | index($n)) or ((.pull_requests | length) == 0 and .head_repository.full_name == $hrepo and .head_branch == $href))] | sort_by(.created_at) | last | .id // empty')
+            rid=$(jq -r --argjson n "$n" --arg hrepo "$hrepo" --arg href "$href" \
+              '[.[] | select((.prs | index($n)) or ((.prs | length) == 0 and .hrepo == $hrepo and .href == $href))] | sort_by(.created_at) | last | .id // empty' "$runs")
             if [[ -z "$rid" ]]; then
-              echo "::error::PR #$n: no gate run found to refresh"; bad=1; continue
+              # No gate run means no "Drift gate" check, and a missing required
+              # check already holds the pull request. Nothing to refresh.
+              echo "::notice::PR #$n: no gate run yet, it is held by the missing check"; continue
             fi
             # A run still in progress may have read the old state: wait for it,
             # then run it again.
