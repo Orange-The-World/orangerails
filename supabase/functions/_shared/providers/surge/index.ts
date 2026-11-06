@@ -40,6 +40,7 @@ import type {
   NormalizedTransaction,
   SyncResult,
 } from '../types.ts';
+import { withHttpStatus } from '../../upstream-errors.ts';
 
 // ─── Constants ───────────────────────────────────────────────────────────
 
@@ -149,7 +150,7 @@ async function surgeGet<T>(path: string, token: string): Promise<T> {
   if (!res.ok || obj.success !== true) {
     const code = obj.error?.code ?? `http_${res.status}`;
     const msg = obj.error?.message ?? `Surge HTTP ${res.status}`;
-    throw new Error(`[surge:${code}] ${msg}`);
+    throw withHttpStatus(new Error(`[surge:${code}] ${msg}`), res.status);
   }
   return obj.data as T;
 }

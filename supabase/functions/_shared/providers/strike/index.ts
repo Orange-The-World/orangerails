@@ -64,6 +64,7 @@ import type {
   NormalizedTransaction,
   SyncResult,
 } from '../types.ts';
+import { withHttpStatus } from '../../upstream-errors.ts';
 
 const STRIKE_API = 'https://api.strike.me/v1';
 
@@ -222,7 +223,7 @@ async function strikeGet<T>(creds: StrikeCredentials, path: string): Promise<T> 
   const res = await strikeFetch(creds, path);
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`Strike ${res.status} GET ${path}: ${detail.slice(0, 200)}`);
+    throw withHttpStatus(new Error(`Strike ${res.status} GET ${path}: ${detail.slice(0, 200)}`), res.status);
   }
   return res.json() as Promise<T>;
 }
@@ -235,7 +236,7 @@ async function strikePost<T>(
   const res = await strikeFetch(creds, path, { method: 'POST', body: JSON.stringify(body) });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`Strike ${res.status} POST ${path}: ${detail.slice(0, 200)}`);
+    throw withHttpStatus(new Error(`Strike ${res.status} POST ${path}: ${detail.slice(0, 200)}`), res.status);
   }
   return res.json() as Promise<T>;
 }
@@ -244,7 +245,7 @@ async function strikeDelete(creds: StrikeCredentials, path: string): Promise<voi
   const res = await strikeFetch(creds, path, { method: 'DELETE' });
   if (!res.ok && res.status !== 404) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`Strike ${res.status} DELETE ${path}: ${detail.slice(0, 200)}`);
+    throw withHttpStatus(new Error(`Strike ${res.status} DELETE ${path}: ${detail.slice(0, 200)}`), res.status);
   }
 }
 

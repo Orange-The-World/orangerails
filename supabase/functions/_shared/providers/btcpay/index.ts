@@ -48,6 +48,7 @@ import type {
   SyncResult,
 } from '../types.ts';
 import { assertPublicHttpUrl } from '../../net-guard.ts';
+import { withHttpStatus } from '../../upstream-errors.ts';
 
 const PAGE_SIZE = 100;
 const MAX_PAGES_PER_STORE = 50; // safety cap , 5,000 invoices per store per sync
@@ -127,7 +128,7 @@ async function btcpayGet<T>(creds: BtcPayCredentials, path: string): Promise<T> 
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
-    throw new Error(`BTCPay ${res.status} ${path}: ${detail.slice(0, 200)}`);
+    throw withHttpStatus(new Error(`BTCPay ${res.status} ${path}: ${detail.slice(0, 200)}`), res.status);
   }
   return res.json() as Promise<T>;
 }
