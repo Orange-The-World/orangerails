@@ -6,6 +6,15 @@
 -- this migration the table had no triggers of any kind on either database, so both
 -- columns could be silently changed after activation.
 --
+-- OR-T0438 surface decision (repository evidence; hosted state was not re-read for
+-- this comment): the public agent-members feature was retired, but its database
+-- tables were deliberately retained as reversible scaffolding. A later migration,
+-- 20260831110000_agent_invitation_authenticate_on_raw_token.sql, records zero
+-- agent_members rows on both hosted projects while also recording that the retired
+-- edge functions remained deployed and active. Dropping either pubkey column is
+-- therefore both founder-gated and inconsistent with the recorded rollback posture.
+-- Keep the retained schema safe with this additive, reversible guard instead.
+--
 -- Why a trigger and not RLS or a column REVOKE: service_role, the SECURITY DEFINER
 -- helpers and any future edge function bypass RLS and hold the column grant. A
 -- BEFORE UPDATE row trigger fires for every role, so it is the only control that
