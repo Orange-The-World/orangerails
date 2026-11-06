@@ -143,7 +143,7 @@ Orange Rails was originally created by MorningRevolution and is now developed in
 
 - **BitBooks**: bookkeeping on a Bitcoin standard. First consuming app. [bitbooks.com](https://bitbooks.com)
 - **Orange Way (Manager + Books)**: personal-finance and bookkeeping apps in the same family. Consumer of the widget and the sync engine.
-- **ORBI**: Orange Rails Bitcoin Index, the price and rates dataset. Sibling repo at [`Orange-The-World/orbi`](https://github.com/Orange-The-World/orbi).
+- **ORBI**: Orange Rails Bitcoin Index, the price and rates dataset. The rate calculation is published in [`orbi/calculation`](orbi/calculation).
 - **Orange World**: public CC-BY 4.0 truth tables at [orangethe.world](https://orangethe.world). Sibling repo at [`Orange-The-World/orange-world`](https://github.com/Orange-The-World/orange-world).
 
 ---
