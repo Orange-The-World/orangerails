@@ -4,7 +4,7 @@
  * Run with:
  *   deno test --allow-read supabase/functions/or-connection-delete/index.test.ts
  *
- * Two independent groups in this file:
+ * Three independent groups in this file:
  *
  * 1. STEALTH FALLBACK (DL-1033). Tests tryDeleteStealthConnection, which
  *    handles the case where a connection_id is absent from `connections`
@@ -14,17 +14,22 @@
  *         to a different scope, delete matches zero rows => 404.
  *      c. Unknown id: not in either table, delete matches zero rows => 404.
  *
- * 2. SOURCE_WALLETS CLEANUP REPORTING (OR-T0477 / DL-1723). Source
- *    inspection over the live handler, not a unit test over an extracted
+ * 2. SOURCE_WALLETS CLEANUP REPORTING: SOURCE INSPECTION (OR-T0477 / DL-1723).
+ *    Source inspection over the live handler, not a unit test over an extracted
  *    helper, because the defect being pinned is that a failure path did
  *    not report, and the live call site is the entire subject. See the
  *    comment block above `failedCleanupBranch()` below for the full
  *    rationale, including why control flow is asserted after stripping
  *    comments.
+ *
+ * 3. SOURCE_WALLETS CLEANUP REPORTING: RUNTIME PROOF (OR-T0477). Runtime
+ *    tests that call deleteConnectionRow directly with a stubbed serviceClient
+ *    and a spy reportFn, proving the error is reported and the response is
+ *    ok:true when source_wallets.delete() fails.
  */
 
 import { assert, assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { tryDeleteStealthConnection } from './index.ts';
+import { tryDeleteStealthConnection, deleteConnectionRow } from './index.ts';
 
 // --- Group 1: stealth fallback (DL-1033) ---
 
@@ -145,7 +150,7 @@ Deno.test('unknown id absent from connections and stealth_connections returns no
   assertEquals(result, { notFound: true });
 });
 
-// --- Group 2: source_wallets cleanup reporting (OR-T0477 / DL-1723) ---
+// --- Group 2: source_wallets cleanup reporting: source inspection (OR-T0477 / DL-1723) ---
 
 const SOURCE = Deno.readTextFileSync(new URL('./index.ts', import.meta.url));
 
@@ -208,14 +213,28 @@ Deno.test('reportError is imported, so the failure can reach the error tracker',
   );
 });
 
+Deno.test('deleteConnectionRow defaults reportFn to the real reportError', () => {
+  // The reportFn parameter defaults to reportError so the production call
+  // path is identical to before the extraction. Tests inject a spy via
+  // reportFn; production callers omit it and get the real reporter.
+  assertEquals(
+    SOURCE.includes(
+      'reportFn: (err: unknown, fn: string, req: Request) => Promise<void> = reportError',
+    ),
+    true,
+    'deleteConnectionRow must default reportFn to reportError so the production path calls the real reporter',
+  );
+});
+
 Deno.test('a failed source_wallets cleanup is reported, tagged to this function', () => {
   const branch = failedCleanupBranch();
   assert(branch.length > 0, 'failed-cleanup branch came back empty');
   assertEquals(
-    branch.includes("reportError(swDelErr, 'or-connection-delete', req)"),
+    branch.includes("reportFn(swDelErr, 'or-connection-delete', req)"),
     true,
-    'the swDelErr branch must call reportError with the swDelErr object and this function name, ' +
-      'so the resulting issue is attributable to or-connection-delete',
+    'the swDelErr branch must call reportFn with the swDelErr object and this function name, ' +
+      'so the resulting issue is attributable to or-connection-delete; ' +
+      'reportFn defaults to the real reportError so the production path is unchanged',
   );
 });
 
@@ -256,7 +275,7 @@ Deno.test('a failed cleanup does NOT block the connection delete', () => {
   // The branch is mostly explanatory comment, so prove something executable
   // survived the strip before asserting on what is missing from it.
   assert(
-    code.includes('reportError'),
+    code.includes('reportFn'),
     'stripping comments removed the executable code too; the assertions below would be vacuous',
   );
 
@@ -298,4 +317,126 @@ Deno.test('the success response is unchanged', () => {
     true,
     'the ok:true success response must be untouched by this fix',
   );
+});
+
+// --- Group 3: source_wallets cleanup reporting: runtime proof (OR-T0477) ---
+//
+// These tests call deleteConnectionRow directly, bypassing the HTTP layer and
+// auth middleware, using the same stub-serviceClient pattern as Group 1. The
+// goal is to prove that a forced source_wallets failure (a) calls reportFn and
+// (b) still returns ok:true, at runtime and not just via source inspection.
+
+interface DeleteRowMockOpts {
+  sourceWalletsError?: unknown;
+  connectionDeleteError?: unknown;
+  connectionDeleteCount?: number;
+}
+
+// deno-lint-ignore no-explicit-any
+function makeDeleteRowClient(opts: DeleteRowMockOpts): any {
+  return {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        select() { return chain; },
+        delete() { return chain; },
+        eq() { return chain; },
+        // deno-lint-ignore no-explicit-any
+        then(onResolve: (r: unknown) => unknown): any {
+          if (table === 'source_wallets') {
+            return Promise.resolve({
+              data: null,
+              error: opts.sourceWalletsError ?? null,
+            }).then(onResolve);
+          }
+          if (table === 'connections') {
+            return Promise.resolve({
+              data: null,
+              error: opts.connectionDeleteError ?? null,
+              count: opts.connectionDeleteCount ?? 1,
+            }).then(onResolve);
+          }
+          return Promise.resolve({ data: null, error: null, count: 0 }).then(onResolve);
+        },
+      };
+      return chain;
+    },
+  };
+}
+
+Deno.test('runtime: source_wallets error calls reportFn and returns ok:true', async () => {
+  // This is the proof xo-5 asked for. Set up a serviceClient that returns an
+  // error from source_wallets.delete() but succeeds on connections.delete().
+  // Verify both halves of the acceptance: the failure is reported (reportFn
+  // is called with the right error and function name), and the response is
+  // still ok:true (the connection delete was not blocked).
+  const swError = new Error('db timeout');
+  let reportCallCount = 0;
+  let reportedErr: unknown;
+  let reportedFnName: string | undefined;
+
+  const spyReport = async (err: unknown, fn: string, _req: Request): Promise<void> => {
+    reportCallCount += 1;
+    reportedErr = err;
+    reportedFnName = fn;
+  };
+
+  const client = makeDeleteRowClient({ sourceWalletsError: swError });
+  const req = new Request('https://example.com/functions/v1/or-connection-delete', {
+    method: 'POST',
+  });
+  const cors = new Headers();
+
+  const res = await deleteConnectionRow(
+    client,
+    CONNECTION_ID,
+    SUBACCOUNT_ID,
+    req,
+    cors,
+    undefined,
+    spyReport,
+  );
+
+  // The connection delete succeeds and the response is ok:true
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body, { ok: true });
+
+  // reportFn was called exactly once, with the original error and the right tag
+  assertEquals(reportCallCount, 1, 'reportFn must be called exactly once when source_wallets fails');
+  assertEquals(reportedErr, swError, 'reportFn must receive the original error object');
+  assertEquals(
+    reportedFnName,
+    'or-connection-delete',
+    'reportFn must be tagged with this function name so the GlitchTip issue is attributable',
+  );
+});
+
+Deno.test('runtime: source_wallets success does not call reportFn', async () => {
+  // Negative control: when source_wallets.delete() succeeds, reportFn must
+  // not be called.
+  let reportCallCount = 0;
+  const spyReport = async (_err: unknown, _fn: string, _req: Request): Promise<void> => {
+    reportCallCount += 1;
+  };
+
+  const client = makeDeleteRowClient({ sourceWalletsError: null });
+  const req = new Request('https://example.com/functions/v1/or-connection-delete', {
+    method: 'POST',
+  });
+  const cors = new Headers();
+
+  const res = await deleteConnectionRow(
+    client,
+    CONNECTION_ID,
+    SUBACCOUNT_ID,
+    req,
+    cors,
+    undefined,
+    spyReport,
+  );
+
+  assertEquals(res.status, 200);
+  assertEquals((await res.json()), { ok: true });
+  assertEquals(reportCallCount, 0, 'reportFn must not be called when source_wallets succeeds');
 });
