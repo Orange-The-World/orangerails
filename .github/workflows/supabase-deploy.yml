@@ -1819,9 +1819,75 @@ jobs:
           # github.triggering_actor becomes whoever pressed re-run, so checking only
           # one of them would let a second party re-run a founder's dispatch of an
           # irreversible apply.
-          if [ "${ACTOR}" != "${FOUNDER_LOGIN}" ] || [ "${TRIGGERING_ACTOR}" != "${FOUNDER_LOGIN}" ]; then
+          #
+          # OR-T2767. A SECOND ROUTE: A FRESH RESTORE POINT.
+          #
+          # WHY. The classifier refuses anything it cannot prove has a restore path,
+          # which includes every migration that builds its SQL at run time. Most of
+          # our privilege-revoke migrations do, so in practice nearly every prod batch
+          # landed on the founder-dispatch route, and the founder became the person
+          # who starts routine applies. His click added a signature, not a restore
+          # path. What actually makes a change with no undo survivable is a completed
+          # backup taken shortly before it runs.
+          #
+          # SO. If the founder did not dispatch, the run may still proceed when ALL of:
+          #   1. the dispatcher and the triggering actor are the same account (a
+          #      re-run by a second account is refused, so the environment reviewer
+          #      cannot be the person who started the attempt);
+          #   2. the newest COMPLETED backup of this project is no older than
+          #      MAX_BACKUP_AGE_SECONDS, read now from the Management API;
+          #   3. everything above still holds: a well formed authority reference, the
+          #      actor allowlist, and a named reviewer approving supabase-prod.
+          # Any API failure, unreadable body or missing timestamp is a refusal.
+          MAX_BACKUP_AGE_SECONDS=14400
+          RP_REASON=""
+          restore_point_ok () {
+            if [ "${ACTOR}" != "${TRIGGERING_ACTOR}" ]; then
+              RP_REASON="the dispatcher (${ACTOR}) and the triggering actor (${TRIGGERING_ACTOR}) differ"
+              return 1
+            fi
+            local body newest newest_epoch now_epoch age
+            body=$(curl -sS --fail-with-body \
+              -H "Authorization: Bearer ${SUPABASE_ACCESS_TOKEN}" \
+              "https://api.supabase.com/v1/projects/${SUPABASE_REF}/database/backups" 2>/dev/null) || {
+              RP_REASON="the backup list could not be read from the Management API"
+              return 1
+            }
+            newest=$(echo "$body" | jq -r '[.backups[]? | select(.status == "COMPLETED") | .inserted_at] | sort | last // empty' 2>/dev/null)
+            if [ -z "$newest" ]; then
+              RP_REASON="no COMPLETED backup was found for this project"
+              return 1
+            fi
+            newest_epoch=$(date -u -d "$newest" +%s 2>/dev/null) || {
+              RP_REASON="the newest backup timestamp (${newest}) could not be parsed"
+              return 1
+            }
+            now_epoch=$(date -u +%s)
+            age=$((now_epoch - newest_epoch))
+            if [ "$age" -lt 0 ] || [ "$age" -gt "$MAX_BACKUP_AGE_SECONDS" ]; then
+              RP_REASON="the newest COMPLETED backup (${newest}) is ${age}s old; the limit is ${MAX_BACKUP_AGE_SECONDS}s"
+              return 1
+            fi
+            RP_NEWEST="$newest"
+            RP_AGE="$age"
+            return 0
+          }
+
+          GATE_PATH=""
+          RP_NEWEST=""
+          RP_AGE=""
+          if [ "${ACTOR}" = "${FOUNDER_LOGIN}" ] && [ "${TRIGGERING_ACTOR}" = "${FOUNDER_LOGIN}" ]; then
+            GATE_PATH="founder"
+          elif restore_point_ok; then
+            GATE_PATH="restore-point"
+          fi
+          echo "IRREVERSIBLE ROUTE: ${GATE_PATH:-none}${RP_REASON:+ (restore point refused: ${RP_REASON})}"
+
+          if [ -z "${GATE_PATH}" ]; then
             {
-              echo "## :no_entry: Irreversible change(s) refused on \`${SUPABASE_REF}\`: the founder did not start this run"
+              echo "## :no_entry: Irreversible change(s) refused on \`${SUPABASE_REF}\`: the founder did not start this run and there is no fresh restore point"
+              echo ""
+              echo "Restore point check: ${RP_REASON}."
               echo ""
               echo "**Nothing was applied.**"
               echo ""
@@ -1835,12 +1901,14 @@ jobs:
               echo "reviewers it lists, so it cannot by itself put a particular person in the"
               echo "path."
               echo ""
-              echo "To apply this: the founder dispatches this workflow with"
-              echo "\`irreversible_approval_ref\` set, and a different named reviewer approves"
-              echo "the \`supabase-prod\` environment. An authority reference on its own is a"
-              echo "record of a decision, not the making of one."
+              echo "To apply this, either: the founder dispatches this workflow with"
+              echo "\`irreversible_approval_ref\` set; or an allowlisted account dispatches it"
+              echo "within $((MAX_BACKUP_AGE_SECONDS / 3600)) hours of a COMPLETED backup, with the same reference."
+              echo "In both cases a different named reviewer approves the \`supabase-prod\`"
+              echo "environment. An authority reference on its own is a record of a decision,"
+              echo "not the making of one."
             } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::IRREVERSIBLE change(s) in the pending set for ${SUPABASE_REF}, but this run was not dispatched by the founder (actor '${ACTOR}', triggering actor '${TRIGGERING_ACTOR}'). NOTHING was applied."
+            echo "::error::IRREVERSIBLE change(s) in the pending set for ${SUPABASE_REF}, but this run was not dispatched by the founder (actor '${ACTOR}', triggering actor '${TRIGGERING_ACTOR}') and the restore point route was refused: ${RP_REASON}. NOTHING was applied."
             exit 1
           fi
 
@@ -1854,9 +1922,16 @@ jobs:
             echo "This apply carried an explicit authority reference, so it proceeded. The"
             echo "reference names what authorised it."
             echo ""
-            echo "This run VERIFIED: the dispatcher \`${ACTOR}\` and the triggering actor"
-            echo "\`${TRIGGERING_ACTOR}\` both match the founder, the authority reference was"
-            echo "present and well formed, and the actor allowlist was satisfied."
+            if [ "${GATE_PATH}" = "founder" ]; then
+              echo "This run VERIFIED: the dispatcher \`${ACTOR}\` and the triggering actor"
+              echo "\`${TRIGGERING_ACTOR}\` both match the founder, the authority reference was"
+              echo "present and well formed, and the actor allowlist was satisfied."
+            else
+              echo "This run VERIFIED: the dispatcher and triggering actor are both \`${ACTOR}\`,"
+              echo "the newest COMPLETED backup is \`${RP_NEWEST}\` (${RP_AGE}s old, limit"
+              echo "${MAX_BACKUP_AGE_SECONDS}s), the authority reference was present and well"
+              echo "formed, and the actor allowlist was satisfied."
+            fi
             echo ""
             echo "This run RELIES ON but does not read: \`prevent_self_review\` being enabled"
             echo "on the \`supabase-prod\` environment, so the founder (as dispatcher) cannot"

@@ -41,6 +41,7 @@ import { getProvider, listProviderSlugs, parseCredentials } from "../_shared/pro
 import { wrapSentryHandler } from "../_shared/sentry.ts";
 import { lookupErrorCopy } from "../_shared/error-catalog.ts";
 import { safeErrorLine } from "../_shared/error-redaction.ts";
+import { tagAdapterError } from "../_shared/upstream-errors.ts";
 
 // -- AES-256-GCM helpers (kept inline for edge-fn isolation) ----------------
 
@@ -182,7 +183,8 @@ Deno.serve(
         const credsJson = await decryptAes(encryptedCredentials as string, credsKey);
         const credentials = parseCredentials(adapter, credsJson);
 
-        const discovered = await adapter.discoverWallets(credentials);
+        // tagAdapterError: non-ccxt adapters throw untagged errors (OR-T2777).
+        const discovered = await adapter.discoverWallets(credentials).catch((e) => { throw tagAdapterError(e); });
 
         // Record the account_key -> external_wallet_id map server-side so the
         // write path can compute the dedup fingerprint without the real account
@@ -264,7 +266,8 @@ Deno.serve(
       const credsJson = await decryptAes(conn.encrypted_credentials as string, credsKey);
       const credentials = parseCredentials(adapter, credsJson);
 
-      const discovered = await adapter.discoverWallets(credentials);
+      // tagAdapterError: non-ccxt adapters throw untagged errors (OR-T2777).
+      const discovered = await adapter.discoverWallets(credentials).catch((e) => { throw tagAdapterError(e); });
 
       // Connection mode does not run the widget link flow (no widget session to
       // key a discovery_sessions row on), so it records no server-side map. It
