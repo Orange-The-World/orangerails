@@ -448,10 +448,25 @@ test.describe('Connector identity -- Strike account isolation', () => {
         'no orphan wallet must be returned on auth failure',
       ).toBeUndefined();
 
-      // An error field must be present: confirms a user-facing error path
-      // rather than a silent empty result.
-      expect(typeof body.error, 'error field must be a string').toBe('string');
-      console.log(`[e2e:case5] error message: ${String(body.error)}`);
+      // A user-facing error must be present, not a silent empty result. An
+      // upstream failure answers with the error catalog (error_code plus
+      // customer copy), which is what src/lib/discovery-error.ts reads; other
+      // failures answer with a plain error string.
+      const hasCatalog =
+        typeof body.error_code === 'string' && typeof body.title === 'string';
+      const hasError = typeof body.error === 'string';
+      expect(
+        hasCatalog || hasError,
+        'response must carry an error catalog or an error string',
+      ).toBe(true);
+      if (hasCatalog) {
+        expect(body.error_code, 'an invalid key is an auth failure').toBe(
+          'UPSTREAM_AUTH_FAILED',
+        );
+      }
+      console.log(
+        `[e2e:case5] error: ${String(body.error_code ?? body.error)} ${String(body.title ?? '')}`,
+      );
     },
   );
 });
