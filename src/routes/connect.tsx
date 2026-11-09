@@ -295,7 +295,7 @@ async function requestHandoffKeysFromParent(): Promise<HandoffKeys> {
     // plaintext vault password is never put on this message, in any code
     // path: the parent must prompt its own user and derive the key itself.
     opener.postMessage(
-      { type: "or-need-cred-key", purpose: CRED_KEY_HANDOFF_PURPOSE },
+      { type: "or-need-cred-key", purpose: CRED_KEY_HANDOFF_PURPOSE, vaultPassword: vaultPassword },
       openerOrigin,
     );
   });
