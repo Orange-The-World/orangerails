@@ -7,20 +7,22 @@
  *      during the credential-key exchange. Other inbound channels (e.g. the
  *      inline Stealth Sync iframe) are governed by separate listeners.
  *   2. PayloadMap types every verb's payload -- no entry may carry a
- *      password-adjacent field. The compile-time _NoPasswordField guard
- *      enforces this on every `tsc --noEmit` run in CI.
+ *      password-adjacent field. The compile-time _guard below enforces this
+ *      whenever `tsc --noEmit` is run. CI does not run tsc on src/ today, so
+ *      this layer is a local developer check, not a CI gate.
  *   3. The runtime helper isAllowedVerb() is the single place the receiver
  *      calls before touching event.data.
  *
  * Adding a new verb:
  *   1. Append the type string to POST_MESSAGE_VERBS below.
- *   2. Add its payload shape to PayloadMap -- the _NoPasswordField guard
- *      refuses any payload that carries 'password', 'vault_password', or
- *      'raw_password'.
+ *   2. Add its payload shape to PayloadMap -- the _guard below refuses any
+ *      payload with a key whose lowercase form contains 'password',
+ *      'passwd', 'passphrase', 'mek' or 'recovery' (when tsc is run).
  *   3. Add a test-payload entry to VERB_TEST_LINES in
- *      tests/security/vault-password-leak.test.ts. The
- *      Record<PostMessageVerb, string> annotation there causes a compile
- *      error if any verb lacks a corresponding test case.
+ *      tests/security/vault-password-leak.test.ts. The loop in that test
+ *      fails in CI if any verb lacks an entry. The Record<PostMessageVerb,
+ *      string> annotation there states the same rule for tsc, but tests/ is
+ *      outside the tsconfig include, so tsc does not check it.
  *
  * Part of OR-T2722.
  */
@@ -45,10 +47,11 @@ export type PostMessageVerb = (typeof POST_MESSAGE_VERBS)[number];
 /**
  * Payload shape for each allowed verb.
  *
- * Rules enforced by the _NoPasswordField guard below:
- *   - No entry may contain a field named 'password', 'vault_password', or
- *     'raw_password'. Adding such a field to any payload causes a compile
- *     error in exactly that PR, before any test runs.
+ * Rule enforced by the _guard below when tsc is run (CI does not run tsc on
+ * src/ today):
+ *   - No entry may contain a key whose lowercase form contains 'password',
+ *     'passwd', 'passphrase', 'mek' or 'recovery'. Adding such a key to any
+ *     payload causes a compile error under tsc.
  */
 type PayloadMap = {
   'or-cred-key-ready': {
@@ -108,7 +111,7 @@ type _SensitiveKeysOf<T> = {
  * to `never` when every verb is clean.
  *
  * Note: this guard runs only when `tsc --noEmit` is invoked. CI does not run
- * `tsc --noEmit` on src/ today (RISK-0007, PR #969), so this is a local
+ * `tsc --noEmit` on src/ today (RISK-0007), so this is a local
  * developer check, not an automated gate.
  */
 type _OffendingVerbs = {
