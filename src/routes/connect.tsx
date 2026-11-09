@@ -56,6 +56,7 @@ import {
   sendStealthInitOnReady,
 } from "./connect/_stealth-inline-init";
 import { resolveConnectStep } from "./connect/_connect-routing";
+import { isAllowedVerb } from "@/lib/postmessage-contract";
 
 // Same allowlist the Stealth widget and Sparrow path use to pin postMessage
 // targetOrigin. Baked into the bundle at build time from the env var.
@@ -233,6 +234,9 @@ async function requestHandoffKeysFromParent(): Promise<HandoffKeys> {
       if (event.origin !== openerOrigin) return;
       const data = event.data as unknown;
       if (!data || typeof data !== "object") return;
+      // Verb allowlist: drop any message type not in the postMessage contract
+      // before any payload property is accessed or logged.
+      if (!isAllowedVerb((data as { type?: unknown }).type)) return;
       if ((data as { type?: unknown }).type !== "or-cred-key-ready") return;
       // purpose correlates this reply with the request we sent. Older
       // parents that do not echo it back are still accepted (undefined),
