@@ -8,7 +8,7 @@ on:
 jobs:
   sparrow-prod-smoke:
     name: Sparrow smoke (prod)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     # 20 minutes, matching every other Playwright job in ci.yml. Without this the
     # job inherits GitHub's 360-minute default, and a step that wedges rather than
     # fails holds its check open for six hours while every sibling reports green.

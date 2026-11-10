@@ -23,6 +23,7 @@ import type {
   NormalizedTransaction,
   SyncResult,
 } from '../types.ts';
+import { withHttpStatus } from '../../upstream-errors.ts';
 
 const BLINK_API = 'https://api.blink.sv/graphql';
 const PAGE_SIZE = 50;
@@ -174,7 +175,7 @@ async function blinkPost<T>(apiKey: string, query: string, variables?: Record<st
     body: JSON.stringify({ query, variables: variables ?? {} }),
   });
   if (!res.ok) {
-    throw new Error(`Blink API ${res.status}`);
+    throw withHttpStatus(new Error(`Blink API ${res.status}`), res.status);
   }
   const json = await res.json() as { data?: T; errors?: { message: string }[] };
   if (json.errors?.length) throw new Error(`Blink GraphQL: ${json.errors[0].message}`);

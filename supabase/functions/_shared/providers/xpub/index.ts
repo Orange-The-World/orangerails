@@ -53,6 +53,7 @@ import type {
   NormalizedTransaction,
   SyncResult,
 } from '../types.ts';
+import { withHttpStatus } from '../../upstream-errors.ts';
 
 // --- Constants ----------------------------------------------------------
 
@@ -203,7 +204,7 @@ async function fetchAddressTxs(address: string): Promise<MempoolTx[]> {
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
     if (res.status === 404) return [];
-    throw new Error(`mempool.space ${res.status} for ${address}: ${detail.slice(0, 120)}`);
+    throw withHttpStatus(new Error(`mempool.space ${res.status} for ${address}: ${detail.slice(0, 120)}`), res.status);
   }
   const json = await res.json();
   if (!Array.isArray(json)) throw new Error(`mempool.space returned non-array for ${address}`);
