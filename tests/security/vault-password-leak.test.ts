@@ -29,6 +29,7 @@
 import { readdir, readFile } from 'node:fs/promises';
 import { join, relative } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { POST_MESSAGE_VERBS, type PostMessageVerb } from '@/lib/postmessage-contract';
 
 const SRC_ROOT = join(process.cwd(), 'src');
 
@@ -125,6 +126,96 @@ function scanFile(path: string, contents: string): Finding[] {
   return findings;
 }
 
+/**
+ * Multi-line postMessage context scanner.
+ *
+ * For each non-comment line that contains `postMessage(`, collects:
+ *   - Up to 14 non-comment lines of context before it
+ *   - The call text from that line to the matching closing ')', up to 40 lines
+ *
+ * Strips string literals from the collected block, then flags if any
+ * SENSITIVE_NAMES member or any identifier matching /password/i appears in
+ * what remains. This catches build-by-assignment patterns like:
+ *   const payload = {};
+ *   payload.vaultPassword = pw;   // sensitive identifier, different line
+ *   window.opener?.postMessage(payload, origin);
+ * where a same-line rule cannot fire.
+ */
+function scanFileMultiLine(path: string, contents: string): Finding[] {
+  const findings: Finding[] = [];
+  const lines = contents.split('\n');
+
+  function isCommentLine(l: string): boolean {
+    const t = l.trim();
+    return t.startsWith('//') || t.startsWith('*') || t.startsWith('/*');
+  }
+
+  function stripStringLiterals(text: string): string {
+    let s = text.replace(/`(?:[^`\\]|\\.)*`/g, '``');
+    s = s.replace(/"(?:[^"\\]|\\.)*"/g, '""');
+    s = s.replace(/'(?:[^'\\]|\\.)*'/g, "''");
+    return s;
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isCommentLine(line)) continue;
+
+    const pmIdx = line.indexOf('postMessage(');
+    if (pmIdx === -1) continue;
+
+    // Collect up to 14 non-comment context lines before this line (in order)
+    const contextBefore: string[] = [];
+    for (let j = i - 1; j >= 0 && contextBefore.length < 14; j--) {
+      if (!isCommentLine(lines[j])) contextBefore.unshift(lines[j]);
+    }
+
+    // Walk from postMessage( to the matching closing ')' (cap 40 lines)
+    const callLines: string[] = [line];
+    let depth = 0;
+    let done = false;
+    for (const ch of line.slice(pmIdx)) {
+      if (ch === '(') depth++;
+      else if (ch === ')') {
+        depth--;
+        if (depth === 0) { done = true; break; }
+      }
+    }
+    if (!done) {
+      for (let k = i + 1; k < lines.length && k - i < 40; k++) {
+        callLines.push(lines[k]);
+        for (const ch of lines[k]) {
+          if (ch === '(') depth++;
+          else if (ch === ')') {
+            depth--;
+            if (depth === 0) { done = true; break; }
+          }
+        }
+        if (done) break;
+      }
+    }
+
+    const block = [...contextBefore, ...callLines].join('\n');
+    const stripped = stripStringLiterals(block);
+
+    let flagged = false;
+    for (const sens of SENSITIVE_NAMES) {
+      if (stripped.includes(sens)) {
+        findings.push({ file: path, line: i + 1, text: line.trim(), sensitive: sens, verb: 'postMessage' });
+        flagged = true;
+        break;
+      }
+    }
+    if (!flagged && /password/i.test(stripped)) {
+      const m = stripped.match(/\b\w*password\w*\b/i);
+      const ident = m ? m[0] : 'password';
+      findings.push({ file: path, line: i + 1, text: line.trim(), sensitive: ident, verb: 'postMessage' });
+    }
+  }
+
+  return findings;
+}
+
 describe('CR-01 , vault_password never leaves the browser (static check)', () => {
   test('no source file routes a sensitive identifier to a leak verb', async () => {
     const files = await listTsFiles(SRC_ROOT);
@@ -133,6 +224,7 @@ describe('CR-01 , vault_password never leaves the browser (static check)', () =>
       if (isAllowed(file)) continue;
       const contents = await readFile(file, 'utf8');
       findings.push(...scanFile(file, contents));
+      findings.push(...scanFileMultiLine(file, contents));
     }
 
     if (findings.length > 0) {
@@ -158,20 +250,164 @@ describe('CR-01 , vault_password never leaves the browser (static check)', () =>
     expect(LEAK_VERBS.length).toBeGreaterThan(0);
   });
 
-  test('CR-01 fires on vaultPassword + postMessage (proves the check can go red)', () => {
-    // This is the exact reintroduction path the check was written to catch:
-    // OR-T2704 removed vault_password from an outgoing postMessage payload in
-    // src/routes/connect.tsx. If anyone re-adds it, this test must go red
-    // before the change reaches CI review.
-    const syntheticPath = '/fake/src/routes/connect.tsx';
-    const syntheticContent = [
-      '// normal line',
-      'window.opener.postMessage({ vaultPassword: password }, origin);',
-      '// another normal line',
-    ].join('\n');
-    const findings = scanFile(syntheticPath, syntheticContent);
-    expect(findings).toHaveLength(1);
-    expect(findings[0].sensitive).toBe('vaultPassword');
-    expect(findings[0].verb).toBe('postMessage');
-  });
+  // ---------------------------------------------------------------------------
+  // Per-verb synthetic leak lines.
+  //
+  // Typed as Record<PostMessageVerb, string>: adding a new verb to
+  // POST_MESSAGE_VERBS without a corresponding entry here causes a TypeScript
+  // compile error, forcing the author to write an explicit test case before CI
+  // passes. Test count = allowlist length (enforced by the loop below).
+  // ---------------------------------------------------------------------------
+  const VERB_TEST_LINES: Record<PostMessageVerb, string> = {
+    'or-cred-key-ready':
+      "window.opener.postMessage({ type: 'or-cred-key-ready', vaultPassword: password }, origin);",
+  };
+
+  test(
+    'CR-01 fires on vaultPassword + postMessage for every allowed verb' +
+      ' (test count equals allowlist length)',
+    () => {
+      // This loop is the canonical red-path proof for the verb allowlist:
+      // OR-T2704 removed vault_password from the outgoing postMessage payload;
+      // OR-T2722 adds a structural guard so the check stays current even as
+      // the verb list grows. Adding a verb to POST_MESSAGE_VERBS without
+      // adding a VERB_TEST_LINES entry is a TypeScript error; adding an entry
+      // whose synthetic line does NOT trip CR-01 is caught here at runtime.
+      expect(POST_MESSAGE_VERBS.length).toBeGreaterThan(0);
+      for (const verb of POST_MESSAGE_VERBS) {
+        const syntheticPath = '/fake/src/routes/connect.tsx';
+        const syntheticContent = [
+          '// normal line',
+          VERB_TEST_LINES[verb],
+          '// another normal line',
+        ].join('\n');
+        const findings = scanFile(syntheticPath, syntheticContent);
+        expect(
+          findings.length,
+          `CR-01 did not fire for verb "${verb}" -- ` +
+            `VERB_TEST_LINES['${verb}'] must include a sensitive name on the same line as postMessage`,
+        ).toBeGreaterThan(0);
+        expect(
+          findings.some((f) => f.verb === 'postMessage'),
+          `finding for verb "${verb}" should name postMessage as the leak verb`,
+        ).toBe(true);
+        expect(
+          findings.some((f) => f.sensitive === 'vaultPassword'),
+          `finding for verb "${verb}" should name vaultPassword as the sensitive identifier`,
+        ).toBe(true);
+      }
+    },
+  );
+
+  // ---------------------------------------------------------------------------
+  // Multi-line context scanner fixtures (CR-01 postMessage window rule).
+  //
+  // Each red fixture must produce at least 1 finding; each clean fixture must
+  // produce 0. This proves the rule can both fire and stay silent in one CI
+  // run (neither author nor reviewer has shell access for manual verification).
+  // Fixtures are verbatim lines from the repo per OR-T2722 review note.
+  // ---------------------------------------------------------------------------
+  test(
+    'CR-01 postMessage context rule fires on injected patterns; stays silent on clean code',
+    () => {
+      const FAKE = '/fake/src/routes/connect.tsx';
+
+      // Fixture H: the three pre-fix production lines (OR-T2704 era).
+      // 'password' appears on a line before postMessage(). The same-line rule
+      // misses this; the context window rule catches it.
+      const H = [
+        'const msg: Record<string, unknown> = { type: "or-need-cred-key" };',
+        'if (password) msg.password = password;',
+        'opener.postMessage(msg, openerOrigin);',
+      ].join('\n');
+
+      // Fixture M: connect.tsx L297-300 with vaultPassword added to payload.
+      const M = [
+        'opener.postMessage(',
+        '  { type: "or-need-cred-key", purpose: CRED_KEY_HANDOFF_PURPOSE, vaultPassword: vaultPassword },',
+        '  openerOrigin,',
+        ');',
+      ].join('\n');
+
+      // Fixture V: connect.tsx L1466-1480 with successPayload.vaultPassword
+      // assigned before the send.
+      const V = [
+        '      const successPayload: Record<string, unknown> = {',
+        '        type: "or-link-success",',
+        '        source_wallets: enrichedSourceWallets,',
+        '        subaccount_id: result.subaccount_id,',
+        '        connection_id: result.connection_id,',
+        '      };',
+        '      if (enrichedSourceWallets.length === 1) {',
+        '        const only = enrichedSourceWallets[0];',
+        '        successPayload.sourceWalletId = only.id;',
+        '        successPayload.currency = only.currency;',
+        '        successPayload.walletName = only.label;',
+        '        successPayload.externalId = only.external_wallet_id;',
+        '      }',
+        '      successPayload.vaultPassword = vaultPassword;',
+        '      window.opener?.postMessage(successPayload, targetOrigin);',
+      ].join('\n');
+
+      // Red path: every injected fixture must produce at least 1 finding.
+      expect(
+        scanFileMultiLine(FAKE, H).length,
+        'H (pre-fix lines: password on preceding line): expected >= 1 finding',
+      ).toBeGreaterThan(0);
+      expect(
+        scanFileMultiLine(FAKE, M).length,
+        'M (vaultPassword inside postMessage call): expected >= 1 finding',
+      ).toBeGreaterThan(0);
+      expect(
+        scanFileMultiLine(FAKE, V).length,
+        'V (successPayload.vaultPassword assigned before send): expected >= 1 finding',
+      ).toBeGreaterThan(0);
+
+      // Green path: same blocks without the injected identifier must be silent.
+
+      // H-clean: remove the password assignment line.
+      const H_CLEAN = [
+        'const msg: Record<string, unknown> = { type: "or-need-cred-key" };',
+        'opener.postMessage(msg, openerOrigin);',
+      ].join('\n');
+      expect(
+        scanFileMultiLine(FAKE, H_CLEAN).length,
+        'H-clean (no password line): expected 0 findings',
+      ).toBe(0);
+
+      // M-clean: connect.tsx L297-300 as currently written, no injected field.
+      const M_CLEAN = [
+        'opener.postMessage(',
+        '  { type: "or-need-cred-key", purpose: CRED_KEY_HANDOFF_PURPOSE },',
+        '  openerOrigin,',
+        ');',
+      ].join('\n');
+      expect(
+        scanFileMultiLine(FAKE, M_CLEAN).length,
+        'M-clean (no vaultPassword): expected 0 findings',
+      ).toBe(0);
+
+      // V-clean: connect.tsx L1466-1480 as currently written, no injected assignment.
+      const V_CLEAN = [
+        '      const successPayload: Record<string, unknown> = {',
+        '        type: "or-link-success",',
+        '        source_wallets: enrichedSourceWallets,',
+        '        subaccount_id: result.subaccount_id,',
+        '        connection_id: result.connection_id,',
+        '      };',
+        '      if (enrichedSourceWallets.length === 1) {',
+        '        const only = enrichedSourceWallets[0];',
+        '        successPayload.sourceWalletId = only.id;',
+        '        successPayload.currency = only.currency;',
+        '        successPayload.walletName = only.label;',
+        '        successPayload.externalId = only.external_wallet_id;',
+        '      }',
+        '      window.opener?.postMessage(successPayload, targetOrigin);',
+      ].join('\n');
+      expect(
+        scanFileMultiLine(FAKE, V_CLEAN).length,
+        'V-clean (no vaultPassword assignment): expected 0 findings',
+      ).toBe(0);
+    },
+  );
 });
