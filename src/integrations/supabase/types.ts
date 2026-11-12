@@ -2029,7 +2029,7 @@ export type Database = {
           created_at: string
           discovery_source: string | null
           encrypted_metadata: string | null
-          encrypted_metadata_key_version: number | null
+          encrypted_metadata_key_version: number
           external_wallet_id: string
           id: string
           is_synced: boolean
