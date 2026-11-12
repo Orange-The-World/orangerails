@@ -312,6 +312,21 @@ jobs:
 
   deploy:
     needs: [target, check-pending-migrations, check-rls-policy-baseline, check-types-drift]
+    # OR-T2789. Without this `if`, deploy carries an implicit success(), which also
+    # looks at SKIPPED ancestors. apply-migrations is skipped on every prod push by
+    # design, so deploy was skipped on every prod push and edge functions never
+    # shipped from prod (run 43265653385, job 131382143740). A status function
+    # (!cancelled()) replaces the implicit success(), and every gate is then named
+    # and must be exactly 'success': a failed, cancelled or skipped gate still skips
+    # the deploy. Do not loosen a clause to '!= failure': that lets a skipped gate
+    # through. scripts/validate-workflows.py refuses this job if a need is missing
+    # from here, so adding a need to this job means adding its clause too.
+    if: >-
+      ${{ !cancelled()
+      && needs.target.result == 'success'
+      && needs.check-pending-migrations.result == 'success'
+      && needs.check-rls-policy-baseline.result == 'success'
+      && needs.check-types-drift.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
