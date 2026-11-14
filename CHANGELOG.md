@@ -51,3 +51,5 @@ Per-session work continues to be logged in the per-workstream wiki Changelogs (`
 ---
 
 For session-by-session work, see the wiki Changelog under `Apps/🚂 Orange Rails/api.orangerails.com , Canonical Gateway/Changelog` in the maintainer wiki.
+
+<!-- back-merge: prod to dev, 2026-11-12, OR-T2789 -->
