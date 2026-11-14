@@ -136,7 +136,10 @@ to tip.
   filter files are small; this is minutes, not hours.
 - **Every subsequent sync should be nearly instant.** The widget persists
   `last_block_scanned` via `or-stealth-envelope-update` at the end of
-  every successful sync. If re-syncs keep rescanning from birthday:
+  a sync that actually scanned. A short-circuit (already current,
+  including when the resume point sits inside the confirmation buffer)
+  does not write a coverage range: that run read zero filters. If
+  re-syncs keep rescanning from birthday:
 
 **Probe** (requires your platform API key; run server-side, never in a
 browser):
