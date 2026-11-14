@@ -47,11 +47,14 @@ export const VAULT_VERIFIER_PLAINTEXT = "orangerails-vault-verifier-v1";
 /**
  * Current vault key version stored in user_vault_meta.vault_key_version.
  * Version 1 (legacy): MEK = Argon2id(password, salt) used directly as HKDF key.
- * Version 2 (current): a random MEK is wrapped by an Argon2id-derived KEK.
+ * Version 2: a random MEK is wrapped by an Argon2id-derived KEK and derives
+ * data-encryption subkeys directly.
+ * Version 3 (current): the wrapped random MEK is a wrapping root over the
+ * single-row keyring; independent random data keys live inside that keyring.
  * Bump this constant whenever the wrapping scheme or KDF parameters change,
- * and update the unlock() v1/v2 branch in VaultContext accordingly.
+ * and update the version branches in VaultContext accordingly.
  */
-export const CURRENT_VAULT_KEY_VERSION = 2;
+export const CURRENT_VAULT_KEY_VERSION = 3;
 
 // ------------------------------------------------------------------
 // Encoding helpers , base64 is our on-the-wire format.
@@ -306,11 +309,10 @@ export function isPasswordAcceptable(
  * Run Argon2id over the vault password and return the raw 32-byte hash.
  *
  * THIS IS NOT THE MASTER KEY, and the name has misled a caller before. On a
- * key-version-2 vault, which is what setupVault creates, the master key is 32
- * random bytes and this output is only the KEK that wraps it. Data subkeys
- * derived from this value decrypt nothing, and PQC secrets do not unwrap under
- * it. It is the master key ONLY on a legacy key-version-1 vault, where the two
- * happen to coincide.
+ * key-version-2-or-later vault, the master key is 32 random bytes and this
+ * output is only the KEK that wraps it. Data subkeys derived from this value
+ * decrypt nothing, and PQC secrets do not unwrap under it. It is the master key
+ * ONLY on a legacy key-version-1 vault, where the two happen to coincide.
  *
  * ITS ONLY CALLER IS deriveKek, immediately below. That is the correct use and
  * the intended one. Anything that needs key material should take the unlocked
@@ -347,13 +349,13 @@ export async function deriveMekRaw(password: string, saltBase64: string): Promis
 }
 
 // ------------------------------------------------------------------
-// MEK wrapping , vault key version 2 architecture.
+// MEK wrapping , vault key version 2 and 3 architecture.
 // ------------------------------------------------------------------
 // In v1, MEK = Argon2id(password, salt) imported directly as HKDF.
-// In v2, MEK = random 32 bytes imported as HKDF; the Argon2id output
-// is used only as a KEK to wrap the MEK. This lets the user change
-// their vault password (or recover via recovery code) without
-// re-encrypting any of their data.
+// In v2 and v3, MEK = random 32 bytes imported as HKDF; the Argon2id output
+// is used only as a KEK to wrap the MEK. In v3 the MEK wraps a keyring whose
+// independent random data keys survive MEK rotation without re-encrypting
+// data rows.
 
 /** Generate 32 cryptographically random bytes for a new MEK. */
 export function generateMekBytes(): Uint8Array {
@@ -361,7 +363,7 @@ export function generateMekBytes(): Uint8Array {
 }
 
 /**
- * Import 32 raw bytes as a non-extractable HKDF key (the v2 MEK format).
+ * Import 32 raw bytes as a non-extractable HKDF key (the v2+ MEK format).
  * The returned CryptoKey can be passed to deriveSubkey() / HKDF operations.
  */
 export async function importMekAsHkdf(raw: Uint8Array): Promise<CryptoKey> {
