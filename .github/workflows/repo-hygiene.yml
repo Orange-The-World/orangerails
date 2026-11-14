@@ -25,6 +25,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Fetch current scanner from dev
+        # The checked-out tree can come from a branch created before a scanner
+        # security fix. Running that branch's copy would restore the old output
+        # policy and could publish matched content in this public log. Fetch the
+        # scanner from dev every time, then install it at its normal path so it
+        # still scans the checked-out PR tree rather than the fetched ref.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin refs/heads/dev
+          git show FETCH_HEAD:scripts/pre-publish-scan.sh > "$RUNNER_TEMP/pre-publish-scan.sh"
+          install -m 0755 "$RUNNER_TEMP/pre-publish-scan.sh" scripts/pre-publish-scan.sh
+
       - name: Run pre-publish hygiene scan
         # Fails the job (and the required check) if any reserved term or stray
         # internal reference is found. See scripts/pre-publish-scan.sh for the
