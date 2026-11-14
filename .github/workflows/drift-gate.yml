@@ -1,0 +1,223 @@
+# Drift gate: refuse merges into dev while dev is too far ahead of prod.
+#
+# Why: when dev runs far ahead of prod, promotions become large and risky and
+# stall. This check makes the merge button the control, so dev cannot keep
+# growing while prod falls behind. Promote first, then keep building.
+#
+# The check FAILS a pull request into dev when any of these is true:
+#   - prod has commits that dev does not (a back-merge is owed)
+#   - dev is more than MAX_AHEAD commits ahead of prod
+#   - dev holds MAX_MIGRATIONS or more migration files that prod does not
+#   - the pending-migrations job of the deploy workflow did not pass on the
+#     current prod tip
+#
+# Above WARN_AHEAD commits it still passes, but prints a warning.
+#
+# It always PASSES for:
+#   - a back-merge: a branch in this repository, named with BACKMERGE_PREFIX,
+#     whose commits are all already on prod
+#   - a pull request carrying the OVERRIDE_LABEL, but only when that label was
+#     applied by an account listed in OVERRIDE_ACTORS. A label added by anyone
+#     else is ignored.
+#
+# Trust: this runs on pull_request_target, so the workflow file comes from the
+# base branch, never from the pull request. A pull request cannot rewrite its
+# own gate. It never checks out or runs pull request code; it only reads the
+# GitHub API.
+#
+# Staleness: a pass is only true for the moment it ran. When dev or prod moves,
+# the recheck job re-runs the gate on every open pull request into dev.
+#
+# Make it blocking by adding the job name "Drift gate" to the dev ruleset's
+# required status checks, with bypass limited to the founder.
+
+name: Drift gate
+
+on:
+  pull_request_target:
+    branches: [dev]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+  push:
+    branches: [dev, prod]
+
+permissions:
+  contents: read
+
+env:
+  WARN_AHEAD: '20'
+  MAX_AHEAD: '50'
+  MAX_MIGRATIONS: '3'
+  MIGRATIONS_DIR: 'supabase/migrations/'
+  PROD_BRANCH: 'prod'
+  DEV_BRANCH: 'dev'
+  BACKMERGE_PREFIX: 'automation/backmerge-prod-to-dev'
+  OVERRIDE_LABEL: 'drift-override'
+  OVERRIDE_ACTORS: 'MorningRevolution'
+  PENDING_WORKFLOW: 'supabase-deploy.yml'
+  PENDING_JOB: 'check-pending-migrations'
+
+jobs:
+  gate:
+    name: Drift gate
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      checks: read
+      actions: read
+    concurrency:
+      group: drift-gate-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    steps:
+      - name: Evaluate drift
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          say() { echo "$1"; echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+
+          # Back-merge exemption: same repository AND nothing on the branch
+          # that prod does not already have. Anything else is checked normally.
+          if [[ "$HEAD_REF" == "$BACKMERGE_PREFIX"* ]]; then
+            extra=-1
+            if [[ "$HEAD_REPO" == "$REPO" ]]; then
+              extra=$(gh api "repos/$REPO/compare/$PROD_BRANCH...$HEAD_SHA" -q .ahead_by)
+            fi
+            if [[ "$extra" == "0" ]]; then
+              say "PASS: back-merge branch ($HEAD_REF) carries only prod commits, it closes the gap."
+              exit 0
+            fi
+            say "NOTE: $HEAD_REF is named as a back-merge but is from $HEAD_REPO or carries commits prod does not. Checked normally."
+          fi
+
+          # Override: the label must be present now AND its most recent
+          # "labeled" event must come from an allowed account.
+          has_label=$(gh api "repos/$REPO/issues/$PR/labels" --paginate \
+            -q ".[] | select(.name == \"$OVERRIDE_LABEL\") | .name" | head -1)
+          if [[ -n "$has_label" ]]; then
+            actor=$(gh api "repos/$REPO/issues/$PR/events" --paginate \
+              -q ".[] | select(.event == \"labeled\" and .label.name == \"$OVERRIDE_LABEL\") | .actor.login" \
+              | tail -1)
+            for a in $OVERRIDE_ACTORS; do
+              if [[ "$actor" == "$a" ]]; then
+                say "PASS: override label applied by $actor. Bypass recorded on PR #$PR."
+                exit 0
+              fi
+            done
+            say "NOTE: override label present but applied by '${actor:-unknown}', who is not allowed to override. Ignored."
+          fi
+
+          cmp=$(gh api "repos/$REPO/compare/$PROD_BRANCH...$DEV_BRANCH")
+          ahead=$(jq -r '.ahead_by' <<<"$cmp")
+          behind=$(jq -r '.behind_by' <<<"$cmp")
+          nfiles=$(jq -r '.files | length' <<<"$cmp")
+          # Added, renamed or copied into the migrations folder all count as
+          # migrations prod does not have yet.
+          migs=$(jq -r --arg d "$MIGRATIONS_DIR" \
+            '[.files[] | select(.filename | startswith($d)) | select(.status == "added" or .status == "renamed" or .status == "copied")] | length' <<<"$cmp")
+
+          say "dev vs prod: ahead $ahead, behind $behind, new migration files $migs."
+          fail=0
+          if (( behind > 0 )); then
+            say "FAIL: prod has $behind commit(s) dev does not. Back-merge prod into dev first."; fail=1
+          fi
+          if (( ahead > MAX_AHEAD )); then
+            say "FAIL: dev is $ahead commits ahead of prod (limit $MAX_AHEAD). Promote dev to prod first."; fail=1
+          elif (( ahead > WARN_AHEAD )); then
+            say "WARNING: dev is $ahead commits ahead of prod. Merges stop at $MAX_AHEAD. Promote now."
+            echo "::warning::dev is $ahead commits ahead of prod; merges stop at $MAX_AHEAD"
+          fi
+          if (( migs >= MAX_MIGRATIONS )); then
+            say "FAIL: $migs migration files on dev are not on prod (limit below $MAX_MIGRATIONS). Promote and apply first."; fail=1
+          fi
+          # Commits and files are not the whole story: prod can hold every
+          # migration file and still not have applied them. Require that the
+          # pending-migrations job of the deploy workflow passed on the CURRENT
+          # prod tip. Only that workflow, run by GitHub Actions, counts; a
+          # same-named check from anywhere else is ignored. Missing fails closed.
+          prod_sha=$(gh api "repos/$REPO/commits/$PROD_BRANCH" -q .sha)
+          # The deploy workflow picks its project from the branch alone, so only
+          # a run on the prod branch checked the prod database. A run of the same
+          # sha on dev checked dev and does not count.
+          run_id=$(gh api "repos/$REPO/actions/workflows/$PENDING_WORKFLOW/runs?head_sha=$prod_sha&branch=$PROD_BRANCH&status=completed&per_page=100" \
+            -q "[.workflow_runs[] | select(.head_branch == \"$PROD_BRANCH\")] | sort_by(.created_at) | last | .id // empty")
+          pend=missing
+          if [[ -n "$run_id" ]]; then
+            pend=$(gh api "repos/$REPO/actions/runs/$run_id/jobs?per_page=100" --paginate \
+              -q ".jobs[] | select(.name == \"$PENDING_JOB\") | .conclusion" | tail -1)
+          fi
+          say "prod tip ${prod_sha:0:7}: $PENDING_JOB is ${pend:-missing}."
+          if [[ "$pend" != "success" ]]; then
+            say "FAIL: $PENDING_JOB did not pass on the prod tip. Apply the pending migrations on prod first."; fail=1
+          fi
+          # The compare API lists at most 300 files. A truncated list could
+          # undercount migrations, so treat it as over the limit (fail closed).
+          if (( nfiles >= 300 )); then
+            say "FAIL: the change set is too large to count migrations reliably (300+ files). Promote first."; fail=1
+          fi
+          if (( fail == 0 )); then
+            say "PASS: within limits."
+          fi
+          exit $fail
+
+  recheck:
+    name: Drift gate recheck
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+    steps:
+      - name: Re-run the gate on open pull requests into dev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # Every open pull request into dev with a gate run gets that run
+          # refreshed. The run is matched to the pull request by number, or for a
+          # fork (where GitHub leaves the number off) by head repository and
+          # branch, and the latest match is taken. A run that exists but cannot be
+          # re-run fails this job.
+          wf=$(gh api "repos/$REPO/actions/runs/${{ github.run_id }}" -q .workflow_id)
+          bad=0
+          # List first, into files, so a failed listing stops the job under set -e.
+          # GitHub only re-runs runs from the last 30 days, so older ones are not
+          # fetched.
+          since=$(date -u -d '30 days ago' +%Y-%m-%d)
+          runs=$(mktemp)
+          gh api "repos/$REPO/actions/workflows/$wf/runs?event=pull_request_target&created=%3E%3D$since&per_page=100" --paginate \
+            -q '.workflow_runs[] | {id, created_at, prs: [.pull_requests[].number], hrepo: .head_repository.full_name, href: .head_branch}' \
+            | jq -s . > "$runs"
+          prs=$(mktemp)
+          gh api "repos/$REPO/pulls?base=$DEV_BRANCH&state=open&per_page=100" --paginate \
+            -q '.[] | "\(.number) \(.head.sha) \(.head.repo.full_name // "unknown") \(.head.ref)"' > "$prs"
+          while read -r n sha hrepo href; do
+            # Branch and repository names are passed to jq as data, never as code.
+            rid=$(jq -r --argjson n "$n" --arg hrepo "$hrepo" --arg href "$href" \
+              '[.[] | select((.prs | index($n)) or ((.prs | length) == 0 and .hrepo == $hrepo and .href == $href))] | sort_by(.created_at) | last | .id // empty' "$runs")
+            if [[ -z "$rid" ]]; then
+              # No gate run means no "Drift gate" check, and a missing required
+              # check already holds the pull request. Nothing to refresh.
+              echo "::notice::PR #$n: no gate run yet, it is held by the missing check"; continue
+            fi
+            # A run still in progress may have read the old state: wait for it,
+            # then run it again.
+            gh run watch "$rid" --repo "$REPO" >/dev/null 2>&1 || true
+            if gh api -X POST "repos/$REPO/actions/runs/$rid/rerun" >/dev/null; then
+              echo "PR #$n: re-running gate run $rid for ${sha:0:7}"
+            else
+              echo "::error::PR #$n: could not re-run gate run $rid"; bad=1
+            fi
+          done < "$prs"
+          exit $bad
