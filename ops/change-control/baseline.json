@@ -20,7 +20,7 @@
       "protection_rules": [
         {
           "type": "required_reviewers",
-          "prevent_self_review": true,
+          "prevent_self_review": false,
           "reviewers": [
             "User:Making-the-World-Orange",
             "User:MorningRevolution"
@@ -32,8 +32,7 @@
   ],
   "variables": {
     "MIGRATION_APPLY_ALLOWED_ACTORS_PROD": [
-      "MorningRevolution",
-      "the-Orange-Juicer"
+      "MorningRevolution"
     ],
     "MIGRATION_APPLY_ALLOWED_ACTORS_DEV": [
       "MorningRevolution",
