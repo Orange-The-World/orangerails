@@ -201,7 +201,7 @@ def main():
     state, n = sync_rates(state)
     if n > 0:
         save_state(state)
-        log(f"synced {n} rates; cursor -> {state['last_bucket_ts']}")
+        log(f"synced {n} rates; cursor → {state['last_bucket_ts']}")
     elif n == 0:
         log("no new rates")
     else:
