@@ -685,7 +685,7 @@ def main():
     )
     # 6) Phase M minute-tick cross-rate freshness (added 2026-05-30).
     #    Every synthesized (BTC/<fiat>) 1m series whose composite_via starts
-    #    with 'BTC/USD x' must have its most-recent bucket within 2h. Catches
+    #    with 'BTC/USD ×' must have its most-recent bucket within 2h. Catches
     #    a silent stall of orbi-m-cross-rate-synthesizer.service before the
     #    daily timer would otherwise mask it.
     results["orbi-m-cross-rate-stale"] = check_db_freshness(
@@ -698,7 +698,7 @@ def main():
           WHERE source_authority='ORBI' AND source_currency='BTC'
             AND granularity='1m' AND product='ORBI-M'
             AND composite=true
-            AND composite_via LIKE 'BTC/USD % %'
+            AND composite_via LIKE 'BTC/USD × %'
             AND bucket_ts >= now() - interval '3 days'
           GROUP BY 1
         ) t
