@@ -1,7 +1,6 @@
 #!/bin/bash
 printf '%s\n' \
-  'REFUSING (OR-T2710): /opt/bb-support/scripts/orbi-backfill-local-to-cloud.py is retired.' \
-  'This legacy writer targeted orangerails-prod and must not run.' \
-  'Use the approved ongoing orbi-prod sync path:' \
-  '  /opt/bb-support/scripts/orbi-sync-to-orbi-prod.py' >&2
+  'REFUSING: this script is retired.' \
+  'This legacy writer must not run.' \
+  'Use the approved orbi-prod sync path instead.' >&2
 exit 78
