@@ -36,13 +36,8 @@ from pathlib import Path
 STATE_FILE = "/var/lib/orbi-trusted/watchdog-state.json"
 LOG = "/var/log/orbi-trusted/watchdog.log"
 ALERT_COOLDOWN_S = 3600
-# Forward-walker phase-e/f services: one-shot loaders whose job is to keep
-# advancing toward "now". Their natural terminal state ("walked to current
-# tip, exited 0") looks identical to a stale-and-dead service: log untouched,
-# unit inactive. The old behaviour returned "complete" and never re-triggered
-# them — leaving 7 exchange loaders dead for 6-28 days after the 2026-05-28→30
-# reboot window (task #55). For these services, "log stale + inactive" means
-# "needs to be re-triggered to walk further forward."
+# Forward-walker services: one-shot loaders that advance toward "now".
+# When log stale and unit inactive, they need re-triggering to walk further forward.
 #
 # Bounded historical/backward-walkers (gap-fills with explicit date ranges)
 # are NOT in this set — for them, "complete" really is terminal.
@@ -66,8 +61,7 @@ FORWARD_WALKERS = {
     "orbi-phase-f-bitso@ars.service",
     "orbi-phase-f-bitso@brl.service",
 }
-# Alerts that founder has acknowledged and does NOT want Signal pings for.
-# These still get LOGGED but don't fire signal_alert(). Curated 2026-05-30.
+# Alerts suppressed from push notifications; still logged.
 MUTED_ALERTS = {
     # Geofenced / deferred by founder
     "nbs-china-freshness",
@@ -87,7 +81,7 @@ MUTED_ALERTS = {
 LOCAL_DSN = None
 
 def _load_local_dsn():
-    for line in open("/opt/bb-support/.env"):
+    for line in open("/etc/orbi/config"):
         if line.startswith("ORBI_LOCAL_DB_URL="):
             v = line.split("=", 1)[1].strip()
             return v[1:-1] if v.startswith('"') else v
@@ -95,7 +89,7 @@ def _load_local_dsn():
 def log(msg):
     line = f"[{datetime.now(timezone.utc).isoformat(timespec='seconds')}] {msg}"
     # File logging is best-effort; on PermissionError/OSError fall back
-    # to stdout/stderr (journald-routed). 2026-06-04 root-owned log incident.
+    # to stdout/stderr (journald-routed).
     try:
         Path(LOG).parent.mkdir(parents=True, exist_ok=True)
         with open(LOG, "a") as f:
@@ -150,8 +144,7 @@ def save_state(s):
     os.replace(tmp, STATE_FILE)
 
 def signal_alert(subject, body=""):
-    # GLOBAL SILENCE 2026-05-30 per founder — log only, no Signal.
-    # Daily digest at 21:00 UTC summarizes everything in ONE message.
+    # Notifications currently suppressed; log only.
     log(f"  [signal-silenced] {subject} | {body[:120]}")
     return
 
@@ -159,17 +152,9 @@ def now_unix():
     return int(time.time())
 
 def q_first(sql):
-    # Try orbi_prod (ORBI exchange-rate tables) first; if the SQL references a
-    # table that doesn't exist there, fall back to orange_world_prod (Truth tables).
-    # Post-2026-05-30 data-layer split: ORBI vs Orange World tables live in
-    # different logical DBs but share the same cluster.
-    for wrapper in ("/opt/bb-support/scripts/psql-orbi", "/opt/bb-support/scripts/psql-orange-world"):
-        # A query that runs long must not kill the watchdog. Until 2026-08-14 the
-        # TimeoutExpired raised here propagated all the way out of main(), so the
-        # process exited 1 partway through its sweep and every check after the
-        # slow one silently never ran. It failed this way 7 times on 2026-08-14
-        # alone. Returning None instead routes into the caller's existing
-        # _on_fail path, which is what a failed check is supposed to do.
+    # Try orbi DB first; fall back to secondary DB if the table is not found there.
+    for wrapper in ("/usr/local/lib/orbi/psql-orbi", "/usr/local/lib/orbi/psql-orange-world"):
+        # Long queries must not kill the watchdog; return None to route to _on_fail.
         try:
             r = subprocess.run([wrapper, "-At", "-c", sql],
                                capture_output=True, text=True, timeout=30)
@@ -536,9 +521,7 @@ def main():
         max_age_hours=45*24, alert_only=True,
     )
     # NBS China CPI: monthly when egress path opens; threshold 60 days.
-    # As of 2026-05-30 bb-support egress is URL-ACL geofenced; this probe
-    # will read 9999999s (sentinel) until a China-region path is provisioned.
-    # alert_only=True — no self-restart, just visibility.
+    # alert_only=True: no self-restart, just visibility.
     results["nbs-china-freshness"] = check_db_freshness(
         state, "nbs-china-freshness",
         "SELECT COALESCE(EXTRACT(EPOCH FROM (now() - MAX(period_start)))::int, -1) FROM inflation_rates WHERE source_authority='NBS_CHINA'",
