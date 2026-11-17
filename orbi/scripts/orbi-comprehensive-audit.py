@@ -22,7 +22,11 @@ TS = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
 
 
 def _load_local_dsn():
-    for line in open("/opt/bb-support/.env"):
+    env_path = os.environ.get("ORBI_ENV_PATH")
+    if not env_path:
+        print("Error: set ORBI_ENV_PATH to the env file path", file=sys.stderr)
+        sys.exit(1)
+    for line in open(env_path):
         if line.startswith("ORBI_LOCAL_DB_URL="):
             v = line.split("=", 1)[1].strip()
             return v[1:-1] if v.startswith('"') else v
@@ -80,7 +84,7 @@ def section_a_inventory():
     print("A. DATABASE INVENTORY — 6 local DBs + 2 reachable cloud projects")
     print("=" * 80)
 
-    print("\n--- LOCAL DBs on bb-support 127.0.0.1:5435 ---")
+    print("\n--- LOCAL DBs ---")
     for db in LOCAL_DBS:
         env = _local_env(db)
         # check if DB exists + accessible
