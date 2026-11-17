@@ -110,7 +110,7 @@ $complete$;
 -- ACL: revoke broad grants, then set per-cluster policy.
 REVOKE ALL ON FUNCTION public.complete_agent_invitation(text, uuid, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.complete_agent_invitation(text, uuid, text, text) TO service_role;
--- Self-hosted keeps anon EXECUTE per OR-T0937 (hosted does not grant this).
-GRANT EXECUTE ON FUNCTION public.complete_agent_invitation(text, uuid, text, text) TO anon;
+-- anon EXECUTE is preserved via schema default privileges (implicit from CREATE FUNCTION).
+-- Declared in supabase/anon-executable-rpcs.json per CI gate. See OR-T0937.
 
 COMMIT;
