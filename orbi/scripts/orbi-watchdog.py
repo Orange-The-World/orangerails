@@ -81,7 +81,7 @@ MUTED_ALERTS = {
 LOCAL_DSN = None
 
 def _load_local_dsn():
-    for line in open("/etc/orbi/config"):
+    for line in open("/opt/bb-support/.env"):
         if line.startswith("ORBI_LOCAL_DB_URL="):
             v = line.split("=", 1)[1].strip()
             return v[1:-1] if v.startswith('"') else v
@@ -153,7 +153,7 @@ def now_unix():
 
 def q_first(sql):
     # Try orbi DB first; fall back to secondary DB if the table is not found there.
-    for wrapper in ("/usr/local/lib/orbi/psql-orbi", "/usr/local/lib/orbi/psql-orange-world"):
+    for wrapper in ("/opt/bb-support/scripts/psql-orbi", "/opt/bb-support/scripts/psql-orange-world"):
         # Long queries must not kill the watchdog; return None to route to _on_fail.
         try:
             r = subprocess.run([wrapper, "-At", "-c", sql],
