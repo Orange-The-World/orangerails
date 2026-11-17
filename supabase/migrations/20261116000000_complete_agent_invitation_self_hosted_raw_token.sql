@@ -107,10 +107,19 @@ BEGIN
 END;
 $complete$;
 
--- ACL: revoke broad grants, then set per-cluster policy.
+-- ACL: revoke broad PUBLIC grant, then grant to service_role.
+-- anon EXECUTE is NOT granted by this migration. Migration 20260831100000 revokes the anon
+-- schema default, so the function lands with no anon EXECUTE on both hosted and self-hosted.
+--
+-- To deliver OR-T0937 (anon callable on self-hosted only), the DBA must run the following
+-- on the self-hosted cluster (Magnus supabase-db) AFTER applying this migration:
+--   GRANT EXECUTE ON FUNCTION public.complete_agent_invitation TO anon;
+-- This is intentionally outside the shared migrations so hosted Supabase projects (dev, prod)
+-- do not receive anon EXECUTE (OR-T0988).
+--
+-- The grant is NOT declared in supabase/anon-executable-rpcs.json because no migration
+-- backs it; the CI gate would report it as stale. The DBA grant is tracked in OR-T0954.
 REVOKE ALL ON FUNCTION public.complete_agent_invitation(text, uuid, text, text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.complete_agent_invitation(text, uuid, text, text) TO service_role;
--- anon EXECUTE is preserved via schema default privileges (implicit from CREATE FUNCTION).
--- Declared in supabase/anon-executable-rpcs.json per CI gate. See OR-T0937.
 
 COMMIT;
