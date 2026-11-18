@@ -28,7 +28,7 @@
  * UPDATE) only. record_stealth_scan_range()'s equivalent check is SQL
  * running in Postgres and this seat has no shell and no live database
  * connection to run it against, so that half of the fence is reviewed by
- * reading the migration (20260905230000_stealth_connections_scan_generation.sql),
+ * reading the migration (20260921180000_stealth_connections_scan_generation.sql),
  * not proven by a test run here.
  */
 
