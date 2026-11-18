@@ -58,11 +58,6 @@ LOCAL_DBS = ["orbi_prod", "orange_world_prod", "orange_rails_prod",
 CLOUD_PROJECTS = {
     "orbi-prod":         _cloud_env("sqcventmypowhbaceufy", "ORBI_PROD_DB_PASSWORD"),
     "orange-world-prod": _cloud_env("gposxxmxenrdvewrprle", "ORANGE_WORLD_PROD_DB_PASSWORD"),
-    "orange-rails-prod": _cloud_env(
-        (os.environ.get("ORANGERAILS_PROD_SUPABASE_URL", "")
-            .replace("https://", "").replace(".supabase.co", "").rstrip("/")),
-        "ORANGERAILS_PROD_DB_PASSWORD"
-    ) if os.environ.get("ORANGERAILS_PROD_SUPABASE_URL") else None,
 }
 
 
