@@ -209,7 +209,7 @@ jobs:
             if [[ -z "$rid" ]]; then
               # No gate run means no "Drift gate" check, and a missing required
               # check already holds the pull request. Nothing to refresh.
-              echo "::notice::PR #$n: no gate run yet, it is held by the missing check"; continue
+              echo "::notice::PR #$n: no gate run yet for this PR"; continue
             fi
             # A run still in progress may have read the old state: wait for it,
             # then run it again.
