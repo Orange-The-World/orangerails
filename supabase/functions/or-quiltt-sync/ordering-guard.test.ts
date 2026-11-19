@@ -109,7 +109,7 @@ Deno.test('OR-T2694: success processed just before a NEWER error in the same dra
   s.processed_at = '2026-09-01T00:00:10.000Z';
   assertEquals(c.status, 'active', 'precondition: the success recovered the row (and the trigger moved updated_at to now)');
   // deno-lint-ignore no-explicit-any
-  assertEquals(await reconcileConnectionError(db.client as any, errEv('E2', T3), 'sub-1'), null);
+  assertEquals(await reconcileConnectionError(db.client as any, errEv('E2', T3), 'sub-1', 'plat-1'), null);
   assertEquals(c.status, 'error', 'a real newer error must not be dropped because the row was touched by the earlier success');
 });
 
@@ -122,7 +122,7 @@ Deno.test('OR-T2694 mirror: an OLD error retried after a NEWER success ends acti
   s.processed_at = '2026-09-01T00:00:10.000Z';
   assertEquals(c.status, 'active');
   // deno-lint-ignore no-explicit-any
-  assertEquals(await reconcileConnectionError(db.client as any, errEv('E1', T1), 'sub-1'), null);
+  assertEquals(await reconcileConnectionError(db.client as any, errEv('E1', T1), 'sub-1', 'plat-1'), null);
   assertEquals(c.status, 'active', 'a superseded error must not re-break a recovered connection');
 });
 
@@ -131,7 +131,7 @@ Deno.test('OR-T2694: a newer success on a DIFFERENT Quiltt connection under the 
   const otherSuccess = inbox('S2', 'connection.synced.successful.initial', T2, 'q2', { processed_at: T3 });
   const db = fakeDb({ connections: [c], quiltt_webhook_inbox: [otherSuccess], platforms });
   // deno-lint-ignore no-explicit-any
-  assertEquals(await reconcileConnectionError(db.client as any, errEv('E1', T1, 'q1'), 'sub-1'), null);
+  assertEquals(await reconcileConnectionError(db.client as any, errEv('E1', T1, 'q1'), 'sub-1', 'plat-1'), null);
   assertEquals(c.status, 'error');
 });
 
@@ -142,7 +142,7 @@ Deno.test('OR-T2694: a RETIRED newer success never reconciled anything, so it do
   });
   const db = fakeDb({ connections: [c], quiltt_webhook_inbox: [retired], platforms });
   // deno-lint-ignore no-explicit-any
-  await reconcileConnectionError(db.client as any, errEv('E1', T1), 'sub-1');
+  await reconcileConnectionError(db.client as any, errEv('E1', T1), 'sub-1', 'plat-1');
   assertEquals(c.status, 'error');
 });
 
@@ -150,7 +150,7 @@ Deno.test('OR-T2694: a failed ordering lookup returns an error (retry) and write
   const c = conn({ status: 'active', encrypted_last_error: null });
   const db = fakeDb({ connections: [c], quiltt_webhook_inbox: [], platforms }, { inboxError: 'timeout' });
   // deno-lint-ignore no-explicit-any
-  const err = await reconcileConnectionError(db.client as any, errEv('E1', T1), 'sub-1');
+  const err = await reconcileConnectionError(db.client as any, errEv('E1', T1), 'sub-1', 'plat-1');
   assertEquals(typeof err === 'string' && err.includes('newer-success lookup failed'), true);
   assertEquals(c.status, 'active');
   assertEquals(db.connWrites(), 0);

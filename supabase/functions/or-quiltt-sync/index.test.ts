@@ -396,7 +396,7 @@ Deno.test('reconcileConnectionError: does not regress status when a newer succes
   };
 
   // deno-lint-ignore no-explicit-any
-  const result = await reconcileConnectionError(mockClient as any, ev, 'sub-1');
+  const result = await reconcileConnectionError(mockClient as any, ev, 'sub-1', 'plat-1');
   assertEquals(result, null, 'must return null (processed, no error) rather than surface a failure');
   assertEquals(
     connectionsUpdateCalled,
@@ -459,7 +459,7 @@ Deno.test('reconcileConnectionError: still flips status to error in the ordinary
   };
 
   // deno-lint-ignore no-explicit-any
-  const result = await reconcileConnectionError(mockClient as any, ev, 'sub-1');
+  const result = await reconcileConnectionError(mockClient as any, ev, 'sub-1', 'plat-1');
   assertEquals(result, null, 'reconcileConnectionError succeeds (string|null contract)');
   assertEquals(
     connectionsUpdateCalled,
@@ -1341,7 +1341,7 @@ const erroredEvent = {
 Deno.test('DL-1445: on a sink platform the cause is written alongside the error status', async () => {
   const { client, captured } = errorReconcileClient('bitbooks-v2');
 
-  const err = await reconcileConnectionError(client, erroredEvent, 'sub-1');
+  const err = await reconcileConnectionError(client, erroredEvent, 'sub-1', 'plat-sink');
 
   assertEquals(err, null, 'a clean reconcile returns null');
   assertEquals(captured.patch?.status, 'error', 'status must still be set to error');
@@ -1361,7 +1361,7 @@ Deno.test('DL-1445: on a sink platform the cause is written alongside the error 
 Deno.test('DL-1445: on a non-sink platform the column is left alone, never written in the clear', async () => {
   const { client, captured } = errorReconcileClient(null);
 
-  const err = await reconcileConnectionError(client, erroredEvent, 'sub-1');
+  const err = await reconcileConnectionError(client, erroredEvent, 'sub-1', 'plat-sink');
 
   assertEquals(err, null, 'a clean reconcile returns null');
   assertEquals(captured.patch?.status, 'error', 'status must still be set to error');
@@ -1410,7 +1410,7 @@ Deno.test('DL-1445 follow-up: a platforms read failure must not stop the status 
     },
   };
 
-  const err = await reconcileConnectionError(client, erroredEvent, 'sub-1');
+  const err = await reconcileConnectionError(client, erroredEvent, 'sub-1', 'plat-sink');
 
   assertEquals(err, null, 'a platforms read failure must not fail the reconcile');
   assertEquals(captured?.status, 'error', 'the status write is the half that must always happen');
@@ -1419,6 +1419,76 @@ Deno.test('DL-1445 follow-up: a platforms read failure must not stop the status 
     false,
     'if we cannot confirm the platform is sink mode we must not write the column',
   );
+});
+
+// ── OR-T2752: routing resolved at drain time must still record the cause ──
+//
+// The drain resolves platform_id from the subaccount / quiltt_profile_map into
+// locals and passes it to handleEvent, but ev.platform_id stays NULL. The
+// platforms lookup is keyed by id here, so reading ev.platform_id finds nothing.
+function drainResolvedClient(sinkFormat: string | null) {
+  const captured: { patch?: Record<string, unknown> } = {};
+  // deno-lint-ignore no-explicit-any
+  const client: any = {
+    from(table: string) {
+      // deno-lint-ignore no-explicit-any
+      const chain: any = {
+        _id: undefined as unknown,
+        select(_c: string) { return chain; },
+        eq(c: string, v: unknown) { if (table === 'platforms' && c === 'id') chain._id = v; return chain; },
+        is(_c: string, _v: unknown) { return chain; },
+        order(_c: string, _o: unknown) { return chain; },
+        limit(_n: number) { return chain; },
+        maybeSingle() {
+          if (table === 'platforms') {
+            return Promise.resolve({
+              data: chain._id === 'plat-sink' ? { sink_format: sinkFormat } : null,
+              error: null,
+            });
+          }
+          return Promise.resolve({ data: { id: 'conn-or-1' }, error: null });
+        },
+        update(patch: Record<string, unknown>) {
+          captured.patch = patch;
+          return { eq(_c: string, _v: unknown) { return Promise.resolve({ error: null }); } };
+        },
+      };
+      return chain;
+    },
+  };
+  return { client, captured };
+}
+
+const drainResolvedEvent = {
+  event_id:      'evt-t2752',
+  event_type:    'connection.synced.errored.repairable',
+  payload:       { record: { id: 'quiltt-conn-1' } },
+  platform_id:   null,
+  subaccount_id: null,
+  attempts:      0,
+};
+
+Deno.test('OR-T2752: errored event with NULL ev.platform_id but resolved routing records the cause on a sink platform', async () => {
+  const { client, captured } = drainResolvedClient('bitbooks-v2');
+  // deno-lint-ignore no-explicit-any
+  const result = await handleEvent(client, drainResolvedEvent as any, 'plat-sink', 'sub-1', 'api-key');
+  assertEquals(result, 'processed');
+  assertEquals(captured.patch?.status, 'error');
+  const stored = captured.patch?.encrypted_last_error;
+  assertEquals(
+    typeof stored === 'string' && /^UPSTREAM_AUTH_FAILED:[0-9a-f]{16}$/.test(stored),
+    true,
+    `encrypted_last_error must match UPSTREAM_AUTH_FAILED:<16hex>, got: ${String(stored)}`,
+  );
+});
+
+Deno.test('OR-T2752: same drain-resolved event on a non-sink platform leaves encrypted_last_error untouched', async () => {
+  const { client, captured } = drainResolvedClient(null);
+  // deno-lint-ignore no-explicit-any
+  const result = await handleEvent(client, drainResolvedEvent as any, 'plat-sink', 'sub-1', 'api-key');
+  assertEquals(result, 'processed');
+  assertEquals(captured.patch?.status, 'error');
+  assertEquals('encrypted_last_error' in (captured.patch ?? {}), false);
 });
 
 // ── DL-1409: the sink path must not create a status it cannot clear ────
@@ -1656,7 +1726,7 @@ const ambiguousErroredEvent = {
 
 Deno.test('OR-T2475 reconcileConnectionError: ambiguous legacy row -- skips the status write', async () => {
   const { client, updateCalled } = ambiguousLegacyClient(true);
-  const err = await reconcileConnectionError(client, ambiguousErroredEvent, 'sub-1');
+  const err = await reconcileConnectionError(client, ambiguousErroredEvent, 'sub-1', 'plat-1');
   assertEquals(err, null, 'ambiguity is not itself an error condition, it is a deliberate skip');
   assertEquals(
     updateCalled(),
