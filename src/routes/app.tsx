@@ -8,7 +8,9 @@ import {
   clearCoAdminListEntry,
   CoAdminGrantIncompleteError,
   CoAdminRevocationIncompleteError,
+  adminDataKeyFor,
   type AdminGrantMaterial,
+  type AdminSubkeys,
   type CoAdminSupabaseLike,
 } from "@/lib/co-admin";
 import { formatError } from "@/lib/format-error";
@@ -107,6 +109,7 @@ interface EncryptedTxRow {
   external_id: string;
   encrypted_payload: string;
   occurred_at: string;
+  data_key_generation?: number;
 }
 
 type DecryptedTxRow = NormalizedTransaction & {
@@ -251,7 +254,7 @@ export function AppHome() {
   const [coAdminWorkspacesErr, setCoAdminWorkspacesErr] = useState<string | null>(null);
   // Cached admin subkeys , persists until tab closes (MVP limitation).
   const adminSubkeysRef = useRef<
-    Map<string, { credentialsKey: CryptoKey; transactionsKey: CryptoKey }>
+    Map<string, AdminSubkeys>
   >(new Map());
   const [coAdminOpen, setCoAdminOpen] = useState(false);
   const [grantDialogOpen, setGrantDialogOpen] = useState(false);
@@ -553,22 +556,26 @@ export function AppHome() {
     [loadAdminSubkeys, myKemSecretWrapped, myKeyringCiphertext, myKeyringEpoch],
   );
 
-  const getActiveCredentialsKey = useCallback(async (): Promise<CryptoKey | null> => {
+  // `generation` is a row's data_key_generation; omit it for the latest key.
+  const getActiveCredentialsKey = useCallback(async (generation?: number): Promise<CryptoKey | null> => {
     if (!activeWorkspace || (!myKemSecretWrapped && !myKeyringCiphertext)) return null;
-    const cached = adminSubkeysRef.current.get(activeWorkspace.workspaceKeyId);
-    if (cached) return cached.credentialsKey;
-    const subkeys = await openWorkspaceGrant(activeWorkspace);
-    adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
-    return subkeys.credentialsKey;
+    let subkeys = adminSubkeysRef.current.get(activeWorkspace.workspaceKeyId);
+    if (!subkeys) {
+      subkeys = await openWorkspaceGrant(activeWorkspace);
+      adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
+    }
+    return adminDataKeyFor(subkeys, "credentials", generation);
   }, [activeWorkspace, myKemSecretWrapped, myKeyringCiphertext, openWorkspaceGrant]);
 
-  const getActiveTransactionsKey = useCallback(async (): Promise<CryptoKey | null> => {
+  // `generation` is a row's data_key_generation; omit it for the latest key.
+  const getActiveTransactionsKey = useCallback(async (generation?: number): Promise<CryptoKey | null> => {
     if (!activeWorkspace || (!myKemSecretWrapped && !myKeyringCiphertext)) return null;
-    const cached = adminSubkeysRef.current.get(activeWorkspace.workspaceKeyId);
-    if (cached) return cached.transactionsKey;
-    const subkeys = await openWorkspaceGrant(activeWorkspace);
-    adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
-    return subkeys.transactionsKey;
+    let subkeys = adminSubkeysRef.current.get(activeWorkspace.workspaceKeyId);
+    if (!subkeys) {
+      subkeys = await openWorkspaceGrant(activeWorkspace);
+      adminSubkeysRef.current.set(activeWorkspace.workspaceKeyId, subkeys);
+    }
+    return adminDataKeyFor(subkeys, "transactions", generation);
   }, [activeWorkspace, myKemSecretWrapped, myKeyringCiphertext, openWorkspaceGrant]);
 
   // Load connections + decrypt recent transactions.
@@ -581,6 +588,10 @@ export function AppHome() {
     try {
       // Resolve which user's connections to show and which keys to use.
       const isAdminView = !!activeWorkspace;
+      // Looked up lazily, after the cache is warmed, and defined before the
+      // admin-view early return below narrows activeWorkspace.
+      const wsKeyId = activeWorkspace?.workspaceKeyId;
+      const adminSubkeys = () => (wsKeyId ? adminSubkeysRef.current.get(wsKeyId) : undefined);
       let txnsKey: CryptoKey | null = null;
       if (isAdminView) {
         // Warm the credentials key cache too , avoids a cold load on first Sync.
@@ -737,7 +748,7 @@ export function AppHome() {
       // When a user grows past 1k, we'll move to server-side pagination.
       const txQuery = supabase
         .from("encrypted_transactions")
-        .select("id, connection_id, external_id, encrypted_payload, occurred_at")
+        .select("id, connection_id, external_id, encrypted_payload, occurred_at, data_key_generation")
         .order("occurred_at", { ascending: false })
         .limit(TX_FETCH_LIMIT);
       const { data: txs, error: txErr } = connIds.length > 0
@@ -749,8 +760,13 @@ export function AppHome() {
       const decrypted = await Promise.all(
         (txs ?? []).map(async (row: EncryptedTxRow): Promise<DecryptedTxRow | null> => {
           try {
+            // Admin view: the key is chosen by the row's own generation, and a
+            // generation the grant does not hold throws rather than falling back.
             const tx = isAdminView
-              ? JSON.parse(await decryptString(row.encrypted_payload, txnsKey!)) as NormalizedTransaction
+              ? JSON.parse(await decryptString(
+                  row.encrypted_payload,
+                  adminDataKeyFor(adminSubkeys()!, "transactions", row.data_key_generation),
+                )) as NormalizedTransaction
               : await decryptTransaction(row.encrypted_payload);
             return { ...tx, connection_id: row.connection_id, occurred_at: row.occurred_at };
           } catch (e) {

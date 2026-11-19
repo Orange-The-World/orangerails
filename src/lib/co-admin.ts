@@ -81,10 +81,13 @@
  *   sealed keyring keeps the data keys they already had, exactly as an admin
  *   who kept the v2 blob does. Nothing here claims otherwise.
  *
- *   ONE KEY OF EACH KIND. AdminSubkeys carries a single credentials key and a
- *   single transactions key, so a v3 consume returns the LATEST generation of
- *   each. Rows written under an older generation need a generation aware
- *   read, which is a follow up and not part of this change.
+ *   GENERATIONS (OR-T2742). credentialsKey and transactionsKey stay the LATEST
+ *   generation of each kind, which is what a write wants. A v3 consume also
+ *   returns every generation the sealed keyring holds in `generations`, and
+ *   adminDataKeyFor picks the key a stored row names by its data_key_generation.
+ *   A generation the keyring does not hold is refused by number, never opened
+ *   with a neighbour's key. A v2 consume returns no `generations`: a frozen blob
+ *   has exactly one key per kind.
  *
  *   No vault flow writes a v3 keyring yet, so every owner takes the v2 path
  *   today. The v3 branches are covered by tests and stay inert in the app
@@ -383,8 +386,54 @@ export function assertSaltMatchesUnlockedVault(
 
 /** Subkeys returned by loadAdminSubkeysDirect for use in encrypt/decrypt. */
 export interface AdminSubkeys {
+  /** The latest generation (v3) or the only key (v2). */
   credentialsKey: CryptoKey;
   transactionsKey: CryptoKey;
+  /** v3 consume only: every generation the sealed keyring holds, by generation. */
+  generations?: {
+    credentials: ReadonlyMap<number, CryptoKey>;
+    transactions: ReadonlyMap<number, CryptoKey>;
+  };
+}
+
+/** A stored row names a data key generation the co-admin's keyring does not hold. */
+export class CoAdminGenerationUnavailableError extends Error {
+  readonly kind: "credentials" | "transactions";
+  readonly generation: number;
+  constructor(kind: "credentials" | "transactions", generation: number, present: number[]) {
+    super(
+      `Co-admin grant holds no ${kind} key for data_key_generation ${generation} ` +
+        `(present: ${present.length ? present.join(", ") : "none"}). Refusing to open the row with another generation's key.`,
+    );
+    this.name = "CoAdminGenerationUnavailableError";
+    this.kind = kind;
+    this.generation = generation;
+  }
+}
+
+/**
+ * The key for a row stored under `generation`. A v2 result has no generations
+ * (one frozen key per kind) and returns that key. A v3 result returns exactly
+ * the named generation or throws CoAdminGenerationUnavailableError; there is
+ * no fallback to the latest or to a neighbour.
+ */
+export function adminDataKeyFor(
+  subkeys: AdminSubkeys,
+  kind: "credentials" | "transactions",
+  generation?: number,
+): CryptoKey {
+  if (!subkeys.generations) {
+    return kind === "credentials" ? subkeys.credentialsKey : subkeys.transactionsKey;
+  }
+  const map = subkeys.generations[kind];
+  if (generation === undefined) {
+    return kind === "credentials" ? subkeys.credentialsKey : subkeys.transactionsKey;
+  }
+  const key = map.get(generation);
+  if (!key) {
+    throw new CoAdminGenerationUnavailableError(kind, generation, [...map.keys()].sort((a, b) => a - b));
+  }
+  return key;
 }
 
 // ------------------------------------------------------------------
@@ -1074,9 +1123,16 @@ export async function loadAdminSubkeysDirect(
       ownerUserId: params.ownerUserId,
       grantId: params.grantId,
     });
+    const allOf = async (kind: "credentials" | "transactions") => {
+      const entries = kind === "credentials" ? projection.credentials : projection.transactions;
+      const map = new Map<number, CryptoKey>();
+      for (const e of entries) map.set(e.generation, await coAdminDataKeyFor(projection, kind, e.generation));
+      return map;
+    };
     return {
       credentialsKey: await coAdminDataKeyFor(projection, "credentials"),
       transactionsKey: await coAdminDataKeyFor(projection, "transactions"),
+      generations: { credentials: await allOf("credentials"), transactions: await allOf("transactions") },
     };
   }
 
