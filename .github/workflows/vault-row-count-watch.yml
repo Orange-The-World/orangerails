@@ -1,0 +1,75 @@
+name: Vault row-count watch
+
+# WHAT THIS IS. A read-only check of how large the biggest per-owner dataset in
+# production has grown. It reports a TIER NAME and nothing else, because this
+# repository and its Actions logs are public. The agreed review levels, and what to
+# do when one is crossed, are in the tracking ticket (OR-T1937), which is
+# maintainer-only. This file measures and reports. It decides nothing.
+#
+# WHAT IT READS WITH. The repository's existing SUPABASE_ACCESS_TOKEN, through the
+# same Management API route the migration check in supabase-deploy.yml already
+# uses. No secret was added for this. That token is broad: it can run any SQL on
+# the project. So the script sends one fixed SELECT of counts, its self-test proves
+# the text of that query holds no write keyword, and the token is handed to one
+# step only.
+#
+# HOW IT SIGNALS. By going red. WARN and STOP are red, and so is UNKNOWN (it could
+# not look, or the answer was not plausible). LOOK-AGAIN is informational and stays
+# green. No issue is opened and nothing is posted, because both would be public.
+# Every run prints its tier and the time it checked.
+#
+# WHO WATCHES THE WATCHER. A run that never happens cannot report itself, so the
+# check that this workflow has not gone quiet is not in this file. It belongs to
+# the reliability owner: once a schedule exists, the last successful scheduled run
+# must be less than ten days old.
+#
+# SCHEDULE. None yet, deliberately. The first run is manual and is read before any
+# cron is added.
+#
+# HOW TO WATCH IT GO RED. Run it from the Actions tab with simulate_max_rows set to
+# 6789. The real read still happens, the tier is decided on the number you gave,
+# and the run must end red at STOP with the word SIMULATED in its report. A check
+# nobody has seen go red is not a check.
+
+on:
+  workflow_dispatch:
+    inputs:
+      simulate_max_rows:
+        description: >-
+          Test only: decide the tier on this number instead of the real largest
+          per-owner row count, to watch the alarm path go red. The real read still
+          happens and its failures still fail the run. Leave empty for a real run.
+        required: false
+        type: string
+
+# Declaring a permissions block sets every scope not named here to none.
+permissions:
+  contents: read
+
+concurrency:
+  group: vault-row-count-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    name: Largest per-owner row count, tier only
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Nothing this workflow reports means anything until it has been shown able to
+      # go red and able to fail to look. Loopback only and no secret, so it cannot
+      # be flaky and an outage cannot skip it. If it fails, the real read never runs.
+      - name: Self-test
+        run: node scripts/vault-row-count-watch.mjs --selftest
+
+      - name: Read production and report the tier
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_REF: lcdicqalreskibdfxkzb
+          SIMULATE_MAX_ROWS: ${{ github.event.inputs.simulate_max_rows }}
+        run: node scripts/vault-row-count-watch.mjs --read
