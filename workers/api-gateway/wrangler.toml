@@ -6,7 +6,7 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = true
 
 [vars]
-OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
+OR_SUPABASE_URL = "https://db.orangerails.com"
 
 # Staging deploys to a workers.dev URL for verification. The custom
 # domain `api.orangerails.dev` is bound separately (one time, via the
@@ -33,5 +33,5 @@ name = "api-orangerails-production"
 workers_dev = true
 
 [env.production.vars]
-OR_SUPABASE_URL = "https://lcdicqalreskibdfxkzb.supabase.co"
+OR_SUPABASE_URL = "https://db.orangerails.com"
 ORBI_FUNCTIONS_BASE_URL = "https://sqcventmypowhbaceufy.supabase.co"
