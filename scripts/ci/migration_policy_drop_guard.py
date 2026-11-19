@@ -23,6 +23,16 @@ ESCAPE HATCH. A single-line marker comment directly above the flagged line,
 There is no global off switch, on purpose: an intentional case must be a
 thing someone chose and a reviewer can see, not a setting someone forgot.
 
+COMMENTS (OR-T2759). Matching runs on the text with SQL comments removed
+(`-- ...` to end of line, and `/* ... */` blocks, which nest in Postgres), so a
+comment that merely mentions EXECUTE or format( near a literal DROP POLICY is
+not read as code. Comment starts inside a single-quoted string or a
+double-quoted identifier are not comments: those are kept, so
+`EXECUTE format('DROP POLICY ... -- ...')` is still seen. The escape-hatch
+marker is read from the RAW line above, not the stripped text. Dollar-quoted
+bodies (DO $$ ... $$) are treated as code, which is what they are in
+migrations; the one residue is a dollar-quoted *string* that contains `--`.
+
 SILENT-SUCCESS GUARD. Called with zero files, this script refuses instead
 of exiting 0. A check that can say "0 of 0, therefore pass" is exactly the
 shape that let the original bug through CI unnoticed: a loop that finishes
@@ -41,9 +51,58 @@ SAME_STATEMENT_WINDOW = 4   # lines to look back for a wrapped EXECUTE/format() 
 LOOP_LOOKBACK_WINDOW = 20   # lines to look back for an unclosed loop-over-pg_policies header
 
 
+def strip_comments(text):
+    """Return text with SQL comments removed, newlines kept (line numbers hold).
+
+    Single-quoted strings ('' escapes; backslash escapes after E) and
+    double-quoted identifiers are copied through untouched, so `--` or `/*`
+    inside them never starts a comment.
+    """
+    out = []
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        two = text[i:i + 2]
+        if two == "--":
+            while i < n and text[i] != "\n":
+                i += 1
+        elif two == "/*":
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if text[i:i + 2] == "/*":
+                    depth, i = depth + 1, i + 2
+                elif text[i:i + 2] == "*/":
+                    depth, i = depth - 1, i + 2
+                else:
+                    if text[i] == "\n":
+                        out.append("\n")
+                    i += 1
+            out.append(" ")
+        elif c in "'\"":
+            escapes = c == "'" and i > 0 and text[i - 1] in "eE" and (i < 2 or not (text[i - 2].isalnum() or text[i - 2] == "_"))
+            j = i + 1
+            while j < n:
+                if escapes and text[j] == "\\":
+                    j += 2
+                    continue
+                if text[j] == c:
+                    if text[j + 1:j + 2] == c:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            out.append(text[i:j + 1])
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def check_text(path, text):
     """Return a list of (path, lineno, line) findings for one file's content."""
-    lines = text.splitlines()
+    raw_lines = text.splitlines()
+    lines = strip_comments(text).splitlines()
     findings = []
     for i, line in enumerate(lines):
         if not DROP_POLICY.search(line):
@@ -60,7 +119,7 @@ def check_text(path, text):
         if not is_dynamic:
             continue
 
-        if i > 0 and ALLOW_MARKER.search(lines[i - 1]):
+        if i > 0 and ALLOW_MARKER.search(raw_lines[i - 1]):
             continue
 
         findings.append((path, lineno, line.strip()))

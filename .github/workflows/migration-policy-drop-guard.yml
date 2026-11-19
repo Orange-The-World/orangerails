@@ -88,11 +88,31 @@ jobs:
             echo "ok: zero files was refused, not silently passed."
           fi
 
+          # Case 5 (OR-T2759): comments that mention EXECUTE/format(/%I/%s/
+          # quote_ident(/|| near a literal DROP POLICY must not be flagged.
+          if python3 scripts/ci/migration_policy_drop_guard.py \
+               scripts/ci/fixtures/comment_mentions_dynamic_markers.sql; then
+            echo "ok: comment_mentions_dynamic_markers.sql was not flagged, as required."
+          else
+            echo "::error::self-test failed: comment_mentions_dynamic_markers.sql was flagged; comment text must not count as code."
+            fail=1
+          fi
+
+          # Case 6 (OR-T2759): real dynamic statements must still be flagged
+          # even with comment-like text ("--" inside a string, trailing comment).
+          if python3 scripts/ci/migration_policy_drop_guard.py \
+               scripts/ci/fixtures/dynamic_with_comment_lookalikes.sql; then
+            echo "::error::self-test failed: dynamic_with_comment_lookalikes.sql should have been flagged and was not."
+            fail=1
+          else
+            echo "ok: dynamic_with_comment_lookalikes.sql was flagged, as required."
+          fi
+
           if [ "${fail}" -ne 0 ]; then
             echo "::error::migration_policy_drop_guard.py self-test failed. The guard is broken, not passing."
             exit 1
           fi
-          echo "Self-test passed: 4 cases, all as expected."
+          echo "Self-test passed: 6 cases, all as expected."
 
       - name: Find added/changed migration files in this pull request
         id: changed
