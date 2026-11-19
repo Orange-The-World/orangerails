@@ -72,7 +72,7 @@ Deno.test('Bitstamp: trades readable, withdrawals PermissionDenied -> denied=[wi
     fetchMyTrades: async () => [RAW_TRADE],
     fetchWithdrawals: async () => { throw namedError('PermissionDenied'); },
   };
-  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined);
+  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1');
   assertEquals(denied, ['withdrawals']);
   assertEquals(transactions.length, 1);
   assertEquals(transactions[0].id, 'trade-trade-1');
@@ -85,7 +85,7 @@ Deno.test('Bitstamp: trades + deposits readable, withdrawals refused -> denied=[
     fetchDeposits: async () => [RAW_DEPOSIT],
     fetchWithdrawals: async () => { throw namedError('PermissionDenied'); },
   };
-  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined);
+  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1');
   assertEquals(denied, ['withdrawals']);
   assertEquals(transactions.length, 2);
 });
@@ -98,7 +98,7 @@ Deno.test('AuthenticationError on trades propagates (not survivable)', async () 
     fetchMyTrades: async () => { throw namedError('AuthenticationError'); },
   };
   await assertRejects(
-    () => fetchAllSince(exchange, 'bitstamp', undefined),
+    () => fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1'),
     Error,
     'fake',
   );
@@ -110,7 +110,7 @@ Deno.test('RateLimitExceeded on trades propagates (not survivable)', async () =>
     fetchMyTrades: async () => { throw namedError('RateLimitExceeded'); },
   };
   await assertRejects(
-    () => fetchAllSince(exchange, 'bitstamp', undefined),
+    () => fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1'),
     Error,
     'fake',
   );
@@ -122,7 +122,7 @@ Deno.test('generic Error on trades propagates (no special name, not survivable)'
     fetchMyTrades: async () => { throw new Error('something broke'); },
   };
   await assertRejects(
-    () => fetchAllSince(exchange, 'bitstamp', undefined),
+    () => fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1'),
     Error,
     'something broke',
   );
@@ -136,7 +136,7 @@ Deno.test('NotSupported on withdrawals: skipped silently, not in denied', async 
     fetchMyTrades: async () => [RAW_TRADE],
     fetchWithdrawals: async () => { throw namedError('NotSupported'); },
   };
-  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined);
+  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1');
   assertEquals(denied, []);
   assertEquals(transactions.length, 1);
 });
@@ -147,7 +147,7 @@ Deno.test('NotSupported via message text: skipped silently, not in denied', asyn
     fetchMyTrades: async () => [RAW_TRADE],
     fetchWithdrawals: async () => { throw new Error('NotSupported: this endpoint requires a symbol'); },
   };
-  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined);
+  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1');
   assertEquals(denied, []);
   assertEquals(transactions.length, 1);
 });
@@ -160,7 +160,7 @@ Deno.test('source returns empty array: not in denied, no throw', async () => {
     fetchMyTrades: async () => [],
     fetchWithdrawals: async () => [],
   };
-  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined);
+  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1');
   assertEquals(denied, []);
   assertEquals(transactions.length, 0);
 });
@@ -172,7 +172,7 @@ Deno.test('empty readable source + denied source: only the denied source is in d
     fetchDeposits: async () => [RAW_DEPOSIT],
     fetchWithdrawals: async () => { throw namedError('PermissionDenied'); },
   };
-  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined);
+  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1');
   assertEquals(denied, ['withdrawals']);
   assertEquals(transactions.length, 1);
 });
@@ -185,14 +185,14 @@ Deno.test('exchange.has.fetchWithdrawals=false: not attempted, not in denied', a
     fetchMyTrades: async () => [RAW_TRADE],
     fetchWithdrawals: async () => { throw new Error('should not be called'); },
   };
-  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined);
+  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1');
   assertEquals(denied, []);
   assertEquals(transactions.length, 1);
 });
 
 Deno.test('exchange.has={}: no sources attempted, denied=[], no throw', async () => {
   const exchange = { has: {} };
-  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined);
+  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1');
   assertEquals(denied, []);
   assertEquals(transactions.length, 0);
 });
@@ -207,7 +207,7 @@ Deno.test('all three sources PermissionDenied: throws firstDenial', async () => 
     fetchWithdrawals: async () => { throw namedError('PermissionDenied'); },
   };
   await assertRejects(
-    () => fetchAllSince(exchange, 'bitstamp', undefined),
+    () => fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1'),
     Error,
     'no permission',
   );
@@ -220,7 +220,7 @@ Deno.test('two sources PermissionDenied, third not advertised: all attempted den
     fetchDeposits: async () => { throw namedError('PermissionDenied'); },
   };
   await assertRejects(
-    () => fetchAllSince(exchange, 'bitstamp', undefined),
+    () => fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1'),
     Error,
     'no permission',
   );
@@ -232,7 +232,7 @@ Deno.test('one readable source + one PermissionDenied: no throw, partial result 
     fetchMyTrades: async () => [RAW_TRADE],
     fetchWithdrawals: async () => { throw namedError('PermissionDenied'); },
   };
-  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined);
+  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1');
   assertEquals(denied, ['withdrawals']);
   assertEquals(transactions.length, 1);
 });
@@ -244,7 +244,7 @@ Deno.test('two sources PermissionDenied + one readable: no throw, denied names i
     fetchDeposits: async () => { throw namedError('PermissionDenied'); },
     fetchWithdrawals: async () => [RAW_WITHDRAWAL],
   };
-  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined);
+  const { transactions, denied } = await fetchAllSince(exchange, 'bitstamp', undefined, 'wallet-uuid-1');
   assertEquals(denied, ['trades', 'deposits']);
   assertEquals(transactions.length, 1);
 });
