@@ -1,0 +1,54 @@
+name: Set dev edge function flag
+
+# Sets one named feature flag as a Supabase edge function secret on the DEV
+# project only. Manual dispatch, never on a push.
+#
+# Narrow on purpose: the dev project ref is hardcoded, the key comes from a
+# fixed list, and the value is true or false. Prod flags are not settable
+# here, they stay two party with the founder.
+
+on:
+  workflow_dispatch:
+    inputs:
+      key:
+        description: 'Which dev flag to set'
+        required: true
+        type: choice
+        options:
+          - ORBI_RATE_API_ENABLED
+      value:
+        description: 'Value'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      reason:
+        description: 'Why (a ticket id helps)'
+        required: false
+        type: string
+
+jobs:
+  set-flag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v2
+        with:
+          version: latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set the flag on the dev project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          FLAG_KEY: ${{ inputs.key }}
+          FLAG_VALUE: ${{ inputs.value }}
+        run: |
+          set -euo pipefail
+          supabase secrets set "${FLAG_KEY}=${FLAG_VALUE}" --project-ref fzwmnzmtqidumdqjdddz
+          echo "set ${FLAG_KEY} on dev, listing to prove the key exists"
+          supabase secrets list --project-ref fzwmnzmtqidumdqjdddz | grep -F "${FLAG_KEY}"
+          echo "note: the list shows a digest, not the value. Proof of the"
+          echo "value is the endpoint probe, not this output."
