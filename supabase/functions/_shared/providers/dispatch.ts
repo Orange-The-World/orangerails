@@ -25,6 +25,7 @@ import { xpubAdapter } from './xpub/index.ts';
 import { btcpayAdapter } from './btcpay/index.ts';
 import { strikeAdapter } from './strike/index.ts';
 import { surgeAdapter } from './surge/index.ts';
+import { viabtcAdapter } from './viabtc/index.ts';
 import { makeCcxtAdapter } from './_ccxt/index.ts';
 import { CCXT_MANIFEST } from './_ccxt/manifest.ts';
 
@@ -53,6 +54,7 @@ const PROVIDERS: ReadonlyArray<ProviderAdapter> = [
   btcpayAdapter,
   strikeAdapter,
   surgeAdapter,
+  viabtcAdapter,
   // CCXT-backed exchanges (manifest-driven, 98 today)
   ...ccxtAdapters,
 ];
@@ -107,7 +109,7 @@ export interface ProviderManifest {
   /**
    * Exchange-level sync capabilities, sourced from CCXT manifest introspection.
    * Present only for CCXT-backed exchanges (98 today). Absent for native
-   * adapters (blink, xpub, btcpay, strike, surge) and client-side manifests
+   * adapters (blink, xpub, btcpay, strike, surge, viabtc) and client-side manifests
    * (quiltt, sparrow). Never defaults to false: absent means unknown or
    * not applicable, not "cannot do this".
    */
