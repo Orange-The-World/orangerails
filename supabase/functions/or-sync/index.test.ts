@@ -20,7 +20,14 @@
  */
 
 import { assertEquals, assert } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { mergeStrikeTransactions, batchHttpStatus, throwOnDbError, handleConnectionError, redactedUpstreamDetail } from './index.ts';
+import {
+  batchHttpStatus,
+  buildUnknownConnectionIdsMiss,
+  handleConnectionError,
+  mergeStrikeTransactions,
+  redactedUpstreamDetail,
+  throwOnDbError,
+} from './index.ts';
 import type { NormalizedTransaction } from '../_shared/providers/dispatch.ts';
 
 const WALLET_A = 'wallet-aaaa';
@@ -304,25 +311,30 @@ Deno.test('handleConnectionError: classifies error, stamps status=error, returns
 //
 // When some but not all requested connection_ids resolve, the whole request
 // must fail (non-2xx) rather than silently dropping the unresolved ids.
-// Source-inspection tests verify the guard logic survives future edits to the
-// handler, following the same pattern used for the quiltt accountIds guard above.
+// The response helper is the same object returned by the live handler after
+// stealth and disconnected lookups. Exercise its response contract directly;
+// source inspection below separately pins that the handler still calls it.
 
-Deno.test('partial-miss guard (all-resolve path): boundary condition is correct', () => {
-  // The guard uses Set-difference to compute unresolved ids: deduplicates the
-  // requested list (avoiding false miss on duplicate ids), then filters out
-  // resolved ids. Fires only when the result is non-empty. Both the dedup step
-  // and the guard condition must survive future edits.
-  const src = readSelf('./index.ts');
-  assertEquals(
-    src.includes('[...new Set(connection_ids)].filter'),
-    true,
-    'guard must deduplicate via Set to avoid false miss on duplicate ids',
+Deno.test('partial-miss guard (all-resolve path): duplicate resolved ids do not reject', () => {
+  const miss = buildUnknownConnectionIdsMiss(
+    ['connection-valid', 'connection-valid'],
+    ['connection-valid'],
   );
-  assertEquals(
-    src.includes('unresolvedIds.length > 0'),
-    true,
-    'guard must fire only when unresolved ids exist after set-difference',
+  assertEquals(miss, null);
+});
+
+Deno.test('OR-T0310: valid+bogus request rejects and names the bogus connection_id', async () => {
+  const miss = buildUnknownConnectionIdsMiss(
+    ['connection-valid', 'connection-bogus'],
+    ['connection-valid'],
   );
+
+  assert(miss !== null, 'a partial miss must produce a rejection');
+  assertEquals(miss.response.status, 404, 'a partial unknown-id miss must be non-2xx');
+  assertEquals(await miss.response.json(), {
+    error: 'Connection not found in this subaccount',
+    unresolved_ids: ['connection-bogus'],
+  });
 });
 
 Deno.test('partial-miss guard (partial-resolve path): stealth_ids+unknown_ids in 400, unresolved_ids in 404', () => {
@@ -343,7 +355,7 @@ Deno.test('partial-miss guard (partial-resolve path): stealth_ids+unknown_ids in
 
 Deno.test('partial-miss guard (partial-resolve path): stealth 400 and unknown 404 follow the guard', () => {
   const src = readSelf('./index.ts');
-  const guardIdx = src.indexOf('unresolvedIds.length > 0');
+  const guardIdx = src.indexOf('const connectionIdsMiss = buildUnknownConnectionIdsMiss(');
   assert(guardIdx !== -1, 'partial-miss guard must be present in index.ts');
   const afterGuard = src.slice(guardIdx);
   assert(
@@ -361,7 +373,7 @@ Deno.test('partial-miss guard: mixed stealth+unknown -> 400 wins, both id sets l
   // (stealth is the caller-fixable condition). Both sets are listed in separate
   // fields so the caller can act on each independently.
   const src = readSelf('./index.ts');
-  const guardIdx = src.indexOf('unresolvedIds.length > 0');
+  const guardIdx = src.indexOf('const connectionIdsMiss = buildUnknownConnectionIdsMiss(');
   assert(guardIdx !== -1, 'partial-miss guard must be present');
   const afterGuard = src.slice(guardIdx);
   // 400 branch fires when ANY stealth id is present (covers the mixed case).
