@@ -1,0 +1,39 @@
+name: ORBI Replacement Detector
+
+on:
+  schedule:
+    # 06:00 UTC daily
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual run (e.g. forced-fail test)'
+        required: false
+        default: ''
+
+jobs:
+  detect:
+    name: Check ORBI data absent from OR prod
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install psycopg2
+        run: pip install --quiet psycopg2-binary
+
+      - name: Run ORBI replacement detector
+        env:
+          ORANGERAILS_PROD_DB_URL: ${{ secrets.ORANGERAILS_PROD_DB_URL }}
+        run: |
+          python orbi/scripts/orbi-prod-replacement-detector.py
+          # Exit 1 = ORBI data present in prod (violation)
+          # Exit 2 = check could not complete (also a failure -- absence of
+          #          evidence is not evidence of absence)
+          # Both are non-zero and GitHub marks the run failed with full output.
