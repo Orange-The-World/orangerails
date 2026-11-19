@@ -1,0 +1,91 @@
+name: GlitchTip canary heartbeat
+
+# Dead-man's-switch for edge-function error visibility (DL-0603, OR-T0934).
+# A missing scheduled event means the SENTRY_DSN -> GlitchTip ingest chain is
+# broken on THIS run, not a genuinely quiet period. See
+# supabase/functions/or-canary-heartbeat/index.ts for why the canary
+# deliberately throws rather than catching and reporting directly.
+
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      simulate_miss:
+        description: 'Do not invoke the canary. Use this to prove the alert fires on a genuine miss.'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Invoke the canary with a fresh tag
+        id: invoke
+        if: ${{ github.event.inputs.simulate_miss != 'true' }}
+        run: |
+          TAG="canary-$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_RUN_ID}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "invoked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          curl -sS -o /dev/null -w 'canary invocation HTTP %{http_code}\n' \
+            "${{ vars.VITE_SUPABASE_URL_PROD }}/functions/v1/or-canary-heartbeat?tag=$TAG" \
+            -H "apikey: ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY_PROD }}" \
+            -H "Authorization: Bearer ${{ vars.VITE_SUPABASE_PUBLISHABLE_KEY_PROD }}" \
+            || true
+
+      - name: Generate a tag without invoking (simulated miss)
+        id: skip
+        if: ${{ github.event.inputs.simulate_miss == 'true' }}
+        run: |
+          TAG="canary-simulated-miss-$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "invoked_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "Deliberately NOT invoking the canary. Tag $TAG will never be reported; this proves the alert path."
+
+      - name: Wait for the report to land
+        run: sleep 90
+
+      - name: Check GlitchTip for the tag
+        id: check
+        env:
+          TAG: ${{ steps.invoke.outputs.tag || steps.skip.outputs.tag }}
+          GLITCHTIP_API_TOKEN: ${{ secrets.GLITCHTIP_API_TOKEN }}
+        run: |
+          if [ -z "$GLITCHTIP_API_TOKEN" ]; then
+            echo "::error::GLITCHTIP_API_TOKEN is not set as a repository secret. Cannot check GlitchTip. See OR-T0934 for what is needed."
+            exit 1
+          fi
+          # Org slug 'or' and project slug 'orange-rails-supabase-edge-functions'
+          # confirmed live via the glitchtip_issues tool, 2026-08-30.
+          RESP=$(curl -sS \
+            -H "Authorization: Bearer $GLITCHTIP_API_TOKEN" \
+            "https://pulse.orangerails.com/api/0/projects/or/orange-rails-supabase-edge-functions/issues/?query=$TAG")
+          if echo "$RESP" | grep -q "$TAG"; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Alert on a miss
+        if: ${{ steps.check.outputs.found == 'false' }}
+        env:
+          ZULIP_BOT_EMAIL: ${{ secrets.ZULIP_BOT_EMAIL }}
+          ZULIP_BOT_API_KEY: ${{ secrets.ZULIP_BOT_API_KEY }}
+          TAG: ${{ steps.invoke.outputs.tag || steps.skip.outputs.tag }}
+          INVOKED_AT: ${{ steps.invoke.outputs.invoked_at || steps.skip.outputs.invoked_at }}
+        run: |
+          if [ -z "$ZULIP_BOT_EMAIL" ] || [ -z "$ZULIP_BOT_API_KEY" ]; then
+            echo "::error::ZULIP_BOT_EMAIL / ZULIP_BOT_API_KEY not set as repository secrets. Cannot post the missed-window alert. See OR-T0934 for what is needed."
+            exit 1
+          fi
+          curl -sS -X POST https://waggle.orangerails.com/api/v1/messages \
+            -u "$ZULIP_BOT_EMAIL:$ZULIP_BOT_API_KEY" \
+            -d "type=stream" \
+            -d "to=Delivery" \
+            -d "topic=GlitchTip canary missed window (DL-0603)" \
+            --data-urlencode "content=**GlitchTip canary missed window (DL-0603)**
+
+The scheduled canary invoked at ${INVOKED_AT} UTC with tag \`${TAG}\` did not appear in GlitchTip within 90 seconds. A real edge-function error would also not have been reported during this window.
+
+Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
