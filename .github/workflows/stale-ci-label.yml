@@ -63,11 +63,21 @@ jobs:
           # Non-skipped check names on dev HEAD. apply-migrations is always
           # skipped on dev (it requires a manual dispatch flag) and is not a
           # real gate, so excluding skipped conclusions gives us the real set.
+          #
+          # Default-branch-only jobs must not enter the baseline: they attach
+          # to github.sha = tip of dev, which is also every promotion PR
+          # head, and they never run on a feature PR. Including them would
+          # STALE-CI-label every feature PR. "Evaluate STALE CI label" is
+          # this sweep. "Scan comment body" is comment-findings-scan.yml
+          # (OR-T0626: a 6-hour schedule, previously one run per
+          # issue_comment). "Open issue on scan failure" is the old notify
+          # job from that workflow, excluded so a leftover record on a
+          # sitting SHA cannot poison the baseline during the cutover.
           TRUNK_CHECKS=$(gh api \
             "repos/${{ github.repository }}/commits/dev/check-runs" \
             --paginate \
             -H "Accept: application/vnd.github+json" \
-            --jq '[.check_runs[] | select(.conclusion != "skipped" and .name != "Evaluate STALE CI label") | .name] | sort | unique | .[]')
+            --jq '[.check_runs[] | select(.conclusion != "skipped" and .name != "Evaluate STALE CI label" and .name != "Scan comment body" and .name != "Open issue on scan failure") | .name] | sort | unique | .[]')
 
           if [ -z "$TRUNK_CHECKS" ]; then
             echo "::warning::Trunk check-run list is empty -- refusing to label any PR this sweep (empty baseline would produce false positives on every PR)"
