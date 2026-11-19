@@ -13,12 +13,45 @@
  */
 
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { strikeSubscriptionErrorMarker, resolveInvoiceWallet } from './queue.ts';
+import { strikeSubscriptionErrorMarker, resolveInvoiceWallet, retryOnError } from './queue.ts';
 import { computeWalletFingerprint } from '../../account-fingerprint.ts';
 import { toByteaHex } from '../../bytea.ts';
 
 const ENV_KEY_NAME = 'OR_ACCT_FINGERPRINT_KEY_V1';
 Deno.env.set(ENV_KEY_NAME, 'test-key-not-a-real-secret');
+
+// ---------- retryOnError ----------
+
+Deno.test('retryOnError: succeeds on the first attempt, no retries needed', async () => {
+  let calls = 0;
+  const result = await retryOnError(async () => {
+    calls++;
+    return null; // falsy result = success
+  }, [0, 250, 750]);
+  assertEquals(result, null);
+  assertEquals(calls, 1);
+});
+
+Deno.test('retryOnError: recovers after one transient failure', async () => {
+  let calls = 0;
+  const result = await retryOnError(async () => {
+    calls++;
+    if (calls === 1) return 'transient failure';
+    return null;
+  }, [0, 0, 0]);
+  assertEquals(result, null);
+  assertEquals(calls, 2);
+});
+
+Deno.test('retryOnError: exhausts every attempt and returns the LAST error', async () => {
+  let calls = 0;
+  const result = await retryOnError(async () => {
+    calls++;
+    return `failure ${calls}`;
+  }, [0, 0, 0]);
+  assertEquals(result, 'failure 3');
+  assertEquals(calls, 3);
+});
 
 // ---------- strikeSubscriptionErrorMarker ----------
 
