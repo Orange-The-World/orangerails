@@ -1,0 +1,58 @@
+name: ORBI v1-rate authenticated acceptance
+
+# The live probe is manual-only. Pull requests run the offline contract tests,
+# but they cannot enter the protected environment or receive its secret.
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/orbi-v1-rate-acceptance.yml"
+      - "scripts/ci/orbi-v1-rate-acceptance.mjs"
+      - "scripts/ci/orbi-v1-rate-acceptance.test.mjs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: orbi-v1-rate-acceptance-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  self-test:
+    name: Acceptance broker contract tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Test fail-closed and redaction behavior
+        run: node --test scripts/ci/orbi-v1-rate-acceptance.test.mjs
+
+  probe:
+    name: Protected authenticated BTC fiat acceptance
+    if: github.event_name == 'workflow_dispatch'
+    needs: self-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: supabase-prod
+    env:
+      ORBI_PROJECT_REF: ${{ vars.SUPABASE_PROJECT_ID_ORBI_PROD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Probe authenticated v1-rate responses
+        env:
+          ORBI_API_KEY: ${{ secrets.ORBI_API_KEY }}
+        run: node scripts/ci/orbi-v1-rate-acceptance.mjs
