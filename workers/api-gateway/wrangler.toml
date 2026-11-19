@@ -34,4 +34,4 @@ workers_dev = true
 
 [env.production.vars]
 OR_SUPABASE_URL = "https://db.orangerails.com"
-ORBI_FUNCTIONS_BASE_URL = "https://sqcventmypowhbaceufy.supabase.co"
+ORBI_FUNCTIONS_BASE_URL = "https://orbi.orangerails.com"
