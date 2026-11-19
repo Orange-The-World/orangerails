@@ -1348,7 +1348,10 @@ Deno.serve(wrapSentryHandler(async (req: Request) => {
             credentials,
             subaccountId: subaccountId as string,
             walletsByFingerprintHex,
-            webhookBaseUrl: `${supabaseUrl}/functions/v1/or-strike-webhook`,
+            // Strike must reach this from the internet. On self-hosted Supabase
+            // SUPABASE_URL is the internal gateway (http://kong:8000), so prefer
+            // SUPABASE_PUBLIC_URL when set; cloud leaves it unset (OR-T2813).
+            webhookBaseUrl: `${(Deno.env.get('SUPABASE_PUBLIC_URL') || supabaseUrl).replace(/\/+$/, '')}/functions/v1/or-strike-webhook`,
           });
           // Dedupe + attribution merge. DO NOT REMOVE, DO NOT INLINE BACK TO A
           // CONCAT. See mergeStrikeTransactions at the bottom of this file for
