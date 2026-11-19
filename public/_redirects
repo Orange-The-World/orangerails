@@ -12,11 +12,11 @@
 # keep routing visitors through this redirect even after docs.* has
 # its own dedicated deployment. 302 keeps the redirect transitional.
 
-# Probe rule: if /redir-probe-2026 returns 302 to /docs/quickstart, the
+# Probe rule: if /redir-probe-2026 returns 302 to /docs, the
 # parser is reading this file. If it returns 200 (SPA fallback), the
 # file is not being parsed at all and the docs.* rules below would
 # never fire either.
-/redir-probe-2026 /docs/quickstart 302
+/redir-probe-2026 /docs 302
 
 # Domain-prefix form. This matches for any visitor on the docs.* host
 # even though that host is attached to this same orangerails-prod
@@ -30,6 +30,10 @@
 # that can never match but looks load-bearing misleads the next reader.
 https://docs.orangerails.com/* https://connect.orangerails.com/docs/:splat 302
 
+# Requests under /docs/ are handled first by functions/docs/[[path]].ts, which answers 404 for
+# any docs path the router does not serve. This file cannot do that: Pages only accepts 200 and
+# 3xx statuses here.
+#
 # SPA deep-link fallback. MUST be the last rule so the specific rules
 # above match first. Cloudflare Pages serves any real static asset
 # (JS/CSS/images, index.html) before consulting _redirects, so this
