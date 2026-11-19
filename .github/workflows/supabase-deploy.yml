@@ -321,8 +321,12 @@ jobs:
     # the deploy. Do not loosen a clause to '!= failure': that lets a skipped gate
     # through. scripts/validate-workflows.py refuses this job if a need is missing
     # from here, so adding a need to this job means adding its clause too.
+    # OR-T2813: skip the edge-function deploy on prod. The prod Supabase project
+    # (lcdicqalreskibdfxkzb) is replaced by the Magnus tunnel at db.orangerails.com.
+    # Remove this condition once the cloud project is confirmed cancelled.
     if: >-
       ${{ !cancelled()
+      && github.ref_name != 'prod'
       && needs.target.result == 'success'
       && needs.check-pending-migrations.result == 'success'
       && needs.check-rls-policy-baseline.result == 'success'
