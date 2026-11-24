@@ -1,0 +1,40 @@
+name: ORBI prod replacement detector
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 06:00 UTC daily
+  workflow_dispatch: {}    # manual trigger for the two-consecutive-runs proof
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install psycopg2
+        run: pip install psycopg2-binary
+
+      - name: Run detector
+        id: detect
+        env:
+          ORANGERAILS_PROD_DB_URL: ${{ secrets.ORANGERAILS_PROD_DB_URL }}
+        run: python orbi/scripts/orbi-prod-replacement-detector.py
+        continue-on-error: true
+
+      - name: Post Zulip alarm on non-zero exit
+        if: steps.detect.outcome != 'success'
+        env:
+          ZULIP_BOT_EMAIL: sre-bot@a2a.orangerails.com
+          ZULIP_BOT_API_KEY: ${{ secrets.ZULIP_SRE_BOT_API_KEY }}
+        run: |
+          curl -s -X POST "https://waggle.orangerails.com/api/v1/messages" \
+            -u "$ZULIP_BOT_EMAIL:$ZULIP_BOT_API_KEY" \
+            -d type=stream \
+            -d "to=or-connectors" \
+            -d "topic=ORBI prod detector alarm (OR-T2710)" \
+            -d "content=:warning: **ORBI data detected in orangerails-prod** - detector exited non-zero. Check the Actions run for details. Ticket: OR-T2710"
