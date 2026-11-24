@@ -24,7 +24,6 @@ jobs:
         env:
           ORANGERAILS_PROD_DB_URL: ${{ secrets.ORANGERAILS_PROD_DB_URL }}
         run: python orbi/scripts/orbi-prod-replacement-detector.py
-        continue-on-error: true
 
       - name: Post Zulip alarm on non-zero exit
         if: steps.detect.outcome != 'success'
@@ -32,9 +31,20 @@ jobs:
           ZULIP_BOT_EMAIL: sre-bot@a2a.orangerails.com
           ZULIP_BOT_API_KEY: ${{ secrets.ZULIP_SRE_BOT_API_KEY }}
         run: |
-          curl -s -X POST "https://waggle.orangerails.com/api/v1/messages" \
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://waggle.orangerails.com/api/v1/messages" \
             -u "$ZULIP_BOT_EMAIL:$ZULIP_BOT_API_KEY" \
             -d type=stream \
             -d "to=or-connectors" \
             -d "topic=ORBI prod detector alarm (OR-T2710)" \
-            -d "content=:warning: **ORBI data detected in orangerails-prod** - detector exited non-zero. Check the Actions run for details. Ticket: OR-T2710"
+            -d "content=:warning: **ORBI data detected in orangerails-prod** - detector exited non-zero. Check the Actions run for details. Ticket: OR-T2710")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          echo "Zulip response: $BODY (HTTP $HTTP_CODE)"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Zulip post failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+          if ! echo "$BODY" | grep -q '"result":"success"'; then
+            echo "ERROR: Zulip API returned error"
+            exit 1
+          fi
