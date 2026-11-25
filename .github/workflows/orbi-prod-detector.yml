@@ -1,0 +1,60 @@
+name: ORBI prod replacement detector
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 06:00 UTC daily
+  workflow_dispatch: {}    # manual trigger for the two-consecutive-runs proof
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install psycopg2
+        run: pip install psycopg2-binary
+
+      - name: Run detector
+        id: detect
+        env:
+          ORANGERAILS_PROD_DB_URL: ${{ secrets.ORANGERAILS_PROD_DB_URL }}
+        run: |
+          rc=0
+          python orbi/scripts/orbi-prod-replacement-detector.py || rc=$?
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Post Zulip alarm on non-zero exit
+        if: always() && steps.detect.outcome != 'success'
+        env:
+          ZULIP_BOT_EMAIL: sre-bot@a2a.orangerails.com
+          ZULIP_BOT_API_KEY: ${{ secrets.ZULIP_SRE_BOT_API_KEY }}
+        run: |
+          RC="${{ steps.detect.outputs.rc }}"
+          if [ "$RC" = "1" ]; then
+            CONTENT=":warning: **ORBI data present in orangerails-prod** (exit 1) - ORBI replacement data detected in prod. Check the Actions run for details. Ticket: OR-T2710"
+          else
+            CONTENT=":warning: **ORBI prod detector could not complete** (exit ${RC:-unknown}) - check failed or was skipped. Check the Actions run for details. Ticket: OR-T2710"
+          fi
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "https://waggle.orangerails.com/api/v1/messages" \
+            -u "$ZULIP_BOT_EMAIL:$ZULIP_BOT_API_KEY" \
+            -d type=stream \
+            -d "to=or-connectors" \
+            -d "topic=ORBI prod detector alarm (OR-T2710)" \
+            --data-urlencode "content=$CONTENT")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | head -n -1)
+          echo "Zulip response: $BODY (HTTP $HTTP_CODE)"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Zulip post failed with HTTP $HTTP_CODE"
+            exit 1
+          fi
+          if ! echo "$BODY" | grep -q '"result":"success"'; then
+            echo "ERROR: Zulip API returned error"
+            exit 1
+          fi
