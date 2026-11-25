@@ -569,7 +569,7 @@ jobs:
           # what makes that visible in the log without a rerun.
           printf '%s\n' "${TEST_FILES[@]}" | sed 's/^/  collected: /'
           echo "Found ${FILE_COUNT} test file(s) (baseline: ${DENO_TEST_FILE_BASELINE})"
-          deno test --no-check --allow-all --import-map supabase/functions/import_map.json supabase/functions/
+          deno test --no-check --allow-all --node-modules-dir=auto --import-map supabase/functions/import_map.json supabase/functions/
 
   scan-range-sql:
     name: SQL tests (record_stealth_scan_range merge)
